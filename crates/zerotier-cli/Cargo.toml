@@ -1,0 +1,22 @@
+[package]
+name = "zerotier-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ManyTier CLI -- ZeroTier-compatible command-line interface"
+
+[[bin]]
+name = "manytier"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["env"] }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+zerotier-crypto = { workspace = true }
+zerotier-service = { path = "../zerotier-service" }
+getrandom = { version = "0.2" }
+rand_core = { workspace = true }

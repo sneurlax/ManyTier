@@ -1,0 +1,37 @@
+[package]
+name = "zerotier-node"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "ZeroTier node engine with platform-abstracted I/O traits"
+
+[features]
+default = ["native"]
+native = ["dep:tokio", "dep:tun2", "dep:socket2", "dep:serde_json"]
+wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
+wasi = []
+
+[dependencies]
+zerotier-crypto = { workspace = true }
+zerotier-protocol = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+rand_core = { workspace = true }
+hashbrown = { workspace = true }
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }
+
+# Native-only (optional)
+tokio = { workspace = true, optional = true }
+tun2 = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+# WASM browser-only (optional)
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+

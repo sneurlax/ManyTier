@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "tests/shadow/shadow-node"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.77.2"
+license = "MIT"
+
+[workspace.dependencies]
+# Crypto: all no_std, WASM compatible
+salsa20 = { version = "0.10.2", default-features = false }
+poly1305 = { version = "0.8.0", default-features = false }
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets"] }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["alloc"] }
+curve25519-dalek = { version = "4.1.2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+zeroize = { version = "1.7", default-features = false, features = ["derive"] }
+cipher = { version = "0.4", default-features = false }
+universal-hash = { version = "0.5", default-features = false }
+
+# Protocol parsing: no_std
+zerocopy = { version = "0.7", default-features = false, features = ["derive"] }
+hashbrown = { version = "0.14", default-features = false }
+
+# Error handling
+thiserror = "1.0"
+
+# Logging: no_std compatible
+tracing = { version = "0.1", default-features = false }
+
+# Serialization: WASM compatible
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+
+# Native-only deps (behind feature flag)
+tokio = { version = "1.37", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
+tun2 = { version = "1.2", features = ["async"] }
+socket2 = "0.5"
+getrandom = { version = "0.2", default-features = false }
+
+# CLI-only deps
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+
+# WASM browser target
+wasm-bindgen = "0.2.92"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+
+# Storage backends
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# HTTP API (native-only)
+axum = "0.7"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+
+# Logging subscribers (native-only)
+tracing-subscriber = { version = "0.3", features = ["json", "fmt"] }
+serde_json = "1.0"
+
+# Internal workspace crates
+zerotier-service = { path = "crates/zerotier-service" }
+
+zerotier-crypto = { path = "crates/zerotier-crypto" }
+zerotier-protocol = { path = "crates/zerotier-protocol" }
+zerotier-node = { path = "crates/zerotier-node" }
