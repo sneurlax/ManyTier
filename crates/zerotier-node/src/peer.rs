@@ -1,0 +1,309 @@
+/// Peer state machine .
+///
+/// A Peer tracks the identity, session state, and network paths for a remote
+/// ZeroTier node. Session establishment uses X25519 key agreement to derive
+/// a shared secret for packet encryption.
+
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::net::SocketAddr;
+use zerotier_crypto::identity::Identity;
+use zerotier_protocol::{ZT_PATH_HELLO_RATE_LIMIT, ZT_PEER_ACTIVITY_TIMEOUT, ZT_PEER_PING_PERIOD};
+
+use crate::path::Path;
+
+/// State machine for a peer's session lifecycle.
+#[derive(Debug)]
+pub enum PeerState {
+    /// Known identity but no session yet.
+    Unknown,
+    /// HELLO sent, awaiting OK(HELLO).
+    HelloSent { sent_at: u64, packet_id: u64 },
+    /// Active session with shared secret.
+    Active {
+        shared_secret: [u8; 32],
+        latency_ms: u32,
+        last_receive: u64,
+        last_send: u64,
+    },
+    /// Timed out (no packets for ZT_PEER_ACTIVITY_TIMEOUT).
+    Stale { last_active: u64 },
+}
+
+/// A remote ZeroTier peer.
+#[derive(Debug)]
+pub struct Peer {
+    pub identity: Identity,
+    pub state: PeerState,
+    pub paths: Vec<Path>,
+    pub is_root: bool,
+}
+
+impl Peer {
+    /// Create a new peer with the given identity.
+    pub fn new(identity: Identity, is_root: bool) -> Self {
+        Peer {
+            identity,
+            state: PeerState::Unknown,
+            paths: Vec::new(),
+            is_root,
+        }
+    }
+
+    /// Derive shared secret via X25519 key agreement and transition to Active.
+    pub fn establish_session(
+        &mut self,
+        our_secret: &x25519_dalek::StaticSecret,
+        latency_ms: u32,
+        now_ms: u64,
+    ) {
+        let their_dh_pubkey = x25519_dalek::PublicKey::from(self.identity.public_key.dh);
+        let shared_secret =
+            zerotier_crypto::key_agreement::key_agree(our_secret, &their_dh_pubkey);
+        self.state = PeerState::Active {
+            shared_secret,
+            latency_ms,
+            last_receive: now_ms,
+            last_send: now_ms,
+        };
+    }
+
+    /// Get the best path for sending (prefer direct, lowest latency).
+    /// Uses quality_score which combines latency, relay penalty, and age.
+    pub fn best_path(&self, now_ms: u64) -> Option<&Path> {
+        self.paths
+            .iter()
+            .filter(|p| p.is_alive(now_ms))
+            .min_by_key(|p| p.quality_score(now_ms))
+    }
+
+    /// Add or update a path to this peer.
+    pub fn add_path(&mut self, addr: SocketAddr, is_direct: bool, now_ms: u64) {
+        if let Some(existing) = self.paths.iter_mut().find(|p| p.address == addr) {
+            existing.received(now_ms);
+            existing.is_direct = is_direct;
+        } else {
+            let mut path = Path::new(addr, now_ms);
+            path.is_direct = is_direct;
+            self.paths.push(path);
+        }
+    }
+
+    /// Check if peer needs a ping (ping every ZT_PEER_PING_PERIOD).
+    pub fn needs_ping(&self, now_ms: u64) -> bool {
+        match &self.state {
+            PeerState::Active { last_send, .. } => {
+                now_ms.saturating_sub(*last_send) >= ZT_PEER_PING_PERIOD
+            }
+            PeerState::HelloSent { sent_at, .. } => {
+                // Retry HELLO every ZT_PATH_HELLO_RATE_LIMIT (1s)
+                now_ms.saturating_sub(*sent_at) >= ZT_PATH_HELLO_RATE_LIMIT
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if peer is stale (no activity for ZT_PEER_ACTIVITY_TIMEOUT).
+    pub fn is_stale(&self, now_ms: u64) -> bool {
+        match &self.state {
+            PeerState::Active { last_receive, .. } => {
+                now_ms.saturating_sub(*last_receive) >= ZT_PEER_ACTIVITY_TIMEOUT
+            }
+            PeerState::HelloSent { sent_at, .. } => {
+                now_ms.saturating_sub(*sent_at) >= ZT_PEER_ACTIVITY_TIMEOUT
+            }
+            PeerState::Stale { .. } => true,
+            PeerState::Unknown => false,
+        }
+    }
+
+    /// Get shared secret if session is active.
+    pub fn shared_secret(&self) -> Option<&[u8; 32]> {
+        match &self.state {
+            PeerState::Active { shared_secret, .. } => Some(shared_secret),
+            _ => None,
+        }
+    }
+
+    /// Promote a relay path to direct when we receive a direct packet.
+    /// Relay-first, promote on direct packet arrival.
+    pub fn promote_path(&mut self, addr: SocketAddr, now_ms: u64) {
+        if let Some(path) = self.paths.iter_mut().find(|p| p.address == addr) {
+            path.is_direct = true;
+            path.received(now_ms);
+        } else {
+            // New direct path discovered
+            self.add_path(addr, true, now_ms);
+        }
+    }
+
+    /// Mark peer as stale, preserving identity for future reconnection.
+    pub fn mark_stale(&mut self, _now_ms: u64) {
+        if let PeerState::Active { last_receive, .. } = &self.state {
+            self.state = PeerState::Stale {
+                last_active: *last_receive,
+            };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zerotier_crypto::identity::{Address, PublicKey};
+
+    fn stub_peer() -> Peer {
+        let address = Address::new([0xa0, 0xb1, 0xc2, 0xd3, 0xe4]).unwrap();
+        let pk = PublicKey::from_bytes(&[0x42u8; 64]).unwrap();
+        let identity = Identity {
+            address,
+            public_key: pk,
+            secret: None,
+        };
+        Peer::new(identity, false)
+    }
+
+    fn test_addr() -> SocketAddr {
+        "192.168.1.1:9993".parse().unwrap()
+    }
+
+    #[test]
+    fn new_peer_is_unknown() {
+        let peer = stub_peer();
+        assert!(matches!(peer.state, PeerState::Unknown));
+        assert!(peer.paths.is_empty());
+        assert!(!peer.is_root);
+    }
+
+    #[test]
+    fn add_path_creates_new() {
+        let mut peer = stub_peer();
+        peer.add_path(test_addr(), true, 1000);
+        assert_eq!(peer.paths.len(), 1);
+        assert!(peer.paths[0].is_direct);
+    }
+
+    #[test]
+    fn add_path_updates_existing() {
+        let mut peer = stub_peer();
+        peer.add_path(test_addr(), false, 1000);
+        peer.add_path(test_addr(), true, 2000);
+        assert_eq!(peer.paths.len(), 1);
+        assert!(peer.paths[0].is_direct);
+        assert_eq!(peer.paths[0].last_receive, 2000);
+    }
+
+    #[test]
+    fn best_path_prefers_direct() {
+        let mut peer = stub_peer();
+        let relay_addr: SocketAddr = "10.0.0.1:9993".parse().unwrap();
+        let direct_addr: SocketAddr = "10.0.0.2:9993".parse().unwrap();
+        peer.add_path(relay_addr, false, 1000);
+        peer.add_path(direct_addr, true, 1000);
+        let best = peer.best_path(1000).unwrap();
+        assert_eq!(best.address, direct_addr);
+    }
+
+    #[test]
+    fn best_path_returns_none_when_expired() {
+        let mut peer = stub_peer();
+        peer.add_path(test_addr(), true, 1000);
+        // Far in the future -- path expired
+        assert!(peer.best_path(1_000_000).is_none());
+    }
+
+    #[test]
+    fn shared_secret_none_when_unknown() {
+        let peer = stub_peer();
+        assert!(peer.shared_secret().is_none());
+    }
+
+    #[test]
+    fn needs_ping_when_active_and_overdue() {
+        let mut peer = stub_peer();
+        peer.state = PeerState::Active {
+            shared_secret: [0u8; 32],
+            latency_ms: 10,
+            last_receive: 1000,
+            last_send: 1000,
+        };
+        assert!(!peer.needs_ping(1000 + ZT_PEER_PING_PERIOD - 1));
+        assert!(peer.needs_ping(1000 + ZT_PEER_PING_PERIOD));
+    }
+
+    #[test]
+    fn is_stale_when_no_recent_activity() {
+        let mut peer = stub_peer();
+        peer.state = PeerState::Active {
+            shared_secret: [0u8; 32],
+            latency_ms: 10,
+            last_receive: 1000,
+            last_send: 1000,
+        };
+        assert!(!peer.is_stale(1000 + ZT_PEER_ACTIVITY_TIMEOUT - 1));
+        assert!(peer.is_stale(1000 + ZT_PEER_ACTIVITY_TIMEOUT));
+    }
+
+    #[test]
+    fn promote_path_relay_to_direct() {
+        let mut peer = stub_peer();
+        let addr: SocketAddr = "10.0.0.1:9993".parse().unwrap();
+        peer.add_path(addr, false, 1000); // relay
+        assert!(!peer.paths[0].is_direct);
+        peer.promote_path(addr, 2000);
+        assert!(peer.paths[0].is_direct);
+        assert_eq!(peer.paths[0].last_receive, 2000);
+    }
+
+    #[test]
+    fn promote_path_adds_new_if_unknown() {
+        let mut peer = stub_peer();
+        let addr: SocketAddr = "10.0.0.5:9993".parse().unwrap();
+        assert!(peer.paths.is_empty());
+        peer.promote_path(addr, 3000);
+        assert_eq!(peer.paths.len(), 1);
+        assert!(peer.paths[0].is_direct);
+    }
+
+    #[test]
+    fn mark_stale_transitions_active_to_stale() {
+        let mut peer = stub_peer();
+        peer.state = PeerState::Active {
+            shared_secret: [0u8; 32],
+            latency_ms: 10,
+            last_receive: 5000,
+            last_send: 5000,
+        };
+        peer.mark_stale(600_000);
+        match peer.state {
+            PeerState::Stale { last_active } => assert_eq!(last_active, 5000),
+            _ => panic!("expected Stale state"),
+        }
+    }
+
+    #[test]
+    fn mark_stale_noop_on_unknown() {
+        let mut peer = stub_peer();
+        peer.mark_stale(1000);
+        assert!(matches!(peer.state, PeerState::Unknown));
+    }
+
+    #[test]
+    fn best_path_uses_quality_score() {
+        let mut peer = stub_peer();
+        // Add a relay path with low latency
+        let relay_addr: SocketAddr = "10.0.0.1:9993".parse().unwrap();
+        peer.add_path(relay_addr, false, 1000);
+        peer.paths[0].latency_ms = 5;
+
+        // Add a direct path with higher latency
+        let direct_addr: SocketAddr = "10.0.0.2:9993".parse().unwrap();
+        peer.add_path(direct_addr, true, 1000);
+        peer.paths[1].latency_ms = 50;
+
+        // Direct path should win due to relay penalty (10000)
+        let best = peer.best_path(1000).unwrap();
+        assert_eq!(best.address, direct_addr);
+    }
+}
