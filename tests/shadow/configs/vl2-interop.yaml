@@ -1,0 +1,138 @@
+# Shadow VL2 interop test: ManyTier nodes + official zerotier-one binary.
+#
+# Topology: 4 nodes (1 root + 1 dynamic controller + 1 ManyTier dynamic-peer + 1 official zerotier-one)
+# on a fully connected graph.
+#
+# - Root provides VL1 peer discovery for all nodes
+# - Controller uses dynamic Controller engine to handle NETWORK_CONFIG_REQUEST
+# - ManyTier peer joins dynamically (no static config), receives config from controller
+# - zerotier-one joins by requesting config from controller
+# - Bidirectional frame exchange confirmed via logs
+#
+# Duration: 90s to allow for dynamic config exchange (controller startup + config request + response + VL2 exchange).
+# This test requires: zerotier-one binary in tests/fixtures/ (run download-zerotier.sh first)
+#
+# NOTE: __NETWORK_ID__ is replaced by the test harness with the actual 16-char hex network ID.
+
+general:
+  stop_time: 90s
+  model_unblocked_syscall_latency: true
+
+network:
+  graph:
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+        ]
+        node [
+          id 1
+        ]
+        node [
+          id 2
+        ]
+        node [
+          id 3
+        ]
+        edge [
+          source 0
+          target 0
+          latency "1 ns"
+        ]
+        edge [
+          source 1
+          target 1
+          latency "1 ns"
+        ]
+        edge [
+          source 2
+          target 2
+          latency "1 ns"
+        ]
+        edge [
+          source 3
+          target 3
+          latency "1 ns"
+        ]
+        edge [
+          source 0
+          target 1
+          latency "5 ms"
+        ]
+        edge [
+          source 0
+          target 2
+          latency "5 ms"
+        ]
+        edge [
+          source 0
+          target 3
+          latency "5 ms"
+        ]
+        edge [
+          source 1
+          target 2
+          latency "5 ms"
+        ]
+        edge [
+          source 1
+          target 3
+          latency "5 ms"
+        ]
+        edge [
+          source 2
+          target 3
+          latency "5 ms"
+        ]
+      ]
+
+hosts:
+  root:
+    network_node_id: 0
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role root --identity shadow-data/root.identity --port 9993"
+      start_time: 1s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  controller:
+    network_node_id: 1
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role controller --identity shadow-data/controller.identity --planet shadow-data/planet.bin --port 9993 --peer-count 2"
+      start_time: 2s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  manytier-peer:
+    network_node_id: 2
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role dynamic-peer --identity shadow-data/mt-peer.identity --planet shadow-data/planet.bin --port 9993 --network-id __NETWORK_ID__ --peer-ip 10.147.20.3"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  zt-official:
+    network_node_id: 3
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../tests/fixtures/zerotier-one
+      args: "-p9993 shadow-data/zt-data"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"

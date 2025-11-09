@@ -4,3 +4,7 @@
 .DS_Store
 identity.secret
 identity.public
+tests/fixtures/zerotier-one
+tests/shadow/shadow.data/
+tests/shadow/shadow-data/
+tests/shadow/.shadow-config-abs.yaml

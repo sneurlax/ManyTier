@@ -1,0 +1,98 @@
+# Shadow VL2 ping test: two vl2-peer nodes exchange ICMP echo via VL2 EXT_FRAME.
+#
+# Topology: 3 nodes (1 root + 2 vl2-peers) on a fully connected graph.
+# - Root provides VL1 peer discovery
+# - peer1 and peer2 join the same virtual network with pre-signed COMs
+# - Each peer sends ICMP echo request to the other via process_outbound_frame
+# - Echo replies sent back via the VL2 path
+# - Both peers log "vl2_ping_success" when they receive an echo reply
+#
+# Duration: 30s (enough for VL1 bootstrap + VL2 ping exchange)
+
+general:
+  stop_time: 30s
+  model_unblocked_syscall_latency: true
+
+network:
+  graph:
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+        ]
+        node [
+          id 1
+        ]
+        node [
+          id 2
+        ]
+        edge [
+          source 0
+          target 0
+          latency "1 ns"
+        ]
+        edge [
+          source 1
+          target 1
+          latency "1 ns"
+        ]
+        edge [
+          source 2
+          target 2
+          latency "1 ns"
+        ]
+        edge [
+          source 0
+          target 1
+          latency "5 ms"
+        ]
+        edge [
+          source 0
+          target 2
+          latency "5 ms"
+        ]
+        edge [
+          source 1
+          target 2
+          latency "5 ms"
+        ]
+      ]
+
+hosts:
+  root:
+    network_node_id: 0
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role root --identity shadow-data/root.identity --port 9993"
+      start_time: 1s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer1:
+    network_node_id: 1
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer1.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer1.json --peer-ip 10.147.20.2"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer2:
+    network_node_id: 2
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer2.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer2.json --peer-ip 10.147.20.1"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"

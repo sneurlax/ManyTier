@@ -1,0 +1,169 @@
+# Shadow planet simulation: 12-node topology (1 root + 1 controller + 10 peers).
+#
+# Topology:
+# - Root provides VL1 peer discovery for all nodes
+# - Controller uses the Controller engine (dynamic role) to serve NETWORK_CONFIG_REQUEST
+# - 10 peers join the virtual network with pre-generated static configs
+# - Peer pairs exchange ICMP echo (peer1<->peer2, peer3<->peer4, etc.)
+#
+# Shadow assigns IPs alphabetically by hostname:
+#   controller=11.0.0.1, peer1=11.0.0.2, peer10=11.0.0.3, peer2=11.0.0.4,
+#   peer3=11.0.0.5, peer4=11.0.0.6, peer5=11.0.0.7, peer6=11.0.0.8,
+#   peer7=11.0.0.9, peer8=11.0.0.10, peer9=11.0.0.11, root=11.0.0.12
+#
+# Duration: 120s (enough for VL1 bootstrap + 10 peer config exchanges + VL2 ping)
+
+general:
+  stop_time: 120s
+  model_unblocked_syscall_latency: true
+
+network:
+  graph:
+    type: gml
+    file:
+      path: planet-sim.gml
+
+hosts:
+  root:
+    network_node_id: 0
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role root --identity shadow-data/root.identity --port 9993"
+      start_time: 0s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  controller:
+    network_node_id: 1
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role controller --identity shadow-data/controller.identity --planet shadow-data/planet.bin --port 9993 --peer-count 10"
+      start_time: 1s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer1:
+    network_node_id: 2
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer1.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer1.json --peer-ip 192.168.200.2"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer2:
+    network_node_id: 3
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer2.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer2.json --peer-ip 192.168.200.1"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer3:
+    network_node_id: 4
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer3.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer3.json --peer-ip 192.168.200.4"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer4:
+    network_node_id: 5
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer4.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer4.json --peer-ip 192.168.200.3"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer5:
+    network_node_id: 6
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer5.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer5.json --peer-ip 192.168.200.6"
+      start_time: 4s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer6:
+    network_node_id: 7
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer6.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer6.json --peer-ip 192.168.200.5"
+      start_time: 4s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer7:
+    network_node_id: 8
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer7.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer7.json --peer-ip 192.168.200.8"
+      start_time: 4s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer8:
+    network_node_id: 9
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer8.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer8.json --peer-ip 192.168.200.7"
+      start_time: 4s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer9:
+    network_node_id: 10
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer9.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer9.json --peer-ip 192.168.200.10"
+      start_time: 5s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer10:
+    network_node_id: 11
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "50 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer10.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer10.json --peer-ip 192.168.200.9"
+      start_time: 5s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"

@@ -1,0 +1,87 @@
+general:
+  stop_time: 120s
+  model_unblocked_syscall_latency: true
+
+network:
+  graph:
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+        ]
+        node [
+          id 1
+        ]
+        node [
+          id 2
+        ]
+        edge [
+          source 0
+          target 0
+          latency "1 ns"
+        ]
+        edge [
+          source 1
+          target 1
+          latency "1 ns"
+        ]
+        edge [
+          source 2
+          target 2
+          latency "1 ns"
+        ]
+        edge [
+          source 0
+          target 1
+          latency "20 ms"
+        ]
+        edge [
+          source 0
+          target 2
+          latency "30 ms"
+        ]
+        edge [
+          source 1
+          target 2
+          latency "50 ms"
+        ]
+      ]
+
+hosts:
+  root:
+    network_node_id: 0
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role root --identity shadow-data/root.identity --port 9993"
+      start_time: 1s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer1:
+    network_node_id: 1
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "10 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role peer --identity shadow-data/peer1.identity --root-addr 11.0.0.3:9993 --planet shadow-data/planet.bin --port 9993"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer2:
+    network_node_id: 2
+    bandwidth_down: "50 Mbit"
+    bandwidth_up: "10 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role peer --identity shadow-data/peer2.identity --root-addr 11.0.0.3:9993 --planet shadow-data/planet.bin --port 9993"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
