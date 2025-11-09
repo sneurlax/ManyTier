@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all
+
+  wasm-check:
+    name: WASM Compilation Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Check zerotier-crypto (wasm32-unknown-unknown)
+        run: cargo check --target wasm32-unknown-unknown -p zerotier-crypto --no-default-features
+      - name: Check zerotier-protocol (wasm32-unknown-unknown)
+        run: cargo check --target wasm32-unknown-unknown -p zerotier-protocol --no-default-features
+      - name: Check zerotier-node (wasm32-unknown-unknown)
+        run: cargo check --target wasm32-unknown-unknown -p zerotier-node --no-default-features
+
+  wasi-check:
+    name: WASI Compilation Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - name: Check zerotier-crypto (wasm32-wasip1)
+        run: cargo check --target wasm32-wasip1 -p zerotier-crypto --no-default-features
+      - name: Check zerotier-protocol (wasm32-wasip1)
+        run: cargo check --target wasm32-wasip1 -p zerotier-protocol --no-default-features
+      - name: Check zerotier-node (wasm32-wasip1)
+        run: cargo check --target wasm32-wasip1 -p zerotier-node --no-default-features
