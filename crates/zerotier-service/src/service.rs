@@ -53,7 +53,8 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
     let planet_data = load_planet(&config.data_dir)?;
 
     // 4. Create Node (identity is moved into node)
-    let node = Node::new(identity, &planet_data)?;
+    let node = Node::new(identity, &planet_data)
+        .map_err(|e| anyhow::anyhow!("failed to create node: {e}"))?;
     let node = Arc::new(Mutex::new(node));
 
     // 5. Generate or load authtoken.secret
@@ -468,7 +469,7 @@ fn load_or_generate_auth_token(data_dir: &str) -> anyhow::Result<String> {
     } else {
         // Generate 24 random bytes, encode as 48-char hex
         let mut random_bytes = [0u8; 24];
-        getrandom::fill(&mut random_bytes)
+        getrandom::getrandom(&mut random_bytes)
             .map_err(|e| anyhow::anyhow!("failed to get random bytes: {:?}", e))?;
         let token: String = random_bytes
             .iter()
@@ -493,16 +494,23 @@ struct GetrandomRng;
 impl rand_core::RngCore for GetrandomRng {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
-        getrandom::fill(&mut buf).expect("getrandom failed");
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
         u32::from_le_bytes(buf)
     }
     fn next_u64(&mut self) -> u64 {
         let mut buf = [0u8; 8];
-        getrandom::fill(&mut buf).expect("getrandom failed");
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
         u64::from_le_bytes(buf)
     }
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::fill(dest).expect("getrandom failed");
+        getrandom::getrandom(dest).expect("getrandom failed");
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        getrandom::getrandom(dest).map_err(|_| {
+            rand_core::Error::from(
+                core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap(),
+            )
+        })
     }
 }
 

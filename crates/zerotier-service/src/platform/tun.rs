@@ -1,5 +1,8 @@
 use std::net::IpAddr;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+use tun2::AbstractDevice;
 use zerotier_node::traits::TunDevice;
 
 // ---------------------------------------------------------------------------
@@ -8,7 +11,7 @@ use zerotier_node::traits::TunDevice;
 
 #[cfg(target_os = "linux")]
 pub struct NativeTun {
-    device: tun2::AsyncDevice,
+    device: Mutex<tun2::AsyncDevice>,
     name: String,
     mtu: usize,
 }
@@ -18,29 +21,31 @@ impl TunDevice for NativeTun {
     type Error = std::io::Error;
 
     async fn create(name: &str, mtu: usize) -> Result<Self, Self::Error> {
-        let device = tun2::DeviceBuilder::new()
-            .name(name)
-            .mtu(mtu as u16)
-            .build_async()?;
+        let mut config = tun2::Configuration::default();
+        config.tun_name(name).mtu(mtu as u16).up();
+        let device = tun2::create_as_async(&config)?;
 
         // Retrieve the actual interface name (tun2 may adjust it)
         let actual_name = device
-            .name()
+            .as_ref()
+            .tun_name()
             .unwrap_or_else(|_| name.to_string());
 
         Ok(NativeTun {
-            device,
+            device: Mutex::new(device),
             name: actual_name,
             mtu,
         })
     }
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        self.device.recv(buf).await
+        let mut device = self.device.lock().await;
+        device.read(buf).await
     }
 
     async fn write(&self, data: &[u8]) -> Result<usize, Self::Error> {
-        self.device.send(data).await
+        let mut device = self.device.lock().await;
+        device.write(data).await
     }
 
     fn mtu(&self) -> usize {
@@ -52,11 +57,21 @@ impl TunDevice for NativeTun {
     }
 
     async fn set_ip(&self, addr: IpAddr, prefix_len: u8) -> Result<(), Self::Error> {
-        // Use tun2 APIs (not shell commands)
-        match addr {
-            IpAddr::V4(v4) => self.device.add_address_v4(v4, prefix_len),
-            IpAddr::V6(v6) => self.device.add_address_v6(v6, prefix_len),
+        let mut device = self.device.lock().await;
+        device.as_mut().set_address(addr)?;
+
+        if let IpAddr::V4(_) = addr {
+            let mask = if prefix_len == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix_len as u32)
+            };
+            device
+                .as_mut()
+                .set_netmask(IpAddr::V4(std::net::Ipv4Addr::from(mask)))?;
         }
+
+        Ok(())
     }
 
     async fn add_route(

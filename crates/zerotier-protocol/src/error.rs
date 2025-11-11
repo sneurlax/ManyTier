@@ -1,30 +1,40 @@
 use zerotier_crypto::error::CryptoError;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
-    #[error("packet too short: need {need} bytes, got {got}")]
     TooShort { need: usize, got: usize },
-
-    #[error("invalid packet")]
     InvalidPacket,
-
-    #[error("invalid fragment")]
     InvalidFragment,
-
-    #[error("invalid address")]
     InvalidAddress,
-
-    #[error("invalid or unknown verb: {0:#x}")]
     InvalidVerb(u8),
-
-    #[error("fragment reassembly timeout")]
     FragmentTimeout,
-
-    #[error("unsupported protocol version: {0}")]
     UnsupportedVersion(u8),
+    CryptoError(CryptoError),
+}
 
-    #[error("crypto error: {0}")]
-    CryptoError(#[from] CryptoError),
+impl core::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ProtocolError::TooShort { need, got } => {
+                write!(f, "packet too short: need {need} bytes, got {got}")
+            }
+            ProtocolError::InvalidPacket => f.write_str("invalid packet"),
+            ProtocolError::InvalidFragment => f.write_str("invalid fragment"),
+            ProtocolError::InvalidAddress => f.write_str("invalid address"),
+            ProtocolError::InvalidVerb(verb) => write!(f, "invalid or unknown verb: {verb:#x}"),
+            ProtocolError::FragmentTimeout => f.write_str("fragment reassembly timeout"),
+            ProtocolError::UnsupportedVersion(version) => {
+                write!(f, "unsupported protocol version: {version}")
+            }
+            ProtocolError::CryptoError(error) => write!(f, "crypto error: {error}"),
+        }
+    }
+}
+
+impl From<CryptoError> for ProtocolError {
+    fn from(value: CryptoError) -> Self {
+        ProtocolError::CryptoError(value)
+    }
 }
 
 #[cfg(test)]
@@ -62,7 +72,6 @@ mod tests {
 
     #[test]
     fn all_variants_exist() {
-        // Verify all variants can be constructed
         let _ = ProtocolError::TooShort { need: 0, got: 0 };
         let _ = ProtocolError::InvalidPacket;
         let _ = ProtocolError::InvalidFragment;

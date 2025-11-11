@@ -206,7 +206,7 @@ async fn update_network(
         // Create new network
         let ctrl = controller.lock().await;
         let mut random_bytes = [0u8; 4];
-        getrandom::fill(&mut random_bytes)
+        getrandom::getrandom(&mut random_bytes)
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
         let random_24 = u32::from_be_bytes(random_bytes) & 0x00FFFFFF;
         let now_ms = std::time::SystemTime::now()

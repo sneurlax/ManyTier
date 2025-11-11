@@ -41,6 +41,8 @@ pub struct StaticMemberConfig {
     pub ipv6: Option<String>,
     #[serde(default = "default_true")]
     pub authorized: bool,
+    #[serde(default)]
+    pub com: Option<StaticComConfig>,
 }
 
 fn default_true() -> bool {
@@ -149,13 +151,15 @@ impl NetworkMembership {
     /// Build a NetworkMembership from a static config.
     pub fn from_static_config(
         config: &StaticNetworkConfig,
-        _our_zt_address: &[u8; 5],
+        our_zt_address: &[u8; 5],
     ) -> Result<Self, ConfigError> {
         // Parse network ID from hex
         let network_id = u64::from_str_radix(&config.network_id, 16)
             .map_err(|_| ConfigError::InvalidHex(config.network_id.clone()))?;
 
         let mut members = Vec::with_capacity(config.members.len());
+        let mut our_com = None;
+        let mut peer_coms = Vec::new();
         for mc in &config.members {
             let zt_address = parse_zt_address(&mc.address)?;
             let mac = ethernet::derive_mac(&zt_address, network_id);
@@ -168,37 +172,20 @@ impl NetworkMembership {
                 ipv6,
                 authorized: mc.authorized,
             });
-        }
 
-        // Parse COM
-        let mut qualifiers = Vec::new();
-        for qc in &config.com.qualifiers {
-            let value = match &qc.value {
-                serde_json::Value::Number(n) => n.as_u64().unwrap_or(0),
-                serde_json::Value::String(s) => {
-                    u64::from_str_radix(s.as_str(), 16)
-                        .map_err(|_| ConfigError::InvalidHex(s.clone()))?
+            if let Some(member_com_cfg) = &mc.com {
+                let member_com = parse_static_com(member_com_cfg)?;
+                if &zt_address == our_zt_address {
+                    our_com = Some(member_com);
+                } else {
+                    peer_coms.push((zt_address, member_com));
                 }
-                _ => 0,
-            };
-            qualifiers.push(ComQualifier {
-                id: qc.id,
-                value,
-                max_delta: qc.max_delta,
-            });
+            }
         }
 
-        let signer_address = parse_zt_address(&config.com.signer_address)?;
-        let sig_bytes = parse_hex_bytes(&config.com.signature)?;
-        let mut signature = [0u8; 96];
-        let copy_len = sig_bytes.len().min(96);
-        signature[..copy_len].copy_from_slice(&sig_bytes[..copy_len]);
-
-        let our_com = Some(CertificateOfMembership {
-            qualifiers,
-            signer_address,
-            signature,
-        });
+        if our_com.is_none() {
+            our_com = Some(parse_static_com(&config.com)?);
+        }
 
         let routes = config
             .routes
@@ -212,12 +199,43 @@ impl NetworkMembership {
             network_id,
             members,
             our_com,
-            peer_coms: Vec::new(),
+            peer_coms,
             mtu: config.mtu,
             routes,
             last_config_request: 0,
         })
     }
+}
+
+fn parse_static_com(config: &StaticComConfig) -> Result<CertificateOfMembership, ConfigError> {
+    let mut qualifiers = Vec::new();
+    for qc in &config.qualifiers {
+        let value = match &qc.value {
+            serde_json::Value::Number(n) => n.as_u64().unwrap_or(0),
+            serde_json::Value::String(s) => {
+                u64::from_str_radix(s.as_str(), 16)
+                    .map_err(|_| ConfigError::InvalidHex(s.clone()))?
+            }
+            _ => 0,
+        };
+        qualifiers.push(ComQualifier {
+            id: qc.id,
+            value,
+            max_delta: qc.max_delta,
+        });
+    }
+
+    let signer_address = parse_zt_address(&config.signer_address)?;
+    let sig_bytes = parse_hex_bytes(&config.signature)?;
+    let mut signature = [0u8; 96];
+    let copy_len = sig_bytes.len().min(96);
+    signature[..copy_len].copy_from_slice(&sig_bytes[..copy_len]);
+
+    Ok(CertificateOfMembership {
+        qualifiers,
+        signer_address,
+        signature,
+    })
 }
 
 #[cfg(test)]
@@ -329,5 +347,77 @@ mod tests {
         assert_eq!(com.qualifiers[1].id, 1);
         assert_eq!(com.qualifiers[1].value, 0xff00000000abcdef);
         assert_eq!(com.signer_address, [0xa0, 0xb1, 0xc2, 0xd3, 0xe4]);
+    }
+
+    #[test]
+    fn from_static_config_uses_member_specific_coms() {
+        let config_json = br#"{
+            "networkId": "ff00000000abcdef",
+            "mtu": 2800,
+            "members": [
+                {
+                    "address": "a0b1c2d3e4",
+                    "ipv4": "10.147.20.1/24",
+                    "authorized": true,
+                    "com": {
+                        "qualifiers": [
+                            {"id": 0, "value": 1711500000000, "maxDelta": 360000},
+                            {"id": 1, "value": "ff00000000abcdef", "maxDelta": 0},
+                            {"id": 2, "value": "00a0b1c2d3e4", "maxDelta": 0}
+                        ],
+                        "signerAddress": "0102030405",
+                        "signature": "11"
+                    }
+                },
+                {
+                    "address": "f0e1d2c3b4",
+                    "ipv4": "10.147.20.2/24",
+                    "authorized": true,
+                    "com": {
+                        "qualifiers": [
+                            {"id": 0, "value": 1711500000000, "maxDelta": 360000},
+                            {"id": 1, "value": "ff00000000abcdef", "maxDelta": 0},
+                            {"id": 2, "value": "00f0e1d2c3b4", "maxDelta": 0}
+                        ],
+                        "signerAddress": "0102030405",
+                        "signature": "22"
+                    }
+                }
+            ],
+            "com": {
+                "qualifiers": [
+                    {"id": 0, "value": 1711500000000, "maxDelta": 360000},
+                    {"id": 1, "value": "ff00000000abcdef", "maxDelta": 0},
+                    {"id": 2, "value": "000000000000", "maxDelta": 0}
+                ],
+                "signerAddress": "ffffffffff",
+                "signature": "33"
+            },
+            "routes": []
+        }"#;
+
+        let config = load_from_json(config_json).unwrap();
+        let our_addr = [0xf0, 0xe1, 0xd2, 0xc3, 0xb4];
+        let membership = NetworkMembership::from_static_config(&config, &our_addr).unwrap();
+        let our_com = membership.our_com.expect("expected our member-specific COM");
+
+        let issued_to = our_com
+            .qualifiers
+            .iter()
+            .find(|q| q.id == 2)
+            .map(|q| q.value)
+            .unwrap();
+        assert_eq!(issued_to, 0x00f0e1d2c3b4);
+
+        assert_eq!(membership.peer_coms.len(), 1);
+        assert_eq!(membership.peer_coms[0].0, [0xa0, 0xb1, 0xc2, 0xd3, 0xe4]);
+        let peer_issued_to = membership.peer_coms[0]
+            .1
+            .qualifiers
+            .iter()
+            .find(|q| q.id == 2)
+            .map(|q| q.value)
+            .unwrap();
+        assert_eq!(peer_issued_to, 0x00a0b1c2d3e4);
     }
 }

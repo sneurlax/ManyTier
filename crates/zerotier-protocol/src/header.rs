@@ -18,7 +18,7 @@ pub struct PacketHeader {
 
 impl PacketHeader {
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        PacketHeader::ref_from_prefix(data).ok().map(|(hdr, _)| hdr)
+        PacketHeader::ref_from_prefix(data)
     }
 
     pub fn cipher_suite(&self) -> u8 {
@@ -68,7 +68,7 @@ pub struct FragmentHeader {
 
 impl FragmentHeader {
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
-        FragmentHeader::ref_from_prefix(data).ok().map(|(hdr, _)| hdr)
+        FragmentHeader::ref_from_prefix(data)
     }
 
     pub fn total_fragments(&self) -> u8 {

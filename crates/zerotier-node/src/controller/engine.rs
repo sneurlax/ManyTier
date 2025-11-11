@@ -22,16 +22,23 @@ use zerotier_protocol::verbs::network_config::{
 };
 
 /// Errors produced by the controller engine.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerError {
-    #[error("network not found")]
     NetworkNotFound,
-    #[error("member not authorized")]
     MemberNotAuthorized,
-    #[error("no available IP in pool")]
     NoAvailableIp,
-    #[error("storage error: {0}")]
     StorageError(String),
+}
+
+impl core::fmt::Display for ControllerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ControllerError::NetworkNotFound => f.write_str("network not found"),
+            ControllerError::MemberNotAuthorized => f.write_str("member not authorized"),
+            ControllerError::NoAvailableIp => f.write_str("no available IP in pool"),
+            ControllerError::StorageError(error) => write!(f, "storage error: {error}"),
+        }
+    }
 }
 
 /// The controller engine manages networks, members, and config requests.

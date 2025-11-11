@@ -87,10 +87,36 @@ impl NetworkMembership {
         peer_com: &CertificateOfMembership,
     ) -> bool {
         match &self.our_com {
-            Some(our) => com_agrees_with(our, peer_com),
+            Some(our) => peer_com_agrees_with(our, peer_com),
             None => false,
         }
     }
+}
+
+fn peer_com_agrees_with(
+    ours: &CertificateOfMembership,
+    theirs: &CertificateOfMembership,
+) -> bool {
+    for our_q in &ours.qualifiers {
+        // `issued_to` is peer-specific and must not be compared across members.
+        if our_q.id == 2 {
+            continue;
+        }
+        match theirs.qualifiers.iter().find(|oq| oq.id == our_q.id) {
+            None => return false,
+            Some(other_q) => {
+                let delta = if our_q.value > other_q.value {
+                    our_q.value - other_q.value
+                } else {
+                    other_q.value - our_q.value
+                };
+                if delta > our_q.max_delta {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Check if two COMs agree: all qualifiers in `ours` must have a matching
@@ -399,6 +425,22 @@ mod tests {
         let peer_com = make_com(vec![
             ComQualifier { id: 0, value: 1050, max_delta: 100 },
             ComQualifier { id: 1, value: 0xff, max_delta: 0 },
+        ]);
+        assert!(net.verify_peer_com(&[0x01; 5], &peer_com));
+    }
+
+    #[test]
+    fn verify_peer_com_ignores_issued_to_qualifier() {
+        let mut net = NetworkMembership::new(0xff00000000abcdef, 2800);
+        net.our_com = Some(make_com(vec![
+            ComQualifier { id: 0, value: 1000, max_delta: 100 },
+            ComQualifier { id: 1, value: 0xff00000000abcdef, max_delta: 0 },
+            ComQualifier { id: 2, value: 0x00a0b1c2d3e4, max_delta: 0 },
+        ]));
+        let peer_com = make_com(vec![
+            ComQualifier { id: 0, value: 1050, max_delta: 100 },
+            ComQualifier { id: 1, value: 0xff00000000abcdef, max_delta: 0 },
+            ComQualifier { id: 2, value: 0x00f0e1d2c3b4, max_delta: 0 },
         ]);
         assert!(net.verify_peer_com(&[0x01; 5], &peer_com));
     }
