@@ -85,12 +85,14 @@ async fn main() -> anyhow::Result<()> {
     // Load or generate identity
     let identity = if std::path::Path::new(&args.identity).exists() {
         let id_str = std::fs::read_to_string(&args.identity)?;
-        zerotier_crypto::identity::Identity::parse(id_str.trim())?
+        zerotier_crypto::identity::Identity::parse(id_str.trim())
+            .map_err(|e| anyhow::anyhow!("failed to parse identity: {e}"))?
     } else {
         // Use getrandom-backed RNG to avoid rand_core 0.6/0.9 version conflicts
         // (dalek crates pull rand_core 0.6 transitively)
         let mut rng = GetrandomRng;
-        let identity = zerotier_crypto::identity::Identity::generate(&mut rng)?;
+        let identity = zerotier_crypto::identity::Identity::generate(&mut rng)
+            .map_err(|e| anyhow::anyhow!("failed to generate identity: {e}"))?;
         // to_secret_string returns Option<String> -- unwrap since we just generated it
         std::fs::write(&args.identity, identity.to_secret_string().unwrap())?;
         identity
@@ -111,7 +113,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let our_zt_address = *identity.address.as_bytes();
-    let mut node = Node::new(identity, &planet_data)?;
+    let mut node = Node::new(identity, &planet_data)
+        .map_err(|e| anyhow::anyhow!("failed to create node: {e}"))?;
 
     // VL2 controller setup: join network and prepare to respond to NETWORK_CONFIG_REQUEST
     let controller_state = if args.role == "vl2-controller" {
@@ -1167,18 +1170,26 @@ struct GetrandomRng;
 impl rand_core::RngCore for GetrandomRng {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
-        getrandom::fill(&mut buf).expect("getrandom failed");
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
         u32::from_le_bytes(buf)
     }
 
     fn next_u64(&mut self) -> u64 {
         let mut buf = [0u8; 8];
-        getrandom::fill(&mut buf).expect("getrandom failed");
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
         u64::from_le_bytes(buf)
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::fill(dest).expect("getrandom failed");
+        getrandom::getrandom(dest).expect("getrandom failed");
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        getrandom::getrandom(dest).map_err(|_| {
+            rand_core::Error::from(
+                core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap(),
+            )
+        })
     }
 }
 
@@ -1215,7 +1226,8 @@ fn build_test_planet(
     let root = WorldRoot {
         identity: zerotier_crypto::identity::Identity::parse(
             &identity.to_public_string(),
-        )?,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to derive public identity: {e}"))?,
         endpoints: vec![endpoint],
     };
 
@@ -1230,7 +1242,9 @@ fn build_test_planet(
     };
 
     let mut buf = [0u8; 2048];
-    let n = world.serialize(&mut buf)?;
+    let n = world
+        .serialize(&mut buf)
+        .map_err(|e| anyhow::anyhow!("failed to serialize world: {e}"))?;
 
     Ok(buf[..n].to_vec())
 }

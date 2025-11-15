@@ -18,6 +18,10 @@ general:
   stop_time: 90s
   model_unblocked_syscall_latency: true
 
+host_option_defaults:
+  pcap_enabled: true
+  pcap_capture_size: "65535 B"
+
 network:
   graph:
     type: gml
@@ -131,7 +135,7 @@ hosts:
     bandwidth_up: "100 Mbit"
     processes:
     - path: ../../tests/fixtures/zerotier-one
-      args: "-p9993 shadow-data/zt-data"
+      args: "-U -p0 shadow-data/zt-data"
       start_time: 3s
       expected_final_state: running
       environment:

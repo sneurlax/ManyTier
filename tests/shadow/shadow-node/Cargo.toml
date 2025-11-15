@@ -22,3 +22,5 @@ rand_core = { workspace = true }
 anyhow = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }
+pcap-file = "2.0"
+etherparse = "0.15"

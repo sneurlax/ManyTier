@@ -2,6 +2,10 @@ general:
   stop_time: 300s
   model_unblocked_syscall_latency: true
 
+host_option_defaults:
+  pcap_enabled: true
+  pcap_capture_size: "65535 B"
+
 network:
   graph:
     type: gml

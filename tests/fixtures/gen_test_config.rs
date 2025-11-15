@@ -9,7 +9,6 @@
 /// - Qualifiers sorted by ID: 0 (timestamp), 1 (network_id), 2 (issued_to)
 /// - 96-byte ZeroTier compound signature (64 Ed25519 + 32 zero padding)
 /// - Signature computed over canonical big-endian byte representation
-
 use serde::Serialize;
 
 /// Top-level static network configuration.
@@ -247,16 +246,20 @@ mod tests {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
         let controller_addr = [0x01, 0x02, 0x03, 0x04, 0x05];
         let members = vec![
-            ([0xa0, 0xb1, 0xc2, 0xd3, 0xe4], "10.147.20.1/24", "fd00::1/64"),
-            ([0xf0, 0xe1, 0xd2, 0xc3, 0xb4], "10.147.20.2/24", "fd00::2/64"),
+            (
+                [0xa0, 0xb1, 0xc2, 0xd3, 0xe4],
+                "10.147.20.1/24",
+                "fd00::1/64",
+            ),
+            (
+                [0xf0, 0xe1, 0xd2, 0xc3, 0xb4],
+                "10.147.20.2/24",
+                "fd00::2/64",
+            ),
         ];
 
-        let json = generate_test_config(
-            &signing_key,
-            &controller_addr,
-            &members,
-            0xff00000000abcdef,
-        );
+        let json =
+            generate_test_config(&signing_key, &controller_addr, &members, 0xff00000000abcdef);
 
         // Parse it back
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -290,24 +293,16 @@ mod tests {
         let zt_addr = [0xa0, 0xb1, 0xc2, 0xd3, 0xe4];
         let network_id = 0xff00000000abcdef_u64;
 
-        let members = vec![
-            (zt_addr, "10.147.20.1/24", "fd00::1/64"),
-        ];
+        let members = vec![(zt_addr, "10.147.20.1/24", "fd00::1/64")];
 
-        let json = generate_test_config(
-            &signing_key,
-            &controller_addr,
-            &members,
-            network_id,
-        );
+        let json = generate_test_config(&signing_key, &controller_addr, &members, network_id);
 
         // Parse the config and verify the COM signature
         let config: zerotier_node::network_config::StaticNetworkConfig =
             serde_json::from_str(&json).unwrap();
-        let membership = zerotier_node::network::NetworkMembership::from_static_config(
-            &config,
-            &zt_addr,
-        ).unwrap();
+        let membership =
+            zerotier_node::network::NetworkMembership::from_static_config(&config, &zt_addr)
+                .unwrap();
 
         let com = membership.our_com.as_ref().unwrap();
 
@@ -322,16 +317,10 @@ mod tests {
     fn qualifier_ids_are_correct() {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
         let controller_addr = [0x01, 0x02, 0x03, 0x04, 0x05];
-        let members = vec![
-            ([0xa0, 0xb1, 0xc2, 0xd3, 0xe4], "10.147.20.1/24", ""),
-        ];
+        let members = vec![([0xa0, 0xb1, 0xc2, 0xd3, 0xe4], "10.147.20.1/24", "")];
 
-        let json = generate_test_config(
-            &signing_key,
-            &controller_addr,
-            &members,
-            0xff00000000abcdef,
-        );
+        let json =
+            generate_test_config(&signing_key, &controller_addr, &members, 0xff00000000abcdef);
 
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let quals = v["members"][0]["com"]["qualifiers"].as_array().unwrap();
