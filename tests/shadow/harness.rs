@@ -3045,21 +3045,37 @@ pub mod tests {
             evidence.report(),
         );
 
-        // Task 1: Log what milestones were reached (non-fatal for infra-blocked scenarios).
-        if evidence.confirmed.is_empty() {
-            eprintln!(
-                "[fallback] WARNING: No protocol milestones confirmed from host-native logs.\n\
-                 This may indicate that the localhost planet / custom root approach did not \
-                 allow ManyTier to exchange HELLO with the official controller.\n\
-                 Failure category:\n{}",
-                failure_category
-            );
-        } else {
-            eprintln!(
-                "[fallback] Confirmed protocol milestones:\n{}",
-                evidence.confirmed.join("\n  ")
-            );
-        }
+        // Require at least one confirmed protocol milestone.
+        // An empty confirmed list means both processes ran but no protocol exchange
+        // was observed (no HELLO/NetworkConfigRequest/join keyword matched). This
+        // satisfies the structural assertions above but does NOT prove interop.
+        //
+        // If this fires the failure_category distinguishes infrastructure failures
+        // (binary missing, port conflict) from protocol failures (HELLO not sent,
+        // controller not responding). See phases 06.1-06.4 for root-cause history;
+        // the transport-level blocker (ENETUNREACH / no live root replies) is the
+        // expected cause in sandboxed environments.
+        //
+        // Note: this test is #[ignore] and only runs in environments with a live
+        // zerotier-one binary AND reachable localhost UDP. In CI it is skipped.
+        eprintln!("[fallback] Protocol milestones confirmed: {:?}", evidence.confirmed);
+        assert!(
+            !evidence.confirmed.is_empty(),
+            "PROTOCOL FAILURE: No protocol milestones confirmed from host-native logs.\n\
+             Both processes ran for the full observation window without exchanging any\n\
+             recognized protocol message. This does not satisfy the interop criterion, which\n\
+             requires proof that a join occurred.\n\n\
+             Failure category:\n{}\n\n\
+             Likely causes:\n\
+               (a) ManyTier did not send HELLO: check client stderr for startup errors.\n\
+               (b) Official controller did not respond: check controller stderr.\n\
+               (c) Localhost planet redirect failed: verify build_planet_for_localhost output.\n\
+               (d) ManyTier log keywords changed: update check_host_native_handshake_evidence.\n\n\
+             Evidence report:\n{}\n\n\
+             Full validation runs in the privileged live lane.",
+            failure_category,
+            evidence.report(),
+        );
 
         // Log network creation result (informational).
         match &network_id_str {
