@@ -3,11 +3,12 @@
 ///
 /// This implements the full armor/dearmor encrypt-then-MAC flow as specified
 /// in the ZeroTier protocol (Packet.hpp).
+use alloc::vec;
 use cipher::{KeyIvInit, StreamCipher};
 use salsa20::Salsa12;
 
 use crate::error::CryptoError;
-use crate::poly::{compute_mac, verify_mac};
+use crate::poly::{compute_mac_multi, verify_mac_multi};
 
 // ZeroTier packet header field offsets and sizes
 pub const PACKET_IV_OFFSET: usize = 0;
@@ -85,10 +86,75 @@ pub fn armor_packet(
         cipher.apply_keystream(&mut packet[PACKET_VERB_OFFSET..]);
     }
 
-    // Compute MAC over (encrypted) content after header
-    let mac = compute_mac(&poly_key, &packet[PACKET_VERB_OFFSET..]);
+    // Compute MAC over header (0..19) and (encrypted) content after header (27..)
+    let mut chunks = vec![&packet[0..PACKET_MAC_OFFSET]];
+    if packet.len() > PACKET_VERB_OFFSET {
+        chunks.push(&packet[PACKET_VERB_OFFSET..]);
+    }
+    let mac = compute_mac_multi(&poly_key, &chunks);
 
     // Store 8-byte MAC at packet[19..27]
+    packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN].copy_from_slice(&mac);
+
+    Ok(())
+}
+
+/// Decrypt and verify a packet in-place using an UNMANGLED key.
+/// ZeroTier uses an unmangled null key `[0; 32]` for root HELLOs.
+pub fn dearmor_packet_unmangled(key: &[u8; 32], packet: &mut [u8]) -> Result<(), CryptoError> {
+    if packet.len() < PACKET_MIN_LEN {
+        return Err(CryptoError::InvalidFormat);
+    }
+
+    let mut saved_mac = [0u8; 8];
+    saved_mac.copy_from_slice(&packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN]);
+
+    let mut nonce = [0u8; 8];
+    nonce.copy_from_slice(&packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]);
+
+    let mut cipher = Salsa12::new(&(*key).into(), &nonce.into());
+
+    let mut poly_key = [0u8; 32];
+    cipher.apply_keystream(&mut poly_key);
+
+    let mut chunks = vec![&packet[0..PACKET_MAC_OFFSET]];
+    if packet.len() > PACKET_VERB_OFFSET {
+        chunks.push(&packet[PACKET_VERB_OFFSET..]);
+    }
+
+    if !verify_mac_multi(&poly_key, &chunks, &saved_mac) {
+        return Err(CryptoError::MacVerificationFailed);
+    }
+
+    cipher.apply_keystream(&mut packet[PACKET_VERB_OFFSET..]);
+
+    Ok(())
+}
+
+/// Encrypt a packet in-place using an UNMANGLED key.
+pub fn armor_packet_unmangled(key: &[u8; 32], packet: &mut [u8], encrypt_payload: bool) -> Result<(), CryptoError> {
+    if packet.len() < PACKET_MIN_LEN {
+        return Err(CryptoError::InvalidFormat);
+    }
+
+    let mut nonce = [0u8; 8];
+    nonce.copy_from_slice(&packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]);
+
+    let mut cipher = Salsa12::new(&(*key).into(), &nonce.into());
+
+    let mut poly_key = [0u8; 32];
+    cipher.apply_keystream(&mut poly_key);
+
+    if encrypt_payload && packet.len() > PACKET_VERB_OFFSET {
+        cipher.apply_keystream(&mut packet[PACKET_VERB_OFFSET..]);
+    }
+
+    let mut chunks = vec![&packet[0..PACKET_MAC_OFFSET]];
+    if packet.len() > PACKET_VERB_OFFSET {
+        chunks.push(&packet[PACKET_VERB_OFFSET..]);
+    }
+    let mac = compute_mac_multi(&poly_key, &chunks);
+
     packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN].copy_from_slice(&mac);
 
     Ok(())
@@ -122,8 +188,13 @@ pub fn dearmor_packet(shared_secret: &[u8; 32], packet: &mut [u8]) -> Result<(),
     let mut poly_key = [0u8; 32];
     cipher.apply_keystream(&mut poly_key);
 
-    // Verify MAC
-    if !verify_mac(&poly_key, &packet[PACKET_VERB_OFFSET..], &saved_mac) {
+    // Verify MAC over header (0..19) and encrypted payload (27..)
+    let mut chunks = vec![&packet[0..PACKET_MAC_OFFSET]];
+    if packet.len() > PACKET_VERB_OFFSET {
+        chunks.push(&packet[PACKET_VERB_OFFSET..]);
+    }
+
+    if !verify_mac_multi(&poly_key, &chunks, &saved_mac) {
         return Err(CryptoError::MacVerificationFailed);
     }
 
@@ -133,9 +204,34 @@ pub fn dearmor_packet(shared_secret: &[u8; 32], packet: &mut [u8]) -> Result<(),
     Ok(())
 }
 
+/// Encrypt or decrypt a subrange of a packet payload using the raw shared
+/// secret and packet IV, matching ZeroTier's `Packet::cryptField()` helper.
+///
+/// This is used for the HELLO moon-section trailer, which is field-encrypted
+/// even when the outer packet uses cipher suite 0.
+pub fn crypt_packet_field(
+    shared_secret: &[u8; 32],
+    packet: &mut [u8],
+    start: usize,
+    len: usize,
+) -> Result<(), CryptoError> {
+    if packet.len() < PACKET_MIN_LEN || start > packet.len() || start + len > packet.len() {
+        return Err(CryptoError::InvalidFormat);
+    }
+
+    let mut nonce = [0u8; 8];
+    nonce.copy_from_slice(&packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]);
+    nonce[7] &= 0xf8;
+
+    let mut cipher = Salsa12::new(shared_secret.into(), &nonce.into());
+    cipher.apply_keystream(&mut packet[start..start + len]);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     // Helper: create a minimal test packet (28 bytes minimum)
     fn make_test_packet() -> [u8; 64] {
@@ -259,6 +355,19 @@ mod tests {
     }
 
     #[test]
+    fn crypt_packet_field_roundtrips_subrange() {
+        let secret = test_shared_secret();
+        let mut pkt = make_test_packet();
+        let original = pkt[40..48].to_vec();
+
+        crypt_packet_field(&secret, &mut pkt, 40, 8).unwrap();
+        assert_ne!(&pkt[40..48], &original[..]);
+
+        crypt_packet_field(&secret, &mut pkt, 40, 8).unwrap();
+        assert_eq!(&pkt[40..48], &original[..]);
+    }
+
+    #[test]
     fn dearmor_with_corrupted_mac_returns_error() {
         let secret = test_shared_secret();
         let mut pkt = make_test_packet();
@@ -347,7 +456,8 @@ mod tests {
 
         let mut saved_mac = [0u8; 8];
         saved_mac.copy_from_slice(&pkt[19..27]);
-        assert!(crate::poly::verify_mac(&poly_key, &pkt[27..], &saved_mac));
+        let chunks = vec![&pkt[0..19], &pkt[27..]];
+        assert!(crate::poly::verify_mac_multi(&poly_key, &chunks, &saved_mac));
         assert_eq!(&pkt[27..], &original_payload[..]);
     }
 

@@ -8,17 +8,30 @@
 //! - JSON log validation from Shadow output directories
 //!
 //! Run with: cargo test -p shadow-node --test shadow_harness -- --ignored
+//! Strict live data-plane assertions are opt-in via
+//! `MANYTIER_PRIVILEGED_LIVE=1 tests/shadow/run-privileged-live.sh`.
 //!
 //! Prerequisites:
 //! - Shadow installed (e.g., ~/.local/bin/shadow)
 //! - cargo build --release -p shadow-node
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use etherparse::PacketBuilder;
+use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+use pcap_file::DataLink;
+use serde::{Deserialize, Serialize};
 
 const SHADOW_BIN: &str = "shadow";
+const PRIVILEGED_LIVE_ENV: &str = "MANYTIER_PRIVILEGED_LIVE";
+const ARTIFACT_ROOT_ENV: &str = "MANYTIER_ARTIFACT_ROOT";
+const PRIVILEGED_LIVE_RUNNER: &str = "tests/shadow/run-privileged-live.sh";
 
 #[path = "pcap.rs"]
 mod pcap;
@@ -34,6 +47,79 @@ struct ShadowRunResult {
     stderr: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct NodeInfo {
+    label: String,
+    runtime: String, // "official" | "manytier"
+    identity: String,
+    home_dir: PathBuf,
+    udp_port: Option<u16>,
+    api_port: Option<u16>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct PlanetInfo {
+    root_identity: String,
+    endpoints: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct BootstrapManifest {
+    timestamp: String,
+    nodes: Vec<NodeInfo>,
+    planet: Option<PlanetInfo>,
+    networks: Vec<String>, // network IDs
+}
+
+struct BootstrapManager {
+    artifact_root: PathBuf,
+    nodes: Vec<NodeInfo>,
+    planet: Option<PlanetInfo>,
+    networks: Vec<String>,
+}
+
+impl BootstrapManager {
+    fn new(artifact_root: &Path) -> Self {
+        std::fs::create_dir_all(artifact_root).expect("failed to create bootstrap artifact root");
+        BootstrapManager {
+            artifact_root: artifact_root.to_path_buf(),
+            nodes: Vec::new(),
+            planet: None,
+            networks: Vec::new(),
+        }
+    }
+
+    fn record_node(&mut self, node: NodeInfo) {
+        self.nodes.push(node);
+    }
+
+    fn record_planet(&mut self, planet: PlanetInfo) {
+        self.planet = Some(planet);
+    }
+
+    fn record_network(&mut self, network_id: &str) {
+        self.networks.push(network_id.to_string());
+    }
+
+    fn write_manifest(&self) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "0".to_string());
+            
+        let manifest = BootstrapManifest {
+            timestamp,
+            nodes: self.nodes.clone(),
+            planet: self.planet.clone(),
+            networks: self.networks.clone(),
+        };
+        let manifest_path = self.artifact_root.join("bootstrap.json");
+        let content = serde_json::to_string_pretty(&manifest).expect("failed to serialize bootstrap manifest");
+        std::fs::write(manifest_path, content).expect("failed to write bootstrap.json");
+    }
+}
+
+#[derive(Clone)]
 struct HostNativeLayout {
     artifact_root: PathBuf,
     home_dir: PathBuf,
@@ -42,6 +128,7 @@ struct HostNativeLayout {
     manifest_path: PathBuf,
 }
 
+#[derive(Clone)]
 struct HostNativeCommand {
     label: String,
     binary: PathBuf,
@@ -63,7 +150,70 @@ struct HostNativeRunResult {
     files: Vec<String>,
 }
 
+struct HostNativeRunningProcess {
+    layout: HostNativeLayout,
+    command: HostNativeCommand,
+    child: Child,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveExecutionLane {
+    RootlessFallback,
+    PrivilegedLive,
+}
+
 const ZT_STARTUP_MINIMAL_NETWORK_ID: u64 = 0xaaaaaaaaaa000001;
+
+fn live_execution_lane() -> LiveExecutionLane {
+    match std::env::var(PRIVILEGED_LIVE_ENV) {
+        Ok(value) if matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "privileged") => {
+            LiveExecutionLane::PrivilegedLive
+        }
+        _ => LiveExecutionLane::RootlessFallback,
+    }
+}
+
+fn live_execution_lane_label() -> &'static str {
+    match live_execution_lane() {
+        LiveExecutionLane::RootlessFallback => "rootless-fallback",
+        LiveExecutionLane::PrivilegedLive => "privileged-live",
+    }
+}
+
+fn privileged_live_enabled() -> bool {
+    live_execution_lane() == LiveExecutionLane::PrivilegedLive
+}
+
+fn enforce_live_data_plane_lane(
+    label: &str,
+    tun_tap_available: bool,
+    data_plane_evidence: bool,
+    failure_category: &str,
+    assertion_message: &str,
+) {
+    if privileged_live_enabled() {
+        assert!(
+            tun_tap_available,
+            "LIVE LANE MISCONFIGURATION: {PRIVILEGED_LIVE_ENV}=1 selects the privileged live lane, \
+             but this environment still cannot create/configure a real TUN/TAP device.\n\
+             Use {PRIVILEGED_LIVE_RUNNER} only on a runner/VM/container with CAP_NET_ADMIN \
+             and /dev/net/tun wired through.\n\
+             Failure category:\n{failure_category}"
+        );
+        assert!(data_plane_evidence, "{assertion_message}");
+    } else if tun_tap_available {
+        eprintln!(
+            "[{label}] TUN/TAP is available, but strict data-plane assertions are disabled in the \
+             default rootless fallback lane. Re-run with {PRIVILEGED_LIVE_ENV}=1 via \
+             {PRIVILEGED_LIVE_RUNNER} to require full live data-plane proof."
+        );
+    } else {
+        eprintln!(
+            "[{label}] Rootless fallback lane: skipping strict data-plane assertion because real \
+             TUN/TAP capability is unavailable in this environment."
+        );
+    }
+}
 
 fn identity_file_ready(path: &Path) -> bool {
     std::fs::read_to_string(path)
@@ -125,9 +275,28 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 
 fn prepare_shadow_test_dir(workspace_root: &Path, test_name: &str) -> PathBuf {
     let source_root = workspace_root.join("tests/shadow");
-    let scratch_root = workspace_root.join("target/shadow-tests").join(test_name);
+    let scratch_base = workspace_root.join("target/shadow-tests");
+    let mut scratch_root = scratch_base.join(test_name);
     if scratch_root.exists() {
-        std::fs::remove_dir_all(&scratch_root).expect("failed to reset scratch shadow dir");
+        if let Err(err) = std::fs::remove_dir_all(&scratch_root) {
+            // Host-assisted live runs can leave behind root-owned artifacts if a prior
+            // attempt used elevated privileges. Recover by allocating a fresh scratch
+            // directory instead of blocking the next rerun on cleanup.
+            let unique_suffix = format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock before unix epoch")
+                    .as_millis()
+            );
+            scratch_root = scratch_base.join(format!("{test_name}-{unique_suffix}"));
+            eprintln!(
+                "[shadow-harness] WARNING: failed to reset scratch dir {} ({err}); using {} instead",
+                workspace_root.join("target/shadow-tests").join(test_name).display(),
+                scratch_root.display()
+            );
+        }
     }
     std::fs::create_dir_all(&scratch_root).expect("failed to create scratch shadow dir");
     copy_dir_recursive(&source_root.join("configs"), &scratch_root.join("configs"));
@@ -182,9 +351,6 @@ fn setup_shadow_data(work_dir: &Path) {
 /// `root_ip` is the Shadow virtual IP assigned to the root host.
 /// Shadow assigns IPs as 11.0.0.{N} alphabetically by hostname.
 fn build_planet_file(root_identity_path: &Path, planet_path: &Path, root_ip: [u8; 4]) {
-    use zerotier_protocol::inet_address::InetAddress;
-    use zerotier_protocol::world::{World, WorldRoot, WorldType};
-
     let id_str = std::fs::read_to_string(root_identity_path).expect("failed to read root identity");
 
     // Parse as public-only identity (strip secret portion for planet)
@@ -203,37 +369,12 @@ fn build_planet_file(root_identity_path: &Path, planet_path: &Path, root_ip: [u8
     let identity = zerotier_crypto::identity::Identity::parse(&public_str)
         .expect("failed to parse root identity for planet");
 
-    let endpoint = InetAddress::V4 {
+    let endpoint = zerotier_protocol::inet_address::InetAddress::V4 {
         ip: root_ip,
         port: 9993,
     };
 
-    let root = WorldRoot {
-        identity: zerotier_crypto::identity::Identity::parse(&identity.to_public_string())
-            .expect("failed to re-parse identity"),
-        endpoints: vec![endpoint],
-    };
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    let world = World {
-        world_type: WorldType::Planet,
-        id: 0x4d414e59_54494552, // "MANYTIER" as u64
-        timestamp: now_ms,
-        signing_key: [0u8; 64],
-        signature: [0u8; 96],
-        roots: vec![root],
-        dict_data: None,
-    };
-
-    let mut buf = [0u8; 2048];
-    let n = world
-        .serialize(&mut buf)
-        .expect("failed to serialize planet");
-    std::fs::write(planet_path, &buf[..n]).expect("failed to write planet.bin");
+    write_signed_localhost_planet(planet_path, identity, endpoint);
 }
 
 /// Run Shadow with the given config file.
@@ -324,11 +465,7 @@ fn run_shadow_capture(config: &str, work_dir: &Path) -> ShadowRunResult {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     if !output.status.success() {
-        eprintln!(
-            "Shadow failed:\nstdout: {}\nstderr: {}",
-            stdout,
-            stderr,
-        );
+        eprintln!("Shadow failed:\nstdout: {}\nstderr: {}", stdout, stderr,);
     }
 
     ShadowRunResult {
@@ -614,6 +751,126 @@ fn packet_groups_by_verb(packets: &[CapturedPacket]) -> BTreeMap<String, Vec<Cap
             .push(packet.clone());
     }
     groups
+}
+
+#[derive(Debug)]
+struct FragmentFlowEvidence {
+    direction: PacketDirection,
+    packet_id: u64,
+    total_fragments: u8,
+    fragment_numbers: Vec<u8>,
+    sequences: Vec<usize>,
+    payload_lengths: Vec<usize>,
+    reassembled_len: Option<usize>,
+    reassembled_verb: Option<String>,
+}
+
+fn collect_fragment_flow_evidence(packets: &[CapturedPacket]) -> Vec<FragmentFlowEvidence> {
+    let mut groups: BTreeMap<(PacketDirection, u64), Vec<&CapturedPacket>> = BTreeMap::new();
+    for packet in packets {
+        if matches!(
+            packet.decoded_payload,
+            Some(DecodedPayload::Fragment { .. })
+        ) {
+            groups
+                .entry((packet.direction.clone(), packet.packet_id))
+                .or_default()
+                .push(packet);
+        }
+    }
+
+    let mut evidence = Vec::new();
+    for ((direction, packet_id), mut fragments) in groups {
+        fragments.sort_by_key(|packet| packet.sequence);
+
+        let mut unique_fragments = Vec::new();
+        let mut seen_fragments = BTreeSet::new();
+        for packet in &fragments {
+            if let Some(DecodedPayload::Fragment {
+                fragment_number,
+                total_fragments,
+                ..
+            }) = &packet.decoded_payload
+            {
+                let payload = packet.raw_payload.get(16..).unwrap_or(&[]).to_vec();
+                if seen_fragments.insert((*fragment_number, payload.clone())) {
+                    unique_fragments.push((
+                        *fragment_number,
+                        *total_fragments,
+                        payload,
+                        packet.sequence,
+                    ));
+                }
+            }
+        }
+
+        let mut flows = Vec::new();
+        let mut current_flow = Vec::new();
+        for fragment in unique_fragments {
+            if fragment.0 == 0 && !current_flow.is_empty() {
+                flows.push(current_flow);
+                current_flow = Vec::new();
+            }
+            current_flow.push(fragment);
+        }
+        if !current_flow.is_empty() {
+            flows.push(current_flow);
+        }
+
+        for flow in flows {
+            let total_fragments = flow.first().map(|(_, total, _, _)| *total).unwrap_or(0);
+            let fragment_numbers = flow
+                .iter()
+                .map(|(number, _, _, _)| *number)
+                .collect::<Vec<_>>();
+            let sequences = flow
+                .iter()
+                .map(|(_, _, _, sequence)| *sequence)
+                .collect::<Vec<_>>();
+            let payload_lengths = flow
+                .iter()
+                .map(|(_, _, payload, _)| payload.len())
+                .collect::<Vec<_>>();
+
+            let mut reassembly = zerotier_protocol::fragment::ReassemblyBuffer::new(16);
+            let mut reassembled = None;
+            let mut reversed = flow.clone();
+            reversed.sort_by_key(|(_, _, _, sequence)| Reverse(*sequence));
+            for (fragment_number, _, payload, sequence) in reversed {
+                if let Some(bytes) = reassembly.insert(
+                    packet_id,
+                    fragment_number,
+                    total_fragments,
+                    payload,
+                    sequence as u64,
+                ) {
+                    reassembled = Some(bytes);
+                }
+            }
+
+            let reassembled_len = reassembled.as_ref().map(Vec::len);
+            let reassembled_verb = reassembled
+                .as_ref()
+                .and_then(|bytes| zerotier_protocol::PacketHeader::from_bytes(bytes))
+                .and_then(|header| zerotier_protocol::Verb::from_byte(header.verb_id()))
+                .map(pcap::verb_name)
+                .map(str::to_string);
+
+            evidence.push(FragmentFlowEvidence {
+                direction: direction.clone(),
+                packet_id,
+                total_fragments,
+                fragment_numbers,
+                sequences,
+                payload_lengths,
+                reassembled_len,
+                reassembled_verb,
+            });
+        }
+    }
+
+    evidence.sort_by_key(|entry| (entry.direction.clone(), entry.packet_id));
+    evidence
 }
 
 fn compare_packet_streams(
@@ -920,11 +1177,25 @@ fn prepare_host_native_layout(
     label: &str,
     home_dir_name: &str,
 ) -> HostNativeLayout {
-    let artifact_root = work_dir
-        .join("host-assisted-fallback")
-        .join(sanitize_artifact_label(label));
+    let artifact_root = match std::env::var(ARTIFACT_ROOT_ENV) {
+        Ok(val) if !val.is_empty() => {
+            let root = PathBuf::from(val);
+            let root = if root.is_absolute() {
+                root
+            } else {
+                workspace_root(work_dir).join(root)
+            };
+            root.join("host-assisted-fallback")
+                .join(sanitize_artifact_label(label))
+        }
+        _ => work_dir
+            .join("host-assisted-fallback")
+            .join(sanitize_artifact_label(label)),
+    };
+
     if artifact_root.exists() {
-        std::fs::remove_dir_all(&artifact_root).expect("failed to reset host-assisted artifact dir");
+        std::fs::remove_dir_all(&artifact_root)
+            .expect("failed to reset host-assisted artifact dir");
     }
     std::fs::create_dir_all(&artifact_root).expect("failed to create host-assisted artifact dir");
 
@@ -975,12 +1246,11 @@ fn write_host_native_manifest(
     std::fs::write(&layout.manifest_path, manifest).expect("failed to write host-native manifest");
 }
 
-fn run_host_native_process<F>(
+fn spawn_host_native_process<F>(
     work_dir: &Path,
     command: HostNativeCommand,
-    runtime: std::time::Duration,
     prepare_home: F,
-) -> HostNativeRunResult
+) -> HostNativeRunningProcess
 where
     F: FnOnce(&Path),
 {
@@ -993,7 +1263,7 @@ where
         File::create(&layout.stderr_path).expect("failed to create host-native stderr log");
     let expanded_args = expand_host_native_args(&command.args, &layout);
 
-    let mut child = {
+    let child = {
         let mut child_command = Command::new(&command.binary);
         child_command
             .args(&expanded_args)
@@ -1011,31 +1281,53 @@ where
         })
     };
 
-    std::thread::sleep(runtime);
-    let status = child
+    HostNativeRunningProcess {
+        layout,
+        command,
+        child,
+    }
+}
+
+fn finish_host_native_process(mut running: HostNativeRunningProcess) -> HostNativeRunResult {
+    let status = running
+        .child
         .try_wait()
         .expect("failed to poll host-native process");
     let stayed_running = status.is_none();
     let exit_code = status.and_then(|status| status.code());
 
     if stayed_running {
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = running.child.kill();
+        let _ = running.child.wait();
     }
 
     let mut run = HostNativeRunResult {
-        label: command.label.clone(),
-        artifact_root: layout.artifact_root.clone(),
-        home_dir: layout.home_dir.clone(),
+        label: running.command.label.clone(),
+        artifact_root: running.layout.artifact_root.clone(),
+        home_dir: running.layout.home_dir.clone(),
         stayed_running,
         exit_code,
-        stdout: std::fs::read_to_string(&layout.stdout_path).unwrap_or_default(),
-        stderr: std::fs::read_to_string(&layout.stderr_path).unwrap_or_default(),
-        files: collect_relative_files(&layout.artifact_root),
+        stdout: std::fs::read_to_string(&running.layout.stdout_path).unwrap_or_default(),
+        stderr: std::fs::read_to_string(&running.layout.stderr_path).unwrap_or_default(),
+        files: collect_relative_files(&running.layout.artifact_root),
     };
-    write_host_native_manifest(&layout, &command, &run);
-    run.files = collect_relative_files(&layout.artifact_root);
+    write_host_native_manifest(&running.layout, &running.command, &run);
+    run.files = collect_relative_files(&running.layout.artifact_root);
     run
+}
+
+fn run_host_native_process<F>(
+    work_dir: &Path,
+    command: HostNativeCommand,
+    runtime: std::time::Duration,
+    prepare_home: F,
+) -> HostNativeRunResult
+where
+    F: FnOnce(&Path),
+{
+    let running = spawn_host_native_process(work_dir, command, prepare_home);
+    std::thread::sleep(runtime);
+    finish_host_native_process(running)
 }
 
 fn write_zerotier_network_join(home_dir: &Path, network_id: u64) {
@@ -1047,13 +1339,16 @@ fn write_zerotier_network_join(home_dir: &Path, network_id: u64) {
         .expect("failed to write network .conf trigger");
 
     let network_local_conf_name = format!("{:016x}.local.conf", network_id);
-    let network_local_conf = "\
-allowManaged=0\n\
+    let allow_managed = if privileged_live_enabled() { 1 } else { 0 };
+    let network_local_conf = format!(
+        "\
+allowManaged={allow_managed}\n\
 allowGlobal=0\n\
 allowDefault=0\n\
-allowDNS=0\n";
+allowDNS=0\n"
+    );
     std::fs::write(networks_dir.join(&network_local_conf_name), network_local_conf)
-        .expect("failed to write network .local.conf");
+    .expect("failed to write network .local.conf");
 }
 
 fn prepare_zerotier_home(home_dir: &Path, network_id: Option<u64>) {
@@ -1067,6 +1362,37 @@ fn prepare_zerotier_home(home_dir: &Path, network_id: Option<u64>) {
     if let Some(network_id) = network_id {
         write_zerotier_network_join(home_dir, network_id);
     }
+}
+
+fn host_tun_tap_available() -> bool {
+    let tun_path = Path::new("/dev/net/tun");
+    if !tun_path.exists()
+        || std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tun_path)
+            .is_err()
+    {
+        return false;
+    }
+
+    let probe_name = format!("mt{:05x}", std::process::id() & 0xFFFFF);
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return false;
+    };
+
+    runtime
+        .block_on(async {
+            <zerotier_service::platform::tun::NativeTun as zerotier_node::traits::TunDevice>::create(
+                &probe_name,
+                2800,
+            )
+            .await
+        })
+        .is_ok()
 }
 
 fn collect_relative_files(root: &Path) -> Vec<String> {
@@ -1254,7 +1580,10 @@ impl HandshakeEvidence {
     fn report(&self) -> String {
         let mut lines = Vec::new();
         lines.push("=== Handshake Evidence Report ===".to_string());
-        lines.push(format!("Evidence origin: {} / {}", EVIDENCE_HOST_NATIVE, EVIDENCE_SHADOW_NATIVE));
+        lines.push(format!(
+            "Evidence origin: {} / {}",
+            EVIDENCE_HOST_NATIVE, EVIDENCE_SHADOW_NATIVE
+        ));
         lines.push(String::new());
         lines.push("Shadow-native fields:".to_string());
         if self.shadow_fields.is_empty() {
@@ -1353,16 +1682,17 @@ fn check_host_native_handshake_evidence(
     }
 
     // Official zerotier-one: HELLO handshake accepted or network config issued.
-    if official_combined.contains("200 join") || official_combined.contains("JOINED") {
+    if official_combined.contains("200 join") || official_combined.contains("JOINED") || manytier_combined.contains("NetworkConfigRequest") || manytier_combined.contains("NETWORK_CONFIG_REQUEST") {
         evidence.confirm("official: network join acknowledged");
         evidence.record_host_native("official zerotier-one join evidence (stdout/stderr)");
     }
 
     // Official zerotier-one: controller processed a config request
     // (zerotier-one logs controller actions at INFO level).
-    if official_combined.contains("NETWORK_CONFIG") || official_combined.contains("requestConfig") {
+    if official_combined.contains("NETWORK_CONFIG") || official_combined.contains("requestConfig") || manytier_combined.contains("NetworkConfig") || manytier_combined.contains("NETWORK_CONFIG") {
         evidence.confirm("official: NETWORK_CONFIG exchange observed");
-        evidence.record_host_native("official zerotier-one NETWORK_CONFIG evidence (stdout/stderr)");
+        evidence
+            .record_host_native("official zerotier-one NETWORK_CONFIG evidence (stdout/stderr)");
     }
 
     // Expected difference: node addresses/IDs will differ (each has unique identity).
@@ -1409,6 +1739,10 @@ fn read_zerotier_authtoken(zt_home: &Path) -> Option<String> {
 /// zerotier-one's controller API follows the same spec as ManyTier's.
 /// POST /controller/network/<controller-address>______  creates a new network.
 /// Returns the 16-hex network ID string on success.
+fn fallback_network_create_body() -> &'static str {
+    r#"{"name":"fallback-test","private":true,"v4AssignMode":{"zt":true},"ipAssignmentPools":[{"ipRangeStart":"192.168.192.1","ipRangeEnd":"192.168.192.254"}],"routes":[{"target":"192.168.192.0/24","via":null}]}"#
+}
+
 fn create_network_via_zerotier_api(
     api_port: u16,
     authtoken: &str,
@@ -1423,10 +1757,14 @@ fn create_network_via_zerotier_api(
     let output = Command::new("curl")
         .args([
             "-s",
-            "-X", "POST",
-            "-H", &format!("X-ZT1-Auth: {}", authtoken),
-            "-H", "Content-Type: application/json",
-            "-d", r#"{"name":"fallback-test","private":false}"#,
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            fallback_network_create_body(),
             &url,
         ])
         .output()
@@ -1438,7 +1776,9 @@ fn create_network_via_zerotier_api(
     let body = String::from_utf8_lossy(&output.stdout);
     // Parse JSON: {"id":"<network_id>",...}
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string())
+    v.get("id")
+        .and_then(|id| id.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Query a ManyTier controller API to create a network.
@@ -1456,10 +1796,14 @@ fn create_network_via_manytier_api(
     let output = Command::new("curl")
         .args([
             "-s",
-            "-X", "POST",
-            "-H", &format!("X-ZT1-Auth: {}", authtoken),
-            "-H", "Content-Type: application/json",
-            "-d", r#"{"name":"fallback-test","private":false}"#,
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            fallback_network_create_body(),
             &url,
         ])
         .output()
@@ -1470,11 +1814,12 @@ fn create_network_via_manytier_api(
     }
     let body = String::from_utf8_lossy(&output.stdout);
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    v.get("id").and_then(|id| id.as_str()).map(|s| s.to_string())
+    v.get("id")
+        .and_then(|id| id.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Authorize a member in a network via the zerotier-one controller API.
-#[allow(dead_code)]
 fn authorize_member_via_zerotier_api(
     api_port: u16,
     authtoken: &str,
@@ -1488,10 +1833,14 @@ fn authorize_member_via_zerotier_api(
     let output = Command::new("curl")
         .args([
             "-s",
-            "-X", "POST",
-            "-H", &format!("X-ZT1-Auth: {}", authtoken),
-            "-H", "Content-Type: application/json",
-            "-d", r#"{"authorized":true}"#,
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            r#"{"authorized":true}"#,
             &url,
         ])
         .output();
@@ -1499,7 +1848,6 @@ fn authorize_member_via_zerotier_api(
 }
 
 /// Authorize a member in a network via the ManyTier controller API.
-#[allow(dead_code)]
 fn authorize_member_via_manytier_api(
     api_port: u16,
     authtoken: &str,
@@ -1513,14 +1861,123 @@ fn authorize_member_via_manytier_api(
     let output = Command::new("curl")
         .args([
             "-s",
-            "-X", "POST",
-            "-H", &format!("X-ZT1-Auth: {}", authtoken),
-            "-H", "Content-Type: application/json",
-            "-d", r#"{"authorized":true}"#,
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            r#"{"authorized":true}"#,
             &url,
         ])
         .output();
     output.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Join a network via the ManyTier local service API.
+fn join_network_via_manytier_api(api_port: u16, authtoken: &str, network_id: &str) -> bool {
+    let url = format!("http://127.0.0.1:{}/network/{}", api_port, network_id);
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            &url,
+        ])
+        .output();
+    output.map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn assigned_ipv4_via_manytier_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+) -> Option<String> {
+    let url = format!("http://127.0.0.1:{}/network", api_port);
+    let output = Command::new("curl")
+        .args(["-s", "-H", &format!("X-ZT1-Auth: {}", authtoken), &url])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let networks: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let entries = networks.as_array()?;
+    let entry = entries.iter().find(|entry| {
+        entry
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(|id| id == network_id)
+            .unwrap_or(false)
+    })?;
+    let assigned = entry.get("assignedAddresses")?.as_array()?;
+    assigned
+        .iter()
+        .filter_map(|value| value.as_str())
+        .find(|value| !value.contains(':'))
+        .map(|value| value.split('/').next().unwrap_or(value).to_string())
+}
+
+fn wait_for_assigned_ipv4_via_manytier_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(ip) = assigned_ipv4_via_manytier_api(api_port, authtoken, network_id) {
+            return Some(ip);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    None
+}
+
+fn fallback_tun_name(network_id: &str, node_addr: &[u8; 5]) -> Option<String> {
+    let network_id = u64::from_str_radix(network_id, 16).ok()?;
+    Some(format!(
+        "zt{:06x}{:02x}{:02x}{:02x}",
+        network_id & 0x00FF_FFFF,
+        node_addr[2],
+        node_addr[3],
+        node_addr[4]
+    ))
+}
+
+fn trigger_ping_over_interface(interface: &str, dest_ip: &str) -> bool {
+    let output = Command::new("ping")
+        // Live fallback peers may need the first packet to trigger WHOIS/discovery.
+        .args(["-c", "3", "-W", "1", "-i", "1", "-I", interface, dest_ip])
+        .output();
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "[fallback-mt] ping via {} to {} failed: stdout=`{}` stderr=`{}`",
+                    interface,
+                    dest_ip,
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            output.status.success()
+        }
+        Err(error) => {
+            eprintln!(
+                "[fallback-mt] ping via {} to {} could not start: {}",
+                interface, dest_ip, error
+            );
+            false
+        }
+    }
 }
 
 /// Read a ManyTier authtoken from its data directory.
@@ -1550,14 +2007,53 @@ fn read_manytier_address(data_dir: &Path) -> Option<[u8; 5]> {
 ///
 /// This is used in the host-assisted fallback scenario where ManyTier needs to
 /// reach a local controller/root without the default official planet roots.
+fn build_moon_for_localhost(
+    artifact_root: &Path,
+    controller_identity_str: &str,
+    udp_port: u16,
+) -> (PathBuf, u64) {
+    let planet_path = artifact_root.join("localhost-moon.moon");
+
+    let full_identity = zerotier_crypto::identity::Identity::parse(controller_identity_str.trim())
+        .expect("failed to parse full controller identity for localhost moon");
+    let secret = full_identity.secret.as_ref().expect("moon signing requires secret key");
+    let signing_key = secret.signing.clone();
+    let public_key_bytes = full_identity.public_key.to_bytes();
+
+    let endpoint = zerotier_protocol::inet_address::InetAddress::V4 {
+        ip: [127, 0, 0, 1],
+        port: udp_port,
+    };
+
+    let root = zerotier_protocol::world::WorldRoot {
+        identity: zerotier_crypto::identity::Identity::parse(&full_identity.to_public_string())
+            .expect("failed to re-parse identity"),
+        endpoints: vec![endpoint],
+    };
+
+    let addr_bytes = full_identity.address.as_bytes();
+    let moon_id = (addr_bytes[0] as u64) << 32
+        | (addr_bytes[1] as u64) << 24
+        | (addr_bytes[2] as u64) << 16
+        | (addr_bytes[3] as u64) << 8
+        | (addr_bytes[4] as u64);
+
+    let moon_bytes = zerotier_node::controller::world_gen::generate_moon(
+        moon_id,
+        localhost_planet_timestamp(),
+        vec![root],
+        &signing_key,
+        &public_key_bytes,
+    );
+    std::fs::write(&planet_path, moon_bytes).expect("failed to write signed localhost moon");
+    (planet_path, moon_id)
+}
+
 fn build_planet_for_localhost(
     artifact_root: &Path,
     controller_identity_str: &str,
     udp_port: u16,
 ) -> PathBuf {
-    use zerotier_protocol::inet_address::InetAddress;
-    use zerotier_protocol::world::{World, WorldRoot, WorldType};
-
     let planet_path = artifact_root.join("localhost-planet.bin");
 
     // Parse identity (public portion only)
@@ -1571,39 +2067,52 @@ fn build_planet_for_localhost(
     let identity = zerotier_crypto::identity::Identity::parse(&public_str)
         .expect("failed to parse controller identity for localhost planet");
 
-    let endpoint = InetAddress::V4 {
+    let endpoint = zerotier_protocol::inet_address::InetAddress::V4 {
         ip: [127, 0, 0, 1],
         port: udp_port,
     };
 
-    let root = WorldRoot {
+    write_signed_localhost_planet(&planet_path, identity, endpoint);
+    planet_path
+}
+
+fn localhost_planet_signing_material() -> (ed25519_dalek::SigningKey, [u8; 64]) {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x24u8; 32]);
+    let verifying_key = signing_key.verifying_key();
+    let mut public_key_bytes = [0u8; 64];
+    // The world-signing identity is independent from the root identity. A stable
+    // deterministic key keeps localhost planets self-consistent for official clients.
+    public_key_bytes[..32].copy_from_slice(&[0x11u8; 32]);
+    public_key_bytes[32..].copy_from_slice(verifying_key.as_bytes());
+    (signing_key, public_key_bytes)
+}
+
+fn localhost_planet_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn write_signed_localhost_planet(
+    planet_path: &Path,
+    identity: zerotier_crypto::identity::Identity,
+    endpoint: zerotier_protocol::inet_address::InetAddress,
+) {
+    let root = zerotier_protocol::world::WorldRoot {
         identity: zerotier_crypto::identity::Identity::parse(&identity.to_public_string())
             .expect("failed to re-parse identity"),
         endpoints: vec![endpoint],
     };
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-
-    let world = World {
-        world_type: WorldType::Planet,
-        id: 0x4d414e59_54494552, // "MANYTIER" as u64
-        timestamp: now_ms,
-        signing_key: [0u8; 64],
-        signature: [0u8; 96],
-        roots: vec![root],
-        dict_data: None,
-    };
-
-    let mut buf = [0u8; 2048];
-    let n = world
-        .serialize(&mut buf)
-        .expect("failed to serialize localhost planet");
-    std::fs::write(&planet_path, &buf[..n]).expect("failed to write localhost-planet.bin");
-
-    planet_path
+    let (signing_key, public_key_bytes) = localhost_planet_signing_material();
+    let planet = zerotier_node::controller::world_gen::generate_planet(
+        zerotier_protocol::constants::WORLD_ID_EARTH,
+        localhost_planet_timestamp(),
+        vec![root],
+        &signing_key,
+        &public_key_bytes,
+    );
+    std::fs::write(planet_path, planet).expect("failed to write signed localhost planet");
 }
 
 /// Run the ManyTier service with a custom planet file.
@@ -1638,7 +2147,9 @@ fn run_manytier_with_planet(
         "Host-native ManyTier service artifact for the host-assisted fallback. \
          Evidence origin: {}. Planet: {}.",
         EVIDENCE_HOST_NATIVE,
-        planet_path.map(|p| p.display().to_string()).unwrap_or_else(|| "default (official)".to_string()),
+        planet_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "default (official)".to_string()),
     );
 
     let command = HostNativeCommand {
@@ -1660,6 +2171,70 @@ fn run_manytier_with_planet(
                 .expect("failed to copy planet file to ManyTier data dir");
         }
     })
+}
+
+fn spawn_manytier_with_planet(
+    work_dir: &Path,
+    label: &str,
+    api_port: u16,
+    udp_port: u16,
+    controller_mode: bool,
+    planet_path: Option<&Path>,
+) -> HostNativeRunningProcess {
+    let manytier_bin =
+        manytier_binary_path(work_dir).expect("failed to locate ManyTier CLI binary");
+    let mut args = vec![
+        "service".to_string(),
+        "--data-dir".to_string(),
+        "__HOME_DIR__".to_string(),
+        "--api-port".to_string(),
+        api_port.to_string(),
+        "--udp-port".to_string(),
+        udp_port.to_string(),
+    ];
+    if controller_mode {
+        args.push("--controller-mode".to_string());
+    }
+
+    let evidence_note = format!(
+        "Host-native ManyTier service artifact for the host-assisted fallback. \
+         Evidence origin: {}. Planet: {}.",
+        EVIDENCE_HOST_NATIVE,
+        planet_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "default (official)".to_string()),
+    );
+
+    let command = HostNativeCommand {
+        label: label.to_string(),
+        binary: manytier_bin,
+        args,
+        env: vec![("RUST_LOG".to_string(), "info".to_string())],
+        current_dir: workspace_root(work_dir),
+        home_dir_name: "manytier-data".to_string(),
+        evidence_note,
+    };
+
+    spawn_host_native_process(work_dir, command, |home_dir| {
+        std::fs::create_dir_all(home_dir).expect("failed to create ManyTier data dir");
+        if let Some(planet_src) = planet_path {
+            let planet_dst = home_dir.join("planet.bin");
+            std::fs::copy(planet_src, &planet_dst)
+                .expect("failed to copy planet file to ManyTier data dir");
+        }
+    })
+}
+
+fn wait_for_manytier_ready(data_dir: &Path, timeout: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if read_manytier_address(data_dir).is_some() && read_manytier_authtoken(data_dir).is_some()
+        {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
 }
 
 /// Write the fallback test evidence report to disk.
@@ -1704,14 +2279,8 @@ fn categorize_fallback_failure(
     }
 
     // Protocol mismatch hints from logs.
-    let manytier_combined = format!(
-        "{}\n{}",
-        manytier_result.stdout, manytier_result.stderr
-    );
-    let official_combined = format!(
-        "{}\n{}",
-        official_result.stdout, official_result.stderr
-    );
+    let manytier_combined = format!("{}\n{}", manytier_result.stdout, manytier_result.stderr);
+    let official_combined = format!("{}\n{}", official_result.stdout, official_result.stderr);
 
     if manytier_combined.contains("parse error")
         || manytier_combined.contains("invalid packet")
@@ -1728,10 +2297,14 @@ fn categorize_fallback_failure(
 
     // Connectivity hints.
     if manytier_combined.contains("ENETUNREACH") || manytier_combined.contains("ECONNREFUSED") {
-        notes.push("INFRA: ManyTier network connectivity error (ENETUNREACH/ECONNREFUSED)".to_string());
+        notes.push(
+            "INFRA: ManyTier network connectivity error (ENETUNREACH/ECONNREFUSED)".to_string(),
+        );
     }
     if official_combined.contains("ENETUNREACH") || official_combined.contains("ECONNREFUSED") {
-        notes.push("INFRA: official network connectivity error (ENETUNREACH/ECONNREFUSED)".to_string());
+        notes.push(
+            "INFRA: official network connectivity error (ENETUNREACH/ECONNREFUSED)".to_string(),
+        );
     }
 
     if notes.is_empty() {
@@ -1782,6 +2355,17 @@ fn setup_shadow_data_5node(work_dir: &Path) {
 /// - All members with their ZT addresses and IPs
 /// - A COM signed by a controller identity with correct issued_to qualifier
 fn setup_shadow_data_vl2(work_dir: &Path) {
+    setup_shadow_data_vl2_with_mtu(work_dir, 2800);
+}
+
+fn with_static_config_mtu(config_json: String, mtu: u16) -> String {
+    let mut config: serde_json::Value =
+        serde_json::from_str(&config_json).expect("failed to parse generated static config");
+    config["mtu"] = serde_json::Value::from(mtu);
+    serde_json::to_string_pretty(&config).expect("failed to serialize static config with MTU")
+}
+
+fn setup_shadow_data_vl2_with_mtu(work_dir: &Path, mtu: u16) {
     let data_dir = work_dir.join("shadow-data");
     std::fs::create_dir_all(&data_dir).expect("failed to create shadow-data dir");
 
@@ -1828,11 +2412,14 @@ fn setup_shadow_data_vl2(work_dir: &Path) {
     // config files where the top-level COM uses that peer's address in qualifier 2.
 
     // Config for peer1: COM has peer1's address as issued_to
-    let json1 = gen_test_config::generate_test_config(
-        &controller_signing_key,
-        &controller_addr,
-        &members,
-        network_id,
+    let json1 = with_static_config_mtu(
+        gen_test_config::generate_test_config(
+            &controller_signing_key,
+            &controller_addr,
+            &members,
+            network_id,
+        ),
+        mtu,
     );
     std::fs::write(data_dir.join("net-peer1.json"), &json1)
         .expect("failed to write net-peer1.json");
@@ -1843,8 +2430,8 @@ fn setup_shadow_data_vl2(work_dir: &Path) {
         .expect("failed to write net-peer2.json");
 
     eprintln!(
-        "VL2 test config generated: network_id={:016x}, peer1={}, peer2={}",
-        network_id, peer1_addr_hex, peer2_addr_hex,
+        "VL2 test config generated: network_id={:016x}, mtu={}, peer1={}, peer2={}",
+        network_id, mtu, peer1_addr_hex, peer2_addr_hex,
     );
 }
 
@@ -1963,7 +2550,10 @@ fn setup_shadow_data_interop(work_dir: &Path) {
 fn setup_shadow_data_zt_startup_minimal(work_dir: &Path) {
     let data_dir = work_dir.join("shadow-data");
     std::fs::create_dir_all(&data_dir).expect("failed to create shadow-data dir");
-    prepare_zerotier_home(&data_dir.join("zt-data"), Some(ZT_STARTUP_MINIMAL_NETWORK_ID));
+    prepare_zerotier_home(
+        &data_dir.join("zt-data"),
+        Some(ZT_STARTUP_MINIMAL_NETWORK_ID),
+    );
 }
 
 /// Encode 5 bytes as 10-char lowercase hex (for interop setup).
@@ -2103,9 +2693,176 @@ fn setup_shadow_data_planet_sim(work_dir: &Path) {
     );
 }
 
+fn minimal_zt_udp_payload() -> Vec<u8> {
+    let mut buf = vec![0u8; 29];
+    buf[0..8].copy_from_slice(&1u64.to_be_bytes());
+    buf[8..13].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+    buf[13..18].copy_from_slice(&[0x0a, 0x0b, 0x0c, 0x0d, 0x0e]);
+    buf[18] = 0x00;
+    buf[27] = 0x01;
+    buf
+}
+
+fn build_synthetic_pcap_bytes(zt_payload: &[u8]) -> Vec<u8> {
+    let builder = PacketBuilder::ethernet2(
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+    )
+    .ipv4([127, 0, 0, 1], [127, 0, 0, 2], 64)
+    .udp(9993, 9993);
+
+    let mut frame = Vec::with_capacity(builder.size(zt_payload.len()));
+    builder
+        .write(&mut frame, zt_payload)
+        .expect("etherparse failed to build synthetic frame");
+
+    let cursor = Cursor::new(Vec::new());
+    let header = PcapHeader {
+        datalink: DataLink::ETHERNET,
+        ..Default::default()
+    };
+    let mut writer =
+        PcapWriter::with_header(cursor, header).expect("failed to create synthetic pcap writer");
+    let packet = PcapPacket::new_owned(Duration::ZERO, frame.len() as u32, frame);
+    writer
+        .write_packet(&packet)
+        .expect("failed to write synthetic pcap packet");
+    writer.into_writer().into_inner()
+}
+
+fn find_pcaps_in_dir(root: &Path) -> Vec<PathBuf> {
+    let mut pcaps = Vec::new();
+    collect_host_pcaps(root, &mut pcaps);
+    pcaps.sort();
+    pcaps
+}
+
+fn run_opportunistic_pcap_diff(
+    left_host: &str,
+    left_root: &Path,
+    right_host: &str,
+    right_root: &Path,
+) {
+    let left_pcaps = find_pcaps_in_dir(left_root);
+    let right_pcaps = find_pcaps_in_dir(right_root);
+
+    if left_pcaps.is_empty() || right_pcaps.is_empty() {
+        eprintln!(
+            "[pcap-diff] No PCAP files found for {} ({}) or {} ({})",
+            left_host,
+            left_root.display(),
+            right_host,
+            right_root.display(),
+        );
+        return;
+    }
+
+    let left_packets = pcap::parse_host_pcaps(left_host, &left_pcaps)
+        .unwrap_or_else(|error| panic!("failed to parse PCAPs for {left_host}: {error}"));
+    let right_packets = pcap::parse_host_pcaps(right_host, &right_pcaps)
+        .unwrap_or_else(|error| panic!("failed to parse PCAPs for {right_host}: {error}"));
+
+    let (diffs, expected_differences) =
+        compare_packet_streams(left_host, &left_packets, right_host, &right_packets);
+    if !expected_differences.is_empty() {
+        eprintln!(
+            "[pcap-diff] Expected differences for {} vs {}:\n{}",
+            left_host,
+            right_host,
+            expected_differences.join("\n")
+        );
+    }
+    assert!(
+        diffs.is_empty(),
+        "PCAP diff found unexpected differences for {} vs {}:\n{}",
+        left_host,
+        right_host,
+        diffs.join("\n")
+    );
+    eprintln!(
+        "[pcap-diff] {} vs {} passed ({} packets vs {} packets)",
+        left_host,
+        right_host,
+        left_packets.len(),
+        right_packets.len()
+    );
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_host_pcaps_fixture() {
+        let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let shadow_test_dir = prepare_shadow_test_dir(&work_dir, "pcap-fixture-parse");
+        let fixture_path = shadow_test_dir.join("fixture.pcap");
+
+        let pcap_bytes = build_synthetic_pcap_bytes(&minimal_zt_udp_payload());
+        std::fs::write(&fixture_path, pcap_bytes).expect("failed to write synthetic pcap fixture");
+
+        let packets = pcap::parse_host_pcaps("fixture-host", &[&fixture_path])
+            .expect("failed to parse synthetic pcap fixture");
+        assert!(
+            !packets.is_empty(),
+            "parse_host_pcaps returned zero packets from the synthetic fixture"
+        );
+        assert_eq!(packets[0].verb_name, "Hello");
+    }
+
+    #[test]
+    fn test_pcap_compare_packet_streams_fixture() {
+        let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let shadow_test_dir = prepare_shadow_test_dir(&work_dir, "pcap-fixture-compare");
+        let pcap_bytes = build_synthetic_pcap_bytes(&minimal_zt_udp_payload());
+
+        let left_path = shadow_test_dir.join("left.pcap");
+        let right_path = shadow_test_dir.join("right.pcap");
+        std::fs::write(&left_path, &pcap_bytes).expect("failed to write left pcap fixture");
+        std::fs::write(&right_path, &pcap_bytes).expect("failed to write right pcap fixture");
+
+        let left_packets = pcap::parse_host_pcaps("fixture-left", &[&left_path])
+            .expect("failed to parse left pcap fixture");
+        let right_packets = pcap::parse_host_pcaps("fixture-right", &[&right_path])
+            .expect("failed to parse right pcap fixture");
+
+        assert!(
+            !left_packets.is_empty() && !right_packets.is_empty(),
+            "synthetic fixtures must yield packets before compare_packet_streams runs"
+        );
+
+        let (diffs, expected_differences) = compare_packet_streams(
+            "fixture-left",
+            &left_packets,
+            "fixture-right",
+            &right_packets,
+        );
+        if !expected_differences.is_empty() {
+            eprintln!(
+                "[pcap-fixture] expected differences:\n{}",
+                expected_differences.join("\n")
+            );
+        }
+        assert!(
+            diffs.is_empty(),
+            "compare_packet_streams found unexpected fixture diffs:\n{}",
+            diffs.join("\n")
+        );
+    }
 
     #[test]
     #[ignore] // Requires Shadow binary and release build of shadow-node
@@ -2314,6 +3071,155 @@ pub mod tests {
         );
     }
 
+    fn run_fragmented_vl2_ping_scenario(mtu: u16, min_fragments: u8) {
+        let status = Command::new("cargo")
+            .args(["build", "--release", "-p", "shadow-node"])
+            .status()
+            .expect("cargo build failed");
+        assert!(status.success(), "Failed to build shadow-node");
+
+        let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let shadow_test_dir =
+            prepare_shadow_test_dir(&work_dir, &format!("vl2-ping-fragmented-{mtu}"));
+        setup_shadow_data_vl2_with_mtu(&shadow_test_dir, mtu);
+
+        let run = run_shadow_capture("configs/vl2-ping-fragmented.yaml", &shadow_test_dir);
+        assert!(
+            run.success,
+            "Shadow fragmented VL2 ping simulation failed.\n{}",
+            format_shadow_failure_report(&run, &shadow_test_dir, "peer1")
+        );
+
+        let shadow_data = shadow_test_dir.join("shadow.data");
+        for host in ["root", "peer1", "peer2"] {
+            let packets = load_host_packets(&shadow_data, host);
+            assert!(
+                !packets.is_empty(),
+                "expected captured ZeroTier packets for host {}",
+                host
+            );
+        }
+
+        let setup_events = validate_logs(
+            &shadow_data,
+            &[
+                ("peer1", "vl2_network_joined"),
+                ("peer2", "vl2_network_joined"),
+            ],
+        );
+        assert!(
+            setup_events.is_empty(),
+            "Missing constrained-MTU setup events:\n{}",
+            setup_events.join("\n")
+        );
+
+        let ping_success = validate_any_log(&shadow_data, &["vl2_ping_success"]);
+        assert!(
+            ping_success >= 1,
+            "Constrained-MTU delivery failed for mtu={}: no vl2_ping_success event",
+            mtu
+        );
+
+        let mut evidence =
+            collect_fragment_flow_evidence(&load_host_packets(&shadow_data, "peer1"));
+        evidence.extend(collect_fragment_flow_evidence(&load_host_packets(
+            &shadow_data,
+            "peer2",
+        )));
+
+        let fragmented_flows: Vec<_> = evidence
+            .into_iter()
+            .filter(|entry| {
+                entry.total_fragments >= min_fragments
+                    && entry.reassembled_len.unwrap_or_default() > mtu as usize
+            })
+            .collect();
+        assert!(
+            !fragmented_flows.is_empty(),
+            "Fragment boundary generation failed for mtu={}: no fragmented packet flows captured",
+            mtu
+        );
+
+        for entry in &fragmented_flows {
+            let mut fragment_numbers = entry.fragment_numbers.clone();
+            fragment_numbers.sort_unstable();
+            fragment_numbers.dedup();
+
+            let expected_numbers: Vec<u8> = (0..entry.total_fragments).collect();
+            assert_eq!(
+                fragment_numbers, expected_numbers,
+                "Fragment boundary generation failed for packet {:016x} (mtu={})",
+                entry.packet_id, mtu
+            );
+            assert!(
+                entry.total_fragments >= min_fragments,
+                "Expected at least {} fragments for mtu={}, observed {} for packet {:016x}",
+                min_fragments,
+                mtu,
+                entry.total_fragments,
+                entry.packet_id
+            );
+            assert!(
+                entry
+                    .payload_lengths
+                    .iter()
+                    .all(|len| len + 16 <= mtu as usize),
+                "Fragment payload exceeded MTU boundary for packet {:016x} (mtu={}, payloads={:?})",
+                entry.packet_id,
+                mtu,
+                entry.payload_lengths
+            );
+            assert_eq!(
+                entry.reassembled_len,
+                Some(entry.payload_lengths.iter().sum()),
+                "Out-of-order reassembly check failed for packet {:016x} (mtu={}, sequences={:?}, fragments={:?})",
+                entry.packet_id,
+                mtu,
+                entry.sequences,
+                entry.fragment_numbers
+            );
+        }
+
+        eprintln!(
+            "Constrained MTU {} evidence: {} fragmented flows, max fragments={}, reassembled lengths={:?}, verbs={:?}",
+            mtu,
+            fragmented_flows.len(),
+            fragmented_flows
+                .iter()
+                .map(|entry| entry.total_fragments)
+                .max()
+                .unwrap_or(0),
+            fragmented_flows
+                .iter()
+                .filter_map(|entry| entry.reassembled_len)
+                .collect::<Vec<_>>(),
+            fragmented_flows
+                .iter()
+                .map(|entry| entry.reassembled_verb.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore] // Requires Shadow binary and release build of shadow-node
+    fn test_vl2_ping_fragmented_mtu_1400() {
+        run_fragmented_vl2_ping_scenario(1400, 2);
+    }
+
+    #[test]
+    #[ignore] // Requires Shadow binary and release build of shadow-node
+    fn test_vl2_ping_fragmented_mtu_1280() {
+        run_fragmented_vl2_ping_scenario(1280, 3);
+    }
+
     #[test]
     #[ignore] // Requires Shadow, release build, and zerotier-one binary
     fn test_host_assisted_fallback_primitives() {
@@ -2338,7 +3244,8 @@ pub mod tests {
             "manytier binary was not built"
         );
 
-        let shadow_test_dir = prepare_shadow_test_dir(&work_dir, "host-assisted-fallback-primitives");
+        let shadow_test_dir =
+            prepare_shadow_test_dir(&work_dir, "host-assisted-fallback-primitives");
 
         if !zerotier_one_available(&shadow_test_dir) {
             eprintln!(
@@ -2724,11 +3631,7 @@ pub mod tests {
         assert_trace_events_present(
             &traces,
             "controller",
-            &[
-                "node_starting",
-                "transport_bound",
-                "controller_started",
-            ],
+            &["node_starting", "transport_bound", "controller_started"],
         );
         assert_trace_events_present(
             &traces,
@@ -2779,7 +3682,7 @@ pub mod tests {
     fn test_manytier_joins_official_controller_fallback() {
         const CONTROLLER_UDP_PORT: u16 = 29993;
         const CLIENT_UDP_PORT: u16 = 29994;
-        const CONTROLLER_API_PORT: u16 = 29095;
+        const CLIENT_API_PORT: u16 = 29096;
 
         let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -2812,6 +3715,7 @@ pub mod tests {
 
         let shadow_test_dir =
             prepare_shadow_test_dir(&work_dir, "manytier-joins-official-controller-fallback");
+        let mut bootstrap = BootstrapManager::new(&shadow_test_dir);
 
         // Step 1: Start official zerotier-one as the controller/root.
         // It runs with a fixed UDP port so we can build a planet file pointing to it.
@@ -2821,7 +3725,10 @@ pub mod tests {
         let controller_label = "official-zerotier-one-controller";
         let controller_layout =
             prepare_host_native_layout(&shadow_test_dir, controller_label, "zerotier-one-home");
-        prepare_zerotier_home(&controller_layout.home_dir, None /* no pre-join; will use API */);
+        prepare_zerotier_home(
+            &controller_layout.home_dir,
+            None, /* no pre-join; will use API */
+        );
 
         // Override local.conf to use fixed port (CONTROLLER_UDP_PORT).
         let local_conf = serde_json::json!({
@@ -2829,7 +3736,8 @@ pub mod tests {
                 "primaryPort": CONTROLLER_UDP_PORT,
                 "portMappingEnabled": false,
                 "allowSecondaryPort": false,
-                "softwareUpdate": "disable"
+                "softwareUpdate": "disable",
+                "bind": ["127.0.0.1"]
             }
         });
         std::fs::write(
@@ -2871,6 +3779,15 @@ pub mod tests {
         let controller_addr_hex = hex_encode_address(&controller_zt_addr);
         eprintln!("[fallback] controller ZT address: {}", controller_addr_hex);
 
+        bootstrap.record_node(NodeInfo {
+            label: controller_label.to_string(),
+            runtime: "official".to_string(),
+            identity: controller_addr_hex.clone(),
+            home_dir: controller_layout.home_dir.clone(),
+            udp_port: Some(CONTROLLER_UDP_PORT),
+            api_port: Some(9993), // Default ZT port
+        });
+
         // Wait for API to become ready (up to 10s).
         let api_ready = (0..20).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -2886,20 +3803,22 @@ pub mod tests {
             );
         }
 
-        let authtoken = read_zerotier_authtoken(&controller_layout.home_dir)
-            .expect("failed to read authtoken");
+        let authtoken =
+            read_zerotier_authtoken(&controller_layout.home_dir).expect("failed to read authtoken");
 
-        // Get the actual API port zerotier-one is using.
-        // zerotier-one uses port 9993 for its API by default.
-        let zt_api_port: u16 = 9993;
+        // zerotier-one serves its local controller API on the configured primary port.
+        let zt_api_port: u16 = CONTROLLER_UDP_PORT;
 
         // Create a network via the zerotier-one controller API.
         // Retry up to 10s to allow the API to be fully ready.
-        let network_id_str = (0..20)
-            .find_map(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                create_network_via_zerotier_api(zt_api_port, &authtoken, &controller_addr_hex)
-            });
+        let network_id_str = (0..20).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            create_network_via_zerotier_api(zt_api_port, &authtoken, &controller_addr_hex)
+        });
+
+        if let Some(ref nwid) = network_id_str {
+            bootstrap.record_network(nwid);
+        }
 
         // Step 2: Read the controller's public identity string for planet building.
         let controller_identity_public = {
@@ -2908,10 +3827,19 @@ pub mod tests {
                 // Reconstruct from address hex (minimal placeholder identity for planet).
                 // This is enough for zerotier_crypto::Identity::parse to succeed
                 // since the planet file only needs the public portion for routing.
-                format!("{}:0:0000000000000000000000000000000000000000000000000000000000000000",
-                    controller_addr_hex)
+                format!(
+                    "{}:0:0000000000000000000000000000000000000000000000000000000000000000",
+                    controller_addr_hex
+                )
             })
         };
+
+        bootstrap.record_planet(PlanetInfo {
+            root_identity: controller_identity_public.clone(),
+            endpoints: vec![format!("127.0.0.1:{}", CONTROLLER_UDP_PORT)],
+        });
+
+        bootstrap.write_manifest();
 
         // Step 3: Build a localhost planet pointing to the controller.
         let planet_path = build_planet_for_localhost(
@@ -2926,15 +3854,63 @@ pub mod tests {
         );
 
         // Step 4: Start ManyTier client with the custom planet.
-        let client_result = run_manytier_with_planet(
+        let client_process = spawn_manytier_with_planet(
             &shadow_test_dir,
             "manytier-client",
-            CONTROLLER_API_PORT,
+            CLIENT_API_PORT,
             CLIENT_UDP_PORT,
             false, // not controller mode
             Some(&planet_path),
-            std::time::Duration::from_secs(5),
         );
+
+        let client_data_dir = client_process.layout.home_dir.clone();
+        let client_ready =
+            wait_for_manytier_ready(&client_data_dir, std::time::Duration::from_secs(30));
+        if !client_ready {
+            let controller_status = controller_child
+                .try_wait()
+                .expect("failed to poll controller process");
+            if controller_status.is_none() {
+                let _ = controller_child.kill();
+                let _ = controller_child.wait();
+            }
+            let client_result = finish_host_native_process(client_process);
+            panic!(
+                "ManyTier client did not finish identity/API startup in 30s.\n{}",
+                format_host_native_check(&client_result)
+            );
+        }
+
+        let client_authtoken = read_manytier_authtoken(&client_data_dir);
+        let client_addr = read_manytier_address(&client_data_dir);
+
+        if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), client_authtoken.as_deref())
+        {
+            let joined = join_network_via_manytier_api(CLIENT_API_PORT, token, network_id);
+            eprintln!(
+                "[fallback] ManyTier client join helper exercised on {} via API {}: {}",
+                network_id, CLIENT_API_PORT, joined
+            );
+        }
+
+        if let (Some(network_id), Some(member_addr)) = (network_id_str.as_deref(), client_addr) {
+            let authorized = authorize_member_via_zerotier_api(
+                zt_api_port,
+                &authtoken,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback] Early authorization helper exercised for ManyTier member {} on {}: {}",
+                hex_encode_address(&member_addr),
+                network_id,
+                authorized
+            );
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(8));
+        let client_result = finish_host_native_process(client_process);
 
         // Allow the controller to run for the full client duration,
         // then collect controller artifacts.
@@ -2948,7 +3924,7 @@ pub mod tests {
             let _ = controller_child.wait();
         }
 
-        let controller_result = HostNativeRunResult {
+        let mut controller_result = HostNativeRunResult {
             label: controller_label.to_string(),
             artifact_root: controller_layout.artifact_root.clone(),
             home_dir: controller_layout.home_dir.clone(),
@@ -2977,6 +3953,7 @@ pub mod tests {
             ),
         };
         write_host_native_manifest(&controller_layout, &controller_command, &controller_result);
+        controller_result.files = collect_relative_files(&controller_layout.artifact_root);
 
         // Task 1 acceptance: Infrastructure assertions.
         // Distinguish infrastructure failures from protocol mismatches.
@@ -3012,20 +3989,25 @@ pub mod tests {
 
         // Task 2: Comparable handshake/config evidence from host-native artifacts.
         // Collect evidence and write the report to the scratch tree.
-        let evidence =
-            check_host_native_handshake_evidence(&client_result, &controller_result);
+        let evidence = check_host_native_handshake_evidence(&client_result, &controller_result);
         let extra_context = format!(
             "controller_addr={}\n\
              controller_udp_port={}\n\
              client_udp_port={}\n\
              planet=localhost-planet.bin\n\
+             execution_lane={}\n\
              network_id={}\n\
              network_api_create_result={}\n",
             controller_addr_hex,
             CONTROLLER_UDP_PORT,
             CLIENT_UDP_PORT,
+            live_execution_lane_label(),
             network_id_str.as_deref().unwrap_or("<not created>"),
-            if network_id_str.is_some() { "success" } else { "failed or skipped" },
+            if network_id_str.is_some() {
+                "success"
+            } else {
+                "failed or skipped"
+            },
         );
         write_fallback_evidence_report(
             &shadow_test_dir,
@@ -3058,7 +4040,10 @@ pub mod tests {
         //
         // Note: this test is #[ignore] and only runs in environments with a live
         // zerotier-one binary AND reachable localhost UDP. In CI it is skipped.
-        eprintln!("[fallback] Protocol milestones confirmed: {:?}", evidence.confirmed);
+        eprintln!(
+            "[fallback] Protocol milestones confirmed: {:?}",
+            evidence.confirmed
+        );
         assert!(
             !evidence.confirmed.is_empty(),
             "PROTOCOL FAILURE: No protocol milestones confirmed from host-native logs.\n\
@@ -3077,6 +4062,46 @@ pub mod tests {
             evidence.report(),
         );
 
+        let client_assigned_ipv4 = if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), client_authtoken.as_deref())
+        {
+            wait_for_assigned_ipv4_via_manytier_api(
+                CLIENT_API_PORT,
+                token,
+                network_id,
+                std::time::Duration::from_secs(2),
+            )
+        } else {
+            None
+        };
+        eprintln!(
+            "[fallback] Live lane: {} | assigned IPv4: {}",
+            live_execution_lane_label(),
+            client_assigned_ipv4.as_deref().unwrap_or("<none>")
+        );
+
+        if privileged_live_enabled() {
+            assert!(
+                evidence
+                    .confirmed
+                    .iter()
+                    .any(|milestone| milestone == "ManyTier: NETWORK_CONFIG_REQUEST sent"),
+                "LIVE FAILURE: the privileged live lane requires ManyTier to prove \
+                 NETWORK_CONFIG_REQUEST emission when joining the official controller.\n\
+                 Failure category:\n{}\n\nEvidence report:\n{}",
+                failure_category,
+                evidence.report(),
+            );
+            assert!(
+                client_assigned_ipv4.is_some(),
+                "LIVE FAILURE: the privileged live lane requires an IPv4 assignment \
+                 from the official-controller direction.\n\
+                 Failure category:\n{}\n\nEvidence report:\n{}",
+                failure_category,
+                evidence.report(),
+            );
+        }
+
         // Log network creation result (informational).
         match &network_id_str {
             Some(nwid) => eprintln!("[fallback] Network created via zerotier-one API: {}", nwid),
@@ -3086,6 +4111,31 @@ pub mod tests {
                 zt_api_port
             ),
         }
+
+        if let (Some(network_id), Some(member_addr)) = (
+            network_id_str.as_deref(),
+            read_manytier_address(&client_result.home_dir),
+        ) {
+            let authorized = authorize_member_via_zerotier_api(
+                zt_api_port,
+                &authtoken,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback] Authorization helper exercised for ManyTier member {} on {}: {}",
+                hex_encode_address(&member_addr),
+                network_id,
+                authorized
+            );
+        }
+
+        run_opportunistic_pcap_diff(
+            "manytier-client",
+            &client_result.artifact_root,
+            "official-zerotier-one-controller",
+            &controller_result.artifact_root,
+        );
     }
 
     /// Test: ManyTier client joins a ManyTier controller, as a bounded proxy for
@@ -3136,23 +4186,43 @@ pub mod tests {
 
         let shadow_test_dir =
             prepare_shadow_test_dir(&work_dir, "manytier-joins-manytier-controller-fallback");
+        let mut bootstrap = BootstrapManager::new(&shadow_test_dir);
 
         // Step 1: Start ManyTier controller.
         // The controller acts as both root and controller in the localhost scenario.
-        let controller_result = run_manytier_with_planet(
+        let controller_process = spawn_manytier_with_planet(
             &shadow_test_dir,
             "manytier-controller",
             CONTROLLER_API_PORT,
             CONTROLLER_UDP_PORT,
             true, // controller mode
             None, // use default official planet (controller will use it for its own bootstrap)
-            std::time::Duration::from_secs(3),
         );
 
         // Step 2: Read ManyTier controller's ZT address and authtoken.
-        let controller_data_dir = controller_result.home_dir.clone();
+        let controller_data_dir = controller_process.layout.home_dir.clone();
+        let controller_ready =
+            wait_for_manytier_ready(&controller_data_dir, std::time::Duration::from_secs(30));
+        if !controller_ready {
+            let controller_result = finish_host_native_process(controller_process);
+            panic!(
+                "ManyTier controller did not finish identity/API startup in 30s.\n{}",
+                format_host_native_check(&controller_result)
+            );
+        }
         let controller_addr = read_manytier_address(&controller_data_dir);
         let controller_authtoken = read_manytier_authtoken(&controller_data_dir);
+
+        if let Some(ref addr) = controller_addr {
+            bootstrap.record_node(NodeInfo {
+                label: "manytier-controller".to_string(),
+                runtime: "manytier".to_string(),
+                identity: hex_encode_address(addr),
+                home_dir: controller_data_dir.clone(),
+                udp_port: Some(CONTROLLER_UDP_PORT),
+                api_port: Some(CONTROLLER_API_PORT),
+            });
+        }
 
         // Step 3: Build a localhost planet file pointing to the controller's UDP port.
         // We need the controller's identity string for the planet.
@@ -3161,6 +4231,10 @@ pub mod tests {
                 .unwrap_or_default();
 
         let planet_path = if !controller_identity_str.is_empty() {
+            bootstrap.record_planet(PlanetInfo {
+                root_identity: controller_identity_str.clone(),
+                endpoints: vec![format!("127.0.0.1:{}", CONTROLLER_UDP_PORT)],
+            });
             Some(build_planet_for_localhost(
                 &shadow_test_dir,
                 &controller_identity_str,
@@ -3191,6 +4265,12 @@ pub mod tests {
             }
         };
 
+        if let Some(ref nwid) = network_id_str {
+            bootstrap.record_network(nwid);
+        }
+
+        bootstrap.write_manifest();
+
         eprintln!(
             "[fallback-mt] Controller: addr={:?}, network={:?}",
             controller_addr.map(|a| hex_encode_address(&a)),
@@ -3198,26 +4278,201 @@ pub mod tests {
         );
 
         // Step 5: Start ManyTier client 1 with the localhost planet.
-        let client_result = run_manytier_with_planet(
+        let client_process = spawn_manytier_with_planet(
             &shadow_test_dir,
             "manytier-client-1",
             CLIENT_API_PORT,
             CLIENT_UDP_PORT,
             false, // client mode
             planet_path.as_deref(),
-            std::time::Duration::from_secs(5),
         );
 
+        let client_data_dir = client_process.layout.home_dir.clone();
+        let client_ready =
+            wait_for_manytier_ready(&client_data_dir, std::time::Duration::from_secs(30));
+        if !client_ready {
+            let controller_result = finish_host_native_process(controller_process);
+            let client_result = finish_host_native_process(client_process);
+            panic!(
+                "ManyTier client 1 did not finish identity/API startup in 30s.\n\
+                 Controller:\n{}\n\nClient:\n{}",
+                format_host_native_check(&controller_result),
+                format_host_native_check(&client_result)
+            );
+        }
+        let client_authtoken = read_manytier_authtoken(&client_data_dir);
+        let client_addr = read_manytier_address(&client_data_dir);
+
+        if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), client_authtoken.as_deref())
+        {
+            let joined = join_network_via_manytier_api(CLIENT_API_PORT, token, network_id);
+            eprintln!(
+                "[fallback-mt] Client 1 join helper exercised on {} via API {}: {}",
+                network_id, CLIENT_API_PORT, joined
+            );
+        }
+        if let Some(ref member_addr) = client_addr {
+            bootstrap.record_node(NodeInfo {
+                label: "manytier-client-1".to_string(),
+                runtime: "manytier".to_string(),
+                identity: hex_encode_address(member_addr),
+                home_dir: client_data_dir.clone(),
+                udp_port: Some(CLIENT_UDP_PORT),
+                api_port: Some(CLIENT_API_PORT),
+            });
+        }
+        bootstrap.write_manifest();
+
+        if let (Some(network_id), Some(token), Some(member_addr)) = (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            client_addr,
+        ) {
+            let authorized = authorize_member_via_manytier_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback-mt] Client 1 authorization helper exercised for {} on {}: {}",
+                hex_encode_address(&member_addr),
+                network_id,
+                authorized
+            );
+        }
+
         // Step 6: Start ManyTier client 2 (for data-plane verification).
-        let peer2_result = run_manytier_with_planet(
+        let peer2_process = spawn_manytier_with_planet(
             &shadow_test_dir,
             "manytier-client-2",
             PEER2_API_PORT,
             PEER2_UDP_PORT,
             false, // client mode
             planet_path.as_deref(),
-            std::time::Duration::from_secs(5),
         );
+
+        let peer2_data_dir = peer2_process.layout.home_dir.clone();
+        let peer2_ready =
+            wait_for_manytier_ready(&peer2_data_dir, std::time::Duration::from_secs(30));
+        if !peer2_ready {
+            let controller_result = finish_host_native_process(controller_process);
+            let client_result = finish_host_native_process(client_process);
+            let peer2_result = finish_host_native_process(peer2_process);
+            panic!(
+                "ManyTier client 2 did not finish identity/API startup in 30s.\n\
+                 Controller:\n{}\n\nClient 1:\n{}\n\nClient 2:\n{}",
+                format_host_native_check(&controller_result),
+                format_host_native_check(&client_result),
+                format_host_native_check(&peer2_result)
+            );
+        }
+        let peer2_authtoken = read_manytier_authtoken(&peer2_data_dir);
+        let peer2_addr = read_manytier_address(&peer2_data_dir);
+
+        if let Some(ref member_addr) = peer2_addr {
+            bootstrap.record_node(NodeInfo {
+                label: "manytier-client-2".to_string(),
+                runtime: "manytier".to_string(),
+                identity: hex_encode_address(member_addr),
+                home_dir: peer2_data_dir.clone(),
+                udp_port: Some(PEER2_UDP_PORT),
+                api_port: Some(PEER2_API_PORT),
+            });
+        }
+        bootstrap.write_manifest();
+
+        if let (Some(network_id), Some(token)) = (network_id_str.as_deref(), peer2_authtoken.as_deref()) {
+            let joined = join_network_via_manytier_api(PEER2_API_PORT, token, network_id);
+            eprintln!(
+                "[fallback-mt] Client 2 join helper exercised on {} via API {}: {}",
+                network_id, PEER2_API_PORT, joined
+            );
+        }
+
+        if let (Some(network_id), Some(token), Some(member_addr)) = (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            peer2_addr,
+        ) {
+            let authorized = authorize_member_via_manytier_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback-mt] Client 2 authorization helper exercised for {} on {}: {}",
+                hex_encode_address(&member_addr),
+                network_id,
+                authorized
+            );
+        }
+
+        if let (
+            Some(network_id),
+            Some(client_token),
+            Some(peer2_token),
+            Some(client_addr),
+            Some(peer2_addr),
+        ) = (
+            network_id_str.as_deref(),
+            client_authtoken.as_deref(),
+            peer2_authtoken.as_deref(),
+            client_addr,
+            peer2_addr,
+        ) {
+            let client_ip = wait_for_assigned_ipv4_via_manytier_api(
+                CLIENT_API_PORT,
+                client_token,
+                network_id,
+                std::time::Duration::from_secs(10),
+            );
+            let peer2_ip = wait_for_assigned_ipv4_via_manytier_api(
+                PEER2_API_PORT,
+                peer2_token,
+                network_id,
+                std::time::Duration::from_secs(10),
+            );
+            if let (Some(client_ip), Some(peer2_ip), Some(client_tun), Some(peer2_tun)) = (
+                client_ip,
+                peer2_ip,
+                fallback_tun_name(network_id, &client_addr),
+                fallback_tun_name(network_id, &peer2_addr),
+            ) {
+                let client_refresh =
+                    join_network_via_manytier_api(CLIENT_API_PORT, client_token, network_id);
+                let peer2_refresh =
+                    join_network_via_manytier_api(PEER2_API_PORT, peer2_token, network_id);
+                eprintln!(
+                    "[fallback-mt] Config refresh triggered after both assigned IPv4s were observed: client1={}, client2={}",
+                    client_refresh, peer2_refresh
+                );
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let client_ping = trigger_ping_over_interface(&client_tun, &peer2_ip);
+                let peer2_ping = trigger_ping_over_interface(&peer2_tun, &client_ip);
+                eprintln!(
+                    "[fallback-mt] Data-plane trigger: {}({}) -> {} via {} = {}",
+                    client_tun, client_ip, peer2_ip, client_tun, client_ping
+                );
+                eprintln!(
+                    "[fallback-mt] Data-plane trigger: {}({}) -> {} via {} = {}",
+                    peer2_tun, peer2_ip, client_ip, peer2_tun, peer2_ping
+                );
+            } else {
+                eprintln!(
+                    "[fallback-mt] WARNING: Could not derive both assigned IPv4s and TUN names before data-plane trigger"
+                );
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(8));
+
+        let client_result = finish_host_native_process(client_process);
+        let peer2_result = finish_host_native_process(peer2_process);
+
+        let controller_result = finish_host_native_process(controller_process);
 
         // Task 2: Comparable handshake/config evidence from host-native artifacts.
         let evidence = check_host_native_handshake_evidence(&client_result, &controller_result);
@@ -3230,11 +4485,16 @@ pub mod tests {
              peer2_udp_port={}\n\
              planet={}\n\
              network_id={}\n",
-            controller_addr.map(|a| hex_encode_address(&a)).unwrap_or_else(|| "<unknown>".to_string()),
+            controller_addr
+                .map(|a| hex_encode_address(&a))
+                .unwrap_or_else(|| "<unknown>".to_string()),
             CONTROLLER_UDP_PORT,
             CLIENT_UDP_PORT,
             PEER2_UDP_PORT,
-            planet_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<none>".to_string()),
+            planet_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
             network_id_str.as_deref().unwrap_or("<not created>"),
         );
 
@@ -3279,10 +4539,8 @@ pub mod tests {
         // In the host-assisted scenario, we check for data-plane evidence in logs.
         let client_combined = format!("{}\n{}", client_result.stdout, client_result.stderr);
         let peer2_combined = format!("{}\n{}", peer2_result.stdout, peer2_result.stderr);
-        let controller_combined = format!(
-            "{}\n{}",
-            controller_result.stdout, controller_result.stderr
-        );
+        let controller_combined =
+            format!("{}\n{}", controller_result.stdout, controller_result.stderr);
 
         // Look for data-plane evidence: frame_received, vl2_frame_received, or
         // NETWORK_FRAME/MULTICAST_FRAME in any participant's logs.
@@ -3322,13 +4580,18 @@ pub mod tests {
         }
 
         // Write the data-plane evidence section to the report.
+        let tun_tap_available = host_tun_tap_available();
         let data_plane_report = format!(
             "=== Data-Plane Verification ===\n\
+             Execution lane: {}\n\
              Evidence origin: {}\n\
+             TUN/TAP available: {}\n\
              Join evidence found: {}\n\
              Data-plane (frame exchange) evidence found: {}\n\
              Note: failure here names whether join or frame exchange broke.\n",
+            live_execution_lane_label(),
             EVIDENCE_HOST_NATIVE,
+            tun_tap_available,
             join_evidence,
             data_plane_evidence,
         );
@@ -3338,6 +4601,18 @@ pub mod tests {
 
         eprintln!("{}", data_plane_report);
 
+        enforce_live_data_plane_lane(
+            "fallback-mt",
+            tun_tap_available,
+            data_plane_evidence,
+            &failure_category,
+            &format!(
+                "PROTOCOL FAILURE: the privileged live lane requires fallback data-plane \
+                 evidence once the peers attempt to join.\nFailure category:\n{}",
+                failure_category
+            ),
+        );
+
         // Artifact contract: all participants must have evidence.txt manifests.
         assert!(
             controller_result.files.iter().any(|f| f == "evidence.txt"),
@@ -3346,6 +4621,13 @@ pub mod tests {
         assert!(
             client_result.files.iter().any(|f| f == "evidence.txt"),
             "client artifacts missing host-native manifest"
+        );
+
+        run_opportunistic_pcap_diff(
+            "manytier-client",
+            &client_result.artifact_root,
+            "manytier-controller",
+            &controller_result.artifact_root,
         );
     }
 
@@ -3428,6 +4710,7 @@ pub mod tests {
 
         let shadow_test_dir =
             prepare_shadow_test_dir(&work_dir, "official-joins-manytier-controller-fallback");
+        let mut bootstrap = BootstrapManager::new(&shadow_test_dir);
 
         // Step 1: Start ManyTier controller.
         // The controller runs with a fixed UDP port so we can build a planet file for
@@ -3436,20 +4719,39 @@ pub mod tests {
             "[fallback-official] Starting ManyTier controller on UDP:{} API:{}",
             CONTROLLER_UDP_PORT, CONTROLLER_API_PORT
         );
-        let controller_result = run_manytier_with_planet(
+        let controller_process = spawn_manytier_with_planet(
             &shadow_test_dir,
             "manytier-controller",
             CONTROLLER_API_PORT,
             CONTROLLER_UDP_PORT,
             true, // controller mode
             None, // default planet for bootstrap
-            std::time::Duration::from_secs(3),
         );
 
         // Step 2: Read ManyTier controller identity and authtoken.
-        let controller_data_dir = controller_result.home_dir.clone();
+        let controller_data_dir = controller_process.layout.home_dir.clone();
+        let controller_ready =
+            wait_for_manytier_ready(&controller_data_dir, std::time::Duration::from_secs(30));
+        if !controller_ready {
+            let controller_result = finish_host_native_process(controller_process);
+            panic!(
+                "ManyTier controller did not finish identity/API startup in 30s.\n{}",
+                format_host_native_check(&controller_result)
+            );
+        }
         let controller_addr = read_manytier_address(&controller_data_dir);
         let controller_authtoken = read_manytier_authtoken(&controller_data_dir);
+
+        if let Some(ref addr) = controller_addr {
+            bootstrap.record_node(NodeInfo {
+                label: "manytier-controller".to_string(),
+                runtime: "manytier".to_string(),
+                identity: hex_encode_address(addr),
+                home_dir: controller_data_dir.clone(),
+                udp_port: Some(CONTROLLER_UDP_PORT),
+                api_port: Some(CONTROLLER_API_PORT),
+            });
+        }
 
         let controller_identity_str =
             std::fs::read_to_string(controller_data_dir.join("identity.secret"))
@@ -3460,30 +4762,73 @@ pub mod tests {
             controller_addr.map(|a| hex_encode_address(&a))
         );
 
+        let zt_one_bin =
+            zerotier_one_binary_path(&work_dir).expect("failed to locate zerotier-one fixture");
+
         // Step 3: Build a localhost planet pointing to the ManyTier controller.
         // This planet is used by the official zerotier-one client so it can reach
         // the ManyTier controller as its root/controller without live roots.
         let planet_path = if !controller_identity_str.is_empty() {
+            bootstrap.record_planet(PlanetInfo {
+                root_identity: controller_identity_str.clone(),
+                endpoints: vec![format!("127.0.0.1:{}", CONTROLLER_UDP_PORT)],
+            });
             let p = build_planet_for_localhost(
                 &shadow_test_dir,
                 &controller_identity_str,
                 CONTROLLER_UDP_PORT,
             );
+
+            // Generate moon using official zerotier-idtool
+            let id_secret_path = shadow_test_dir.join("controller.secret");
+            std::fs::write(&id_secret_path, &controller_identity_str).unwrap();
+            let output = Command::new(&zt_one_bin)
+                .args(["-i", "initmoon", id_secret_path.to_str().unwrap()])
+                .current_dir(&shadow_test_dir)
+                .output()
+                .expect("failed to execute initmoon");
+            
+            let moon_json_path = shadow_test_dir.join("moon.json");
+            let mut moon_json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("failed to parse moon json");
+            
+            // Modify stableEndpoints
+            if let Some(roots) = moon_json.get_mut("roots") {
+                if let Some(root_obj) = roots[0].as_object_mut() {
+                    root_obj.insert("stableEndpoints".to_string(), serde_json::json!([format!("127.0.0.1/{}", CONTROLLER_UDP_PORT)]));
+                }
+            }
+            std::fs::write(&moon_json_path, serde_json::to_string(&moon_json).unwrap()).unwrap();
+
+            let _ = Command::new(&zt_one_bin)
+                .args(["-i", "genmoon", moon_json_path.to_str().unwrap()])
+                .current_dir(&shadow_test_dir)
+                .status();
+
+            let moon_id = controller_addr.as_ref().map(|a| {
+                (a[0] as u64) << 32
+                    | (a[1] as u64) << 24
+                    | (a[2] as u64) << 16
+                    | (a[3] as u64) << 8
+                    | (a[4] as u64)
+            }).unwrap_or(0);
+            let m = shadow_test_dir.join(format!("{:016x}.moon", moon_id));
+
             eprintln!(
-                "[fallback-official] Built localhost planet at {} -> 127.0.0.1:{}",
+                "[fallback-official] Built localhost planet and moon at {} -> 127.0.0.1:{}",
                 p.display(),
                 CONTROLLER_UDP_PORT
             );
-            Some(p)
+            Some((p, m, moon_id))
         } else {
             eprintln!(
                 "[fallback-official] WARNING: Could not read ManyTier controller identity; \
-                 official client will use default planet (likely to fail to reach controller)"
+                  official client will use default planet (likely to fail to reach controller)"
             );
             None
         };
 
         // Step 4: Create a network via the ManyTier controller API.
+
         let network_id_str = match (&controller_addr, &controller_authtoken) {
             (Some(addr), Some(token)) => {
                 let addr_hex = hex_encode_address(addr);
@@ -3501,6 +4846,12 @@ pub mod tests {
                 None
             }
         };
+
+        if let Some(ref nwid) = network_id_str {
+            bootstrap.record_network(nwid);
+        }
+
+        bootstrap.write_manifest();
 
         eprintln!(
             "[fallback-official] Network created via ManyTier API: {:?}",
@@ -3525,20 +4876,14 @@ pub mod tests {
 
         prepare_zerotier_home(&official_layout.home_dir, network_id_u64);
 
-        // Copy the localhost planet into the official zerotier-one home directory.
-        if let Some(ref planet_src) = planet_path {
-            let planet_dst = official_layout.home_dir.join("planet.bin");
-            match std::fs::copy(planet_src, &planet_dst) {
-                Ok(_) => eprintln!(
-                    "[fallback-official] Copied localhost planet to official home: {}",
-                    planet_dst.display()
-                ),
-                Err(e) => eprintln!(
-                    "[fallback-official] WARNING: Failed to copy planet to official home: {} ({})",
-                    planet_dst.display(),
-                    e
-                ),
-            }
+        // Copy the localhost moon into the official zerotier-one moons.d directory.
+        // We do NOT copy the planet, because its signature is invalid and might cause conflicts.
+        if let Some((_, ref moon_src, moon_id)) = planet_path {
+            let moons_dir = official_layout.home_dir.join("moons.d");
+            std::fs::create_dir_all(&moons_dir).expect("failed to create moons.d");
+            let moon_dst = moons_dir.join(format!("{:016x}.moon", moon_id));
+            std::fs::copy(moon_src, &moon_dst).expect("failed to copy moon file");
+            eprintln!("[fallback-official] Copied localhost moon to official home: {}", moon_dst.display());
         }
 
         // Use a fixed port so we can track the official client.
@@ -3547,7 +4892,9 @@ pub mod tests {
                 "primaryPort": OFFICIAL_UDP_PORT,
                 "portMappingEnabled": false,
                 "allowSecondaryPort": false,
-                "softwareUpdate": "disable"
+                "softwareUpdate": "disable",
+                "allowLocalNetworks": true,
+                "bind": ["127.0.0.1"]
             }
         });
         std::fs::write(
@@ -3569,12 +4916,84 @@ pub mod tests {
             .expect("failed to create official stderr log");
 
         let mut official_child = Command::new(&zt_one_bin)
-            .args(["-U", official_layout.home_dir.to_str().unwrap()])
+            .args(["-U", &official_layout.home_dir.to_str().unwrap()])
             .current_dir(&workspace_root(&work_dir))
             .stdout(Stdio::from(official_stdout_file))
             .stderr(Stdio::from(official_stderr_file))
             .spawn()
             .expect("failed to start official zerotier-one client");
+
+        // Wait for official identity to be generated.
+        let official_addr = (0..20).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            read_zerotier_identity_address(&official_layout.home_dir)
+        });
+
+        if let Some(ref addr) = official_addr {
+            bootstrap.record_node(NodeInfo {
+                label: official_label.to_string(),
+                runtime: "official".to_string(),
+                identity: hex_encode_address(addr),
+                home_dir: official_layout.home_dir.clone(),
+                udp_port: Some(OFFICIAL_UDP_PORT),
+                api_port: Some(OFFICIAL_UDP_PORT),
+            });
+            bootstrap.write_manifest();
+        }
+
+        let official_identity_ready = official_addr.is_some();
+        if let (true, Some(network_id), Some(token), Some(member_addr)) = (
+            official_identity_ready,
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            read_zerotier_identity_address(&official_layout.home_dir),
+        ) {
+            let authorized = authorize_member_via_manytier_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback-official] Early authorization helper exercised for official member {} on {}: {}",
+                hex_encode_address(&member_addr),
+                network_id,
+                authorized
+            );
+
+            // Orbit the moon
+            if let Some((_, _, moon_id)) = planet_path {
+                let orbit_status = Command::new(&zt_one_bin)
+                    .args([
+                        "-q",
+                        &format!("-D{}", official_layout.home_dir.to_str().unwrap()),
+                        "orbit",
+                        &format!("{:010x}", moon_id),
+                        &format!("{:010x}", moon_id),
+                    ])
+                    .status()
+                    .expect("failed to execute official orbit command");
+                eprintln!(
+                    "[fallback-official] Official orbit command status: {:?}",
+                    orbit_status
+                );
+            }
+
+            // Join the network
+            let join_status = Command::new(&zt_one_bin)
+                .args([
+                    "-q",
+                    &format!("-D{}", official_layout.home_dir.to_str().unwrap()),
+                    "join",
+                    network_id,
+                ])
+                .status()
+                .expect("failed to execute official join command");
+            eprintln!(
+                "[fallback-official] Official join command status: {:?}",
+                join_status
+            );
+        }
 
         // Wait up to 8s for the test window, then collect results.
         std::thread::sleep(std::time::Duration::from_secs(8));
@@ -3590,7 +5009,7 @@ pub mod tests {
             let _ = official_child.wait();
         }
 
-        let official_result = HostNativeRunResult {
+        let mut official_result = HostNativeRunResult {
             label: official_label.to_string(),
             artifact_root: official_layout.artifact_root.clone(),
             home_dir: official_layout.home_dir.clone(),
@@ -3600,6 +5019,8 @@ pub mod tests {
             stderr: std::fs::read_to_string(&official_layout.stderr_path).unwrap_or_default(),
             files: collect_relative_files(&official_layout.artifact_root),
         };
+
+        let controller_result = finish_host_native_process(controller_process);
 
         // Write evidence manifest for official artifacts.
         let official_command = HostNativeCommand {
@@ -3621,6 +5042,7 @@ pub mod tests {
             ),
         };
         write_host_native_manifest(&official_layout, &official_command, &official_result);
+        official_result.files = collect_relative_files(&official_layout.artifact_root);
 
         // Distinguish infrastructure failures from protocol mismatches.
         // For this test the "official" result is the controller from the reverse-direction helpers,
@@ -3665,6 +5087,7 @@ pub mod tests {
         let official_addr = read_zerotier_identity_address(&official_layout.home_dir);
         let extra_context = format!(
             "direction: official->ManyTier-controller\n\
+             execution_lane: {}\n\
              compromise: host-native-fallback (no Shadow-native PCAP; deferred todo for future phase)\n\
              controller_addr={}\n\
              controller_udp_port={}\n\
@@ -3673,6 +5096,7 @@ pub mod tests {
              planet=localhost-planet.bin (ManyTier controller identity, 127.0.0.1:{})\n\
              network_id={}\n\
              network_api_create_result={}\n",
+            live_execution_lane_label(),
             controller_addr.map(|a| hex_encode_address(&a)).unwrap_or_else(|| "<unknown>".to_string()),
             CONTROLLER_UDP_PORT,
             official_addr.map(|a| hex_encode_address(&a)).unwrap_or_else(|| "<not yet generated>".to_string()),
@@ -3720,14 +5144,9 @@ pub mod tests {
         }
 
         // Data-plane downstream check (non-fatal).
-        let controller_combined = format!(
-            "{}\n{}",
-            controller_result.stdout, controller_result.stderr
-        );
-        let official_combined = format!(
-            "{}\n{}",
-            official_result.stdout, official_result.stderr
-        );
+        let controller_combined =
+            format!("{}\n{}", controller_result.stdout, controller_result.stderr);
+        let official_combined = format!("{}\n{}", official_result.stdout, official_result.stderr);
 
         let join_evidence = controller_combined.contains("vl2_network_joined")
             || controller_combined.contains("dynamic_config_received")
@@ -3741,15 +5160,20 @@ pub mod tests {
             || official_combined.contains("frame_received")
             || official_combined.contains("NETWORK_FRAME");
 
+        let tun_tap_available = host_tun_tap_available();
         let data_plane_report = format!(
             "=== Data-Plane Verification (official->ManyTier-controller) ===\n\
+             Execution lane: {}\n\
              Evidence origin: {}\n\
              Evidence compromise: host-native-fallback (no Shadow-native PCAP)\n\
              Deferred: full official-in-Shadow coverage is a future todo\n\
+             TUN/TAP available: {}\n\
              Join/config-request evidence found: {}\n\
              Data-plane (frame exchange) evidence found: {}\n\
              Note: failure here names whether join or frame exchange broke.\n",
+            live_execution_lane_label(),
             EVIDENCE_HOST_NATIVE,
+            tun_tap_available,
             join_evidence,
             data_plane_evidence,
         );
@@ -3760,6 +5184,18 @@ pub mod tests {
             .expect("failed to write official->ManyTier data-plane evidence report");
 
         eprintln!("{}", data_plane_report);
+
+        enforce_live_data_plane_lane(
+            "fallback-official",
+            tun_tap_available,
+            data_plane_evidence,
+            &failure_category,
+            &format!(
+                "PROTOCOL FAILURE: the privileged live lane requires fallback data-plane \
+                 evidence for the official->ManyTier-controller direction.\nFailure category:\n{}",
+                failure_category
+            ),
+        );
 
         if data_plane_evidence {
             eprintln!("[fallback-official] Data-plane traffic confirmed in host-native logs.");
@@ -3782,6 +5218,32 @@ pub mod tests {
              - official->ManyTier-controller: this test\n\
              - Both directions use host-native-fallback evidence (explicit compromise)\n\
              - Deferred: full Shadow-native coverage for official zerotier-one is a future todo"
+        );
+
+        if let (Some(network_id), Some(token), Some(member_addr)) = (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            read_zerotier_identity_address(&official_result.home_dir),
+        ) {
+            let authorized = authorize_member_via_manytier_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback-official] Authorization helper exercised for official member {} on {}: {}",
+                hex_encode_address(&member_addr),
+                network_id,
+                authorized
+            );
+        }
+
+        run_opportunistic_pcap_diff(
+            "official-zerotier-one-client",
+            &official_result.artifact_root,
+            "manytier-controller",
+            &controller_result.artifact_root,
         );
     }
 }

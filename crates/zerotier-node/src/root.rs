@@ -3,7 +3,6 @@
 /// Handles building HELLO packets (cipher suite 0, MAC only) for root server
 /// bootstrapping and WHOIS requests (cipher suite 1, encrypted) for address
 /// resolution.
-
 extern crate alloc;
 
 use zerotier_crypto::identity::Identity;
@@ -28,9 +27,7 @@ pub struct RootManager {
 
 impl RootManager {
     pub fn new() -> Self {
-        RootManager {
-            last_hello_sent: 0,
-        }
+        RootManager { last_hello_sent: 0 }
     }
 
     /// Build a HELLO packet to send to a root server.
@@ -44,6 +41,7 @@ impl RootManager {
         now_ms: u64,
         shared_secret: &[u8; 32],
         buf: &mut [u8],
+        planet_world_timestamp: u64,
     ) -> Result<(usize, u64), ProtocolError> {
         if buf.len() < ZT_PROTO_MIN_PACKET_LENGTH + 128 {
             return Err(ProtocolError::TooShort {
@@ -74,7 +72,7 @@ impl RootManager {
 
         // Build HELLO payload after the header (offset 28)
         let dest_inet = InetAddress::from_socket_addr(dest_physical);
-        let hello = HelloPayload::new(
+        let mut hello = HelloPayload::new(
             Identity {
                 address: our_identity.address,
                 public_key: our_identity.public_key.clone(),
@@ -83,9 +81,15 @@ impl RootManager {
             now_ms,
             dest_inet,
         );
+        hello.planet_world_timestamp = planet_world_timestamp;
 
         let payload_len = hello.serialize(&mut buf[28..])?;
-        let total_len = 28 + payload_len;
+        let moon_count_offset = 28 + payload_len;
+        buf[moon_count_offset..moon_count_offset + 2].copy_from_slice(&0u16.to_be_bytes());
+        let total_len = moon_count_offset + 2;
+
+        salsa::crypt_packet_field(shared_secret, &mut buf[..total_len], moon_count_offset, 2)
+            .map_err(ProtocolError::CryptoError)?;
 
         // Armor: cipher suite 0 = MAC only, no encryption
         salsa::armor_packet(shared_secret, &mut buf[..total_len], false)
@@ -153,6 +157,7 @@ impl RootManager {
         timestamp_echo: u64,
         shared_secret: &[u8; 32],
         now_ms: u64,
+        use_unmangled_null: bool,
         buf: &mut [u8],
     ) -> Result<usize, ProtocolError> {
         if buf.len() < ZT_PROTO_MIN_PACKET_LENGTH + 32 {
@@ -189,8 +194,13 @@ impl RootManager {
         let payload_len = ok.serialize(&mut buf[28..])?;
         let total_len = 28 + payload_len;
 
-        salsa::armor_packet(shared_secret, &mut buf[..total_len], true)
-            .map_err(ProtocolError::CryptoError)?;
+        if use_unmangled_null {
+            salsa::armor_packet_unmangled(&[0u8; 32], &mut buf[..total_len], false)
+                .map_err(ProtocolError::CryptoError)?;
+        } else {
+            salsa::armor_packet(shared_secret, &mut buf[..total_len], true)
+                .map_err(ProtocolError::CryptoError)?;
+        }
 
         Ok(total_len)
     }
@@ -274,7 +284,7 @@ mod tests {
         let mut buf = [0u8; 512];
 
         let (len, _packet_id) =
-            RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf).unwrap();
+            RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf, 0).unwrap();
 
         assert!(len >= ZT_PROTO_MIN_PACKET_LENGTH);
 
@@ -319,6 +329,8 @@ mod tests {
         let secret = test_shared_secret();
         let mut buf = [0u8; 10];
 
-        assert!(RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf).is_err());
+        assert!(
+            RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf, 0).is_err()
+        );
     }
 }
