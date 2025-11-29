@@ -91,7 +91,9 @@ impl RootManager {
         salsa::crypt_packet_field(shared_secret, &mut buf[..total_len], moon_count_offset, 2)
             .map_err(ProtocolError::CryptoError)?;
 
-        // Armor: cipher suite 0 = MAC only, no encryption
+        // Armor: cipher suite 0 = MAC only, no encryption.
+        // Always use the mangled-key path: the official controller verifies the
+        // HELLO MAC using the DH-derived shared secret with key mangling applied.
         salsa::armor_packet(shared_secret, &mut buf[..total_len], false)
             .map_err(ProtocolError::CryptoError)?;
 
@@ -319,6 +321,85 @@ mod tests {
 
         let hdr = PacketHeader::from_bytes(&buf[..len]).unwrap();
         assert_eq!(hdr.cipher_suite(), CIPHER_SUITE_C25519_POLY1305_SALSA2012);
+    }
+
+    #[test]
+    fn build_hello_mac_verifies_with_dh_key() {
+        // Simulates the controller-side: build a HELLO, then verify its MAC
+        // using the DH-derived shared secret (as the controller would).
+        use zerotier_crypto::identity::Identity;
+
+        struct XorShift(u64);
+        impl rand_core::RngCore for XorShift {
+            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                let mut pos = 0;
+                while pos < dest.len() {
+                    let val = self.next_u64().to_le_bytes();
+                    let n = core::cmp::min(8, dest.len() - pos);
+                    dest[pos..pos + n].copy_from_slice(&val[..n]);
+                    pos += n;
+                }
+            }
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+                self.fill_bytes(dest);
+                Ok(())
+            }
+        }
+
+        let mut rng = XorShift(42);
+        let client_id = Identity::generate(&mut rng).unwrap();
+        let controller_id = Identity::generate(&mut rng).unwrap();
+
+        // Client computes DH shared secret
+        let client_secret = client_id.secret.as_ref().unwrap();
+        let controller_pub = x25519_dalek::PublicKey::from(controller_id.public_key.dh);
+        let client_dh = zerotier_crypto::key_agreement::key_agree(
+            &client_secret.dh,
+            &controller_pub,
+        );
+
+        // Controller computes DH shared secret (should be the same)
+        let controller_secret = controller_id.secret.as_ref().unwrap();
+        let client_pub = x25519_dalek::PublicKey::from(client_id.public_key.dh);
+        let controller_dh = zerotier_crypto::key_agreement::key_agree(
+            &controller_secret.dh,
+            &client_pub,
+        );
+
+        assert_eq!(client_dh, controller_dh, "DH shared secrets must match");
+
+        // Client builds HELLO using client-side DH key
+        let mut buf = [0u8; 512];
+        let (len, _) = RootManager::build_hello(
+            &client_id,
+            controller_id.address.as_bytes(),
+            "127.0.0.1:9993".parse().unwrap(),
+            1000,
+            &client_dh,
+            &mut buf,
+            0,
+        )
+        .unwrap();
+
+        // Controller verifies MAC using controller-side DH key
+        let result = zerotier_crypto::salsa::dearmor_packet(
+            &controller_dh,
+            &mut buf[..len],
+        );
+        assert!(
+            result.is_ok(),
+            "Controller should verify HELLO MAC with DH key: {:?}",
+            result.err()
+        );
     }
 
     #[test]

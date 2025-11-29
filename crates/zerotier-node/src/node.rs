@@ -252,13 +252,18 @@ impl Node {
 
                             let target_str = match target {
                                 InetAddress::V4 { ip, .. } => {
-                                    alloc::format!("{}.{}.{}.{}/{}", ip[0], ip[1], ip[2], ip[3], prefix)
+                                    alloc::format!(
+                                        "{}.{}.{}.{}/{}",
+                                        ip[0],
+                                        ip[1],
+                                        ip[2],
+                                        ip[3],
+                                        prefix
+                                    )
                                 }
                                 _ => alloc::format!("{:?}/{}", target, prefix),
                             };
-                            new_routes.push(crate::network::Route {
-                                target: target_str,
-                            });
+                            new_routes.push(crate::network::Route { target: target_str });
                         } else {
                             break;
                         }
@@ -493,16 +498,14 @@ impl Node {
             Some(Verb::MulticastLike) => {
                 crate::vl2::handle_multicast_like(self, &source, verb_payload, now_ms)
             }
-            Some(Verb::MulticastGather) => {
-                crate::vl2::handle_multicast_gather(
-                    self,
-                    &source,
-                    verb_payload,
-                    from,
-                    now_ms,
-                    packet_id,
-                )
-            }
+            Some(Verb::MulticastGather) => crate::vl2::handle_multicast_gather(
+                self,
+                &source,
+                verb_payload,
+                from,
+                now_ms,
+                packet_id,
+            ),
             Some(Verb::MulticastFrame) => {
                 crate::vl2::handle_multicast_frame(self, &source, verb_payload, from, now_ms)
             }
@@ -593,26 +596,22 @@ impl Node {
             Err(_) => return,
         };
 
-        let mut used_unmangled_null = false;
-        // Verify MAC for HELLO (using ephemeral shared secret)
+        // Verify MAC for HELLO using the DH-derived shared secret.
+        // The sender armors with armor_packet(dh_key, ...) and we verify with
+        // dearmor_packet(dh_key, ...): both use key mangling.
         if let Some(ref our_secret) = self.identity.secret {
             let shared_secret = zerotier_crypto::key_agreement::key_agree(
                 &our_secret.dh,
                 &x25519_dalek::PublicKey::from(hello.identity.public_key.dh),
             );
             if salsa::dearmor_packet(&shared_secret, &mut data.to_vec()).is_err() {
-                if salsa::dearmor_packet_unmangled(&[0u8; 32], &mut data.to_vec()).is_err() {
-                    tracing::warn!(
-                        target: "manytier",
-                        event = "hello_mac_failed",
-                        packet_id,
-                        "dropping HELLO with invalid MAC (both true and unmangled null secret failed) - BYPASSING"
-                    );
-                    used_unmangled_null = true;
-                    // return;
-                } else {
-                    used_unmangled_null = true;
-                }
+                tracing::warn!(
+                    target: "manytier",
+                    event = "hello_mac_failed",
+                    packet_id,
+                    "dropping HELLO with invalid MAC"
+                );
+                return;
             }
         }
 
@@ -668,7 +667,7 @@ impl Node {
                 hello.timestamp,
                 &shared_secret,
                 now_ms,
-                used_unmangled_null,
+                false,
                 &mut buf,
             ) {
                 self.actions.push(NodeAction::SendTo {
@@ -794,8 +793,7 @@ impl Node {
     /// Handle an incoming ERROR packet.
     fn handle_error(&mut self, data: &[u8], from: SocketAddr, _now_ms: u64) {
         let payload_data = if data.len() > 28 { &data[28..] } else { return };
-        let error = match zerotier_protocol::verbs::error::ErrorPayload::deserialize(payload_data)
-        {
+        let error = match zerotier_protocol::verbs::error::ErrorPayload::deserialize(payload_data) {
             Ok(e) => e,
             Err(_) => return,
         };
@@ -1315,7 +1313,9 @@ impl Node {
 
         // Send HELLOs to peers that need pings
         for (addr, phys_addr) in &ping_targets {
-            let shared_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            // Always use the DH-derived shared secret for HELLO armoring.
+            // The official controller verifies the MAC using key_agree(sender_pubkey, ctrl_privkey).
+            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
             let planet_ts = self
                 .topology
                 .planet
@@ -1329,7 +1329,7 @@ impl Node {
                 addr,
                 *phys_addr,
                 now_ms,
-                &shared_secret,
+                &hello_secret,
                 &mut buf,
                 planet_ts,
             ) {
@@ -1346,7 +1346,10 @@ impl Node {
                 });
                 if let Some(peer) = self.topology.get_peer_mut(addr) {
                     peer.on_hello_sent(0, now_ms);
-                    if let Some(path) = peer.paths.iter_mut().find(|path| path.address == *phys_addr)
+                    if let Some(path) = peer
+                        .paths
+                        .iter_mut()
+                        .find(|path| path.address == *phys_addr)
                     {
                         path.sent(now_ms);
                     }
@@ -1356,7 +1359,11 @@ impl Node {
 
         // Send heartbeat HELLOs to paths that need keepalive
         for (addr, phys_addr) in &heartbeat_targets {
-            let shared_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            // Use the DH-derived secret for HELLO armoring when we know the peer's identity.
+            // Some older notes suggested a null-key first-contact HELLO for roots, but in
+            // practice this causes `zerotier-one` to drop our HELLO in the localhost
+            // controller harness, resulting in zero replies and no config assignment.
+            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
             let planet_ts = self
                 .topology
                 .planet
@@ -1370,7 +1377,7 @@ impl Node {
                 addr,
                 *phys_addr,
                 now_ms,
-                &shared_secret,
+                &hello_secret,
                 &mut buf,
                 planet_ts,
             ) {
@@ -1380,7 +1387,10 @@ impl Node {
                 });
                 if let Some(peer) = self.topology.get_peer_mut(addr) {
                     peer.on_hello_sent(0, now_ms);
-                    if let Some(path) = peer.paths.iter_mut().find(|path| path.address == *phys_addr)
+                    if let Some(path) = peer
+                        .paths
+                        .iter_mut()
+                        .find(|path| path.address == *phys_addr)
                     {
                         path.sent(now_ms);
                     }
@@ -1413,7 +1423,10 @@ impl Node {
                 });
                 if let Some(peer) = self.topology.get_peer_mut(addr) {
                     peer.on_hello_sent(packet_id, now_ms);
-                    if let Some(path) = peer.paths.iter_mut().find(|path| path.address == *phys_addr)
+                    if let Some(path) = peer
+                        .paths
+                        .iter_mut()
+                        .find(|path| path.address == *phys_addr)
                     {
                         path.sent(now_ms);
                     }
@@ -1437,6 +1450,7 @@ impl Node {
             .collect();
 
         for (addr, phys_addr) in &root_reconnect {
+            // Always use the DH-derived shared secret for HELLO armoring.
             let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
             let planet_ts = self
                 .topology
@@ -1467,7 +1481,10 @@ impl Node {
                 });
                 if let Some(peer) = self.topology.get_peer_mut(addr) {
                     peer.on_hello_sent(packet_id, now_ms);
-                    if let Some(path) = peer.paths.iter_mut().find(|path| path.address == *phys_addr)
+                    if let Some(path) = peer
+                        .paths
+                        .iter_mut()
+                        .find(|path| path.address == *phys_addr)
                     {
                         path.sent(now_ms);
                     }
@@ -1512,15 +1529,80 @@ impl Node {
                             .get_peer(root_addr)
                             .and_then(|p| p.paths.first())
                             .map(|path| path.address)
-                        })
+                    })
                 });
 
             if let Some(phys_addr) = dest_addr {
-                let shared_secret = self.shared_secret_for_peer(ctrl_addr).unwrap_or([0u8; 32]);
+                // Only send NCR after an active HELLO session with the controller.
+                // Sending before OK(HELLO) means the controller hasn't verified our
+                // identity yet and will silently drop the encrypted packet.
+                let peer_active = self
+                    .topology
+                    .get_peer(ctrl_addr)
+                    .map_or(false, |p| matches!(p.state, PeerState::Active { .. }));
+                if !peer_active {
+                    tracing::debug!(
+                        target: "manytier",
+                        event = "ncr_deferred_no_session",
+                        controller = %format_args!(
+                            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            ctrl_addr[0],
+                            ctrl_addr[1],
+                            ctrl_addr[2],
+                            ctrl_addr[3],
+                            ctrl_addr[4]
+                        ),
+                        "deferring NETWORK_CONFIG_REQUEST: no active session with controller"
+                    );
+                    continue;
+                }
+                let shared_secret = match self.shared_secret_for_peer(ctrl_addr) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let mut dict = Dictionary::new();
+                dict.add_int("v", 1);
+                dict.add_int("rev", 0);
+                let mac = crate::ethernet::derive_mac(&our_address_bytes, *network_id);
+                let mac_str = alloc::format!(
+                    "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    mac[0],
+                    mac[1],
+                    mac[2],
+                    mac[3],
+                    mac[4],
+                    mac[5]
+                );
+                dict.add_text("mac", &mac_str);
+
+                // Add missing fields for parity with official client
+                let our_addr_hex = alloc::format!(
+                    "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    our_address_bytes[0],
+                    our_address_bytes[1],
+                    our_address_bytes[2],
+                    our_address_bytes[3],
+                    our_address_bytes[4]
+                );
+                dict.add_text("id", &our_addr_hex);
+                dict.add_int("vmaj", 1);
+                dict.add_int("vmin", 14);
+                dict.add_int("vrev", 2);
+                dict.add_int("pv", ZT_PROTO_VERSION as u64);
+                dict.add_int("maxr", 128);
+                dict.add_int("maxc", 32);
+                dict.add_int("maxcr", 128);
+                dict.add_int("maxt", 32);
+                dict.add_int("f", 0);
+                dict.add_int("rev", 0);
+                dict.add_text("arch", "x64");
+                dict.add_text("vendor", "ZeroTier");
+                dict.add_int("allowAutoAssign", 1);
+
                 let req = zerotier_protocol::verbs::network_config::NetworkConfigRequestPayload {
                     network_id: *network_id,
                     hop_count: 0,
-                    dict_data: Vec::new(),
+                    dict_data: dict.serialize(),
                 };
 
                 let mut payload = [0u8; 512];
@@ -1854,8 +1936,8 @@ mod tests {
     use core::net::Ipv4Addr;
     use zerotier_crypto::identity::{Address, PublicKey};
     use zerotier_crypto::salsa;
-    use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
     use zerotier_protocol::inet_address::InetAddress;
+    use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
     use zerotier_protocol::world::{World, WorldRoot, WorldType};
 
     fn test_identity(addr_byte: u8) -> Identity {
@@ -2146,23 +2228,32 @@ mod tests {
         let first = node.tick(2000);
         let first_retries = first
             .iter()
-            .filter(|action| matches!(action, NodeAction::SendTo { address, .. } if *address == socket))
+            .filter(
+                |action| matches!(action, NodeAction::SendTo { address, .. } if *address == socket),
+            )
             .count();
         assert_eq!(first_retries, 1, "stale peer should retry immediately");
 
         let second = node.tick(2999);
         let second_retries = second
             .iter()
-            .filter(|action| matches!(action, NodeAction::SendTo { address, .. } if *address == socket))
+            .filter(
+                |action| matches!(action, NodeAction::SendTo { address, .. } if *address == socket),
+            )
             .count();
         assert_eq!(second_retries, 0, "backoff should suppress early retry");
 
         let third = node.tick(4000);
         let third_retries = third
             .iter()
-            .filter(|action| matches!(action, NodeAction::SendTo { address, .. } if *address == socket))
+            .filter(
+                |action| matches!(action, NodeAction::SendTo { address, .. } if *address == socket),
+            )
             .count();
-        assert_eq!(third_retries, 1, "retry should resume after backoff doubles");
+        assert_eq!(
+            third_retries, 1,
+            "retry should resume after backoff doubles"
+        );
     }
 
     #[test]
@@ -2238,10 +2329,13 @@ mod tests {
                 return false;
             }
             let packet = dearmor_for_test(data, &[0x11; 32]);
-            packet[27] == Verb::NetworkConfigRequest.to_byte()
+            (packet[27] & 0x7f) == Verb::NetworkConfigRequest.to_byte()
         });
 
-        assert!(has_config_request, "expected config refresh request to controller");
+        assert!(
+            has_config_request,
+            "expected config refresh request to controller"
+        );
     }
 
     #[test]
@@ -2311,8 +2405,18 @@ mod tests {
         let node_a_address = *node_a.identity.address.as_bytes();
         let node_b_address = *node_b.identity.address.as_bytes();
 
-        add_active_peer(&mut node_a, test_identity(0x02), node_b_socket, shared_secret);
-        add_active_peer(&mut node_b, test_identity(0x01), node_a_socket, shared_secret);
+        add_active_peer(
+            &mut node_a,
+            test_identity(0x02),
+            node_b_socket,
+            shared_secret,
+        );
+        add_active_peer(
+            &mut node_b,
+            test_identity(0x01),
+            node_a_socket,
+            shared_secret,
+        );
 
         let network_id = 0xff00000000abcdef;
         node_a.join_network(make_membership_with_peer(
@@ -2339,10 +2443,12 @@ mod tests {
             responses.extend(node_b.receive_packet(&mut packet, node_a_socket, 45_000));
         }
 
-        let node_b_subscribers =
-            node_b
-                .multicast_manager
-                .get_subscribers(network_id, &[0xff; 6], ethernet::ETHERTYPE_ARP as u32, 10);
+        let node_b_subscribers = node_b.multicast_manager.get_subscribers(
+            network_id,
+            &[0xff; 6],
+            ethernet::ETHERTYPE_ARP as u32,
+            10,
+        );
         assert!(
             node_b_subscribers.contains(&node_a_address),
             "peer B should learn peer A's multicast LIKE advertisement"
@@ -2359,10 +2465,12 @@ mod tests {
             let _ = node_a.receive_packet(&mut packet, node_b_socket, 45_100);
         }
 
-        let node_a_subscribers =
-            node_a
-                .multicast_manager
-                .get_subscribers(network_id, &[0xff; 6], ethernet::ETHERTYPE_ARP as u32, 10);
+        let node_a_subscribers = node_a.multicast_manager.get_subscribers(
+            network_id,
+            &[0xff; 6],
+            ethernet::ETHERTYPE_ARP as u32,
+            10,
+        );
         assert!(
             node_a_subscribers.contains(&node_b_address),
             "peer A should learn peer B's multicast membership from GATHER response"
