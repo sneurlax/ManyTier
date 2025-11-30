@@ -106,7 +106,7 @@ impl BootstrapManager {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())
             .unwrap_or_else(|_| "0".to_string());
-            
+
         let manifest = BootstrapManifest {
             timestamp,
             nodes: self.nodes.clone(),
@@ -114,7 +114,8 @@ impl BootstrapManager {
             networks: self.networks.clone(),
         };
         let manifest_path = self.artifact_root.join("bootstrap.json");
-        let content = serde_json::to_string_pretty(&manifest).expect("failed to serialize bootstrap manifest");
+        let content = serde_json::to_string_pretty(&manifest)
+            .expect("failed to serialize bootstrap manifest");
         std::fs::write(manifest_path, content).expect("failed to write bootstrap.json");
     }
 }
@@ -1347,7 +1348,10 @@ allowGlobal=0\n\
 allowDefault=0\n\
 allowDNS=0\n"
     );
-    std::fs::write(networks_dir.join(&network_local_conf_name), network_local_conf)
+    std::fs::write(
+        networks_dir.join(&network_local_conf_name),
+        network_local_conf,
+    )
     .expect("failed to write network .local.conf");
 }
 
@@ -1681,15 +1685,15 @@ fn check_host_native_handshake_evidence(
         evidence.record_host_native("manytier session evidence (stdout/stderr)");
     }
 
-    // Official zerotier-one: HELLO handshake accepted or network config issued.
-    if official_combined.contains("200 join") || official_combined.contains("JOINED") || manytier_combined.contains("NetworkConfigRequest") || manytier_combined.contains("NETWORK_CONFIG_REQUEST") {
+    // Official zerotier-one: join acknowledged (official-side evidence only).
+    if official_combined.contains("200 join") || official_combined.contains("JOINED") {
         evidence.confirm("official: network join acknowledged");
         evidence.record_host_native("official zerotier-one join evidence (stdout/stderr)");
     }
 
     // Official zerotier-one: controller processed a config request
     // (zerotier-one logs controller actions at INFO level).
-    if official_combined.contains("NETWORK_CONFIG") || official_combined.contains("requestConfig") || manytier_combined.contains("NetworkConfig") || manytier_combined.contains("NETWORK_CONFIG") {
+    if official_combined.contains("NETWORK_CONFIG") || official_combined.contains("requestConfig") {
         evidence.confirm("official: NETWORK_CONFIG exchange observed");
         evidence
             .record_host_native("official zerotier-one NETWORK_CONFIG evidence (stdout/stderr)");
@@ -2016,7 +2020,10 @@ fn build_moon_for_localhost(
 
     let full_identity = zerotier_crypto::identity::Identity::parse(controller_identity_str.trim())
         .expect("failed to parse full controller identity for localhost moon");
-    let secret = full_identity.secret.as_ref().expect("moon signing requires secret key");
+    let secret = full_identity
+        .secret
+        .as_ref()
+        .expect("moon signing requires secret key");
     let signing_key = secret.signing.clone();
     let public_key_bytes = full_identity.public_key.to_bytes();
 
@@ -3909,7 +3916,33 @@ pub mod tests {
             );
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(8));
+        // After authorization, trigger a config refresh and wait for an IPv4 assignment
+        // while the ManyTier service is still running. The privileged live lane needs
+        // proof that the host-native client received and applied the config.
+        if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), client_authtoken.as_deref())
+        {
+            let refreshed = join_network_via_manytier_api(CLIENT_API_PORT, token, network_id);
+            eprintln!(
+                "[fallback] ManyTier client refresh helper exercised on {} via API {}: {}",
+                network_id, CLIENT_API_PORT, refreshed
+            );
+        }
+
+        let client_assigned_ipv4 = if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), client_authtoken.as_deref())
+        {
+            wait_for_assigned_ipv4_via_manytier_api(
+                CLIENT_API_PORT,
+                token,
+                network_id,
+                std::time::Duration::from_secs(12),
+            )
+        } else {
+            None
+        };
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
         let client_result = finish_host_native_process(client_process);
 
         // Allow the controller to run for the full client duration,
@@ -4062,18 +4095,6 @@ pub mod tests {
             evidence.report(),
         );
 
-        let client_assigned_ipv4 = if let (Some(network_id), Some(token)) =
-            (network_id_str.as_deref(), client_authtoken.as_deref())
-        {
-            wait_for_assigned_ipv4_via_manytier_api(
-                CLIENT_API_PORT,
-                token,
-                network_id,
-                std::time::Duration::from_secs(2),
-            )
-        } else {
-            None
-        };
         eprintln!(
             "[fallback] Live lane: {} | assigned IPv4: {}",
             live_execution_lane_label(),
@@ -4383,7 +4404,9 @@ pub mod tests {
         }
         bootstrap.write_manifest();
 
-        if let (Some(network_id), Some(token)) = (network_id_str.as_deref(), peer2_authtoken.as_deref()) {
+        if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), peer2_authtoken.as_deref())
+        {
             let joined = join_network_via_manytier_api(PEER2_API_PORT, token, network_id);
             eprintln!(
                 "[fallback-mt] Client 2 join helper exercised on {} via API {}: {}",
@@ -4787,14 +4810,18 @@ pub mod tests {
                 .current_dir(&shadow_test_dir)
                 .output()
                 .expect("failed to execute initmoon");
-            
+
             let moon_json_path = shadow_test_dir.join("moon.json");
-            let mut moon_json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("failed to parse moon json");
-            
+            let mut moon_json: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("failed to parse moon json");
+
             // Modify stableEndpoints
             if let Some(roots) = moon_json.get_mut("roots") {
                 if let Some(root_obj) = roots[0].as_object_mut() {
-                    root_obj.insert("stableEndpoints".to_string(), serde_json::json!([format!("127.0.0.1/{}", CONTROLLER_UDP_PORT)]));
+                    root_obj.insert(
+                        "stableEndpoints".to_string(),
+                        serde_json::json!([format!("127.0.0.1/{}", CONTROLLER_UDP_PORT)]),
+                    );
                 }
             }
             std::fs::write(&moon_json_path, serde_json::to_string(&moon_json).unwrap()).unwrap();
@@ -4804,13 +4831,16 @@ pub mod tests {
                 .current_dir(&shadow_test_dir)
                 .status();
 
-            let moon_id = controller_addr.as_ref().map(|a| {
-                (a[0] as u64) << 32
-                    | (a[1] as u64) << 24
-                    | (a[2] as u64) << 16
-                    | (a[3] as u64) << 8
-                    | (a[4] as u64)
-            }).unwrap_or(0);
+            let moon_id = controller_addr
+                .as_ref()
+                .map(|a| {
+                    (a[0] as u64) << 32
+                        | (a[1] as u64) << 24
+                        | (a[2] as u64) << 16
+                        | (a[3] as u64) << 8
+                        | (a[4] as u64)
+                })
+                .unwrap_or(0);
             let m = shadow_test_dir.join(format!("{:016x}.moon", moon_id));
 
             eprintln!(
@@ -4883,7 +4913,10 @@ pub mod tests {
             std::fs::create_dir_all(&moons_dir).expect("failed to create moons.d");
             let moon_dst = moons_dir.join(format!("{:016x}.moon", moon_id));
             std::fs::copy(moon_src, &moon_dst).expect("failed to copy moon file");
-            eprintln!("[fallback-official] Copied localhost moon to official home: {}", moon_dst.display());
+            eprintln!(
+                "[fallback-official] Copied localhost moon to official home: {}",
+                moon_dst.display()
+            );
         }
 
         // Use a fixed port so we can track the official client.
