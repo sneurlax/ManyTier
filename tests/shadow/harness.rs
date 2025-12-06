@@ -2232,6 +2232,67 @@ fn spawn_manytier_with_planet(
     })
 }
 
+/// Like `spawn_manytier_with_planet`, but accepts additional environment variables.
+///
+/// Used by `test_official_joins_manytier_controller_fallback` to pass
+/// `MANYTIER_DUMP_UDP=1` so that incoming HELLO packets are written to disk
+/// for offline MAC analysis.
+fn spawn_manytier_with_planet_and_env(
+    work_dir: &Path,
+    label: &str,
+    api_port: u16,
+    udp_port: u16,
+    controller_mode: bool,
+    planet_path: Option<&Path>,
+    extra_env: Vec<(String, String)>,
+) -> HostNativeRunningProcess {
+    let manytier_bin =
+        manytier_binary_path(work_dir).expect("failed to locate ManyTier CLI binary");
+    let mut args = vec![
+        "service".to_string(),
+        "--data-dir".to_string(),
+        "__HOME_DIR__".to_string(),
+        "--api-port".to_string(),
+        api_port.to_string(),
+        "--udp-port".to_string(),
+        udp_port.to_string(),
+    ];
+    if controller_mode {
+        args.push("--controller-mode".to_string());
+    }
+
+    let evidence_note = format!(
+        "Host-native ManyTier service artifact for the host-assisted fallback. \
+         Evidence origin: {}. Planet: {}.",
+        EVIDENCE_HOST_NATIVE,
+        planet_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "default (official)".to_string()),
+    );
+
+    let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
+    env.extend(extra_env);
+
+    let command = HostNativeCommand {
+        label: label.to_string(),
+        binary: manytier_bin,
+        args,
+        env,
+        current_dir: workspace_root(work_dir),
+        home_dir_name: "manytier-data".to_string(),
+        evidence_note,
+    };
+
+    spawn_host_native_process(work_dir, command, |home_dir| {
+        std::fs::create_dir_all(home_dir).expect("failed to create ManyTier data dir");
+        if let Some(planet_src) = planet_path {
+            let planet_dst = home_dir.join("planet.bin");
+            std::fs::copy(planet_src, &planet_dst)
+                .expect("failed to copy planet file to ManyTier data dir");
+        }
+    })
+}
+
 fn wait_for_manytier_ready(data_dir: &Path, timeout: std::time::Duration) -> bool {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
@@ -4742,13 +4803,14 @@ pub mod tests {
             "[fallback-official] Starting ManyTier controller on UDP:{} API:{}",
             CONTROLLER_UDP_PORT, CONTROLLER_API_PORT
         );
-        let controller_process = spawn_manytier_with_planet(
+        let controller_process = spawn_manytier_with_planet_and_env(
             &shadow_test_dir,
             "manytier-controller",
             CONTROLLER_API_PORT,
             CONTROLLER_UDP_PORT,
             true, // controller mode
             None, // default planet for bootstrap
+            vec![("MANYTIER_DUMP_UDP".to_string(), "1".to_string())],
         );
 
         // Step 2: Read ManyTier controller identity and authtoken.
