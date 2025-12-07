@@ -306,6 +306,90 @@ fn debug_mangle_variants_against_official_hello() {
     }
 }
 
+/// Decrypt the official HELLO's encrypted section to reveal moon count and COR.
+#[test]
+#[ignore]
+fn decrypt_official_hello_encrypted_section() {
+    let packet_path = std::env::var("MANYTIER_DEBUG_OFFICIAL_HELLO_PACKET")
+        .expect("set MANYTIER_DEBUG_OFFICIAL_HELLO_PACKET to a captured rx-hello-*.bin");
+    let our_identity_secret_path = std::env::var("MANYTIER_DEBUG_OUR_IDENTITY_SECRET")
+        .expect("set MANYTIER_DEBUG_OUR_IDENTITY_SECRET to ManyTier identity.secret");
+    let official_identity_public_path = std::env::var("MANYTIER_DEBUG_OFFICIAL_IDENTITY_PUBLIC")
+        .expect("set MANYTIER_DEBUG_OFFICIAL_IDENTITY_PUBLIC to official identity.public");
+
+    let mut packet = fs::read(packet_path).expect("failed to read packet");
+    let packet_len = packet.len();
+
+    let our_id_s = fs::read_to_string(our_identity_secret_path).expect("read identity.secret");
+    let our_id = Identity::parse(our_id_s.trim()).expect("parse identity.secret");
+    let our_secret = our_id.secret.as_ref().expect("identity.secret must contain secret");
+
+    let official_pub_s =
+        fs::read_to_string(official_identity_public_path).expect("read identity.public");
+    let official_pub = Identity::parse(official_pub_s.trim()).expect("parse identity.public");
+
+    let shared_secret = zerotier_crypto::key_agreement::key_agree(
+        &our_secret.dh,
+        &x25519_dalek::PublicKey::from(official_pub.public_key.dh),
+    );
+
+    // Try different encrypted section start offsets.
+    // The official code might encrypt from the planet info section, not just the moon count.
+    // Possible starts: 119 (before planet world_id), 135 (after planet info)
+    // Also try null key
+    let null_key = [0u8; 32];
+    for (key_label, key) in [("shared_secret", &shared_secret), ("null", &null_key)] {
+    for encrypted_start in [119usize, 135] {
+    let encrypted_len = packet_len - encrypted_start;
+    let mut test_pkt = packet.clone();
+
+    eprintln!(
+        "\n--- Trying key={} encrypted_start={} ---",
+        key_label,
+        encrypted_start
+    );
+    eprintln!(
+        "Encrypted section ({} bytes at offset {}): {}",
+        encrypted_len,
+        encrypted_start,
+        test_pkt[encrypted_start..].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    );
+
+    // Decrypt the entire encrypted section
+    zerotier_crypto::salsa::crypt_packet_field(
+        key,
+        &mut test_pkt,
+        encrypted_start,
+        encrypted_len,
+    )
+    .unwrap();
+
+    eprintln!(
+        "Decrypted section ({} bytes): {}",
+        encrypted_len,
+        test_pkt[encrypted_start..].iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    );
+
+    if encrypted_start == 119 {
+        // If encrypted from planet info position:
+        let wid = u64::from_be_bytes(test_pkt[119..127].try_into().unwrap());
+        let wts = u64::from_be_bytes(test_pkt[127..135].try_into().unwrap());
+        let mc = u16::from_be_bytes([test_pkt[135], test_pkt[136]]);
+        eprintln!("  planet_world_id: {} (0x{:016x})", wid, wid);
+        eprintln!("  planet_world_ts: {} (0x{:016x})", wts, wts);
+        eprintln!("  moon_count: {}", mc);
+        if mc == 0 && 137 < packet_len {
+            eprintln!("  After moons ({} bytes): {}", packet_len - 137,
+                test_pkt[137..].iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        }
+    } else {
+        let mc = u16::from_be_bytes([test_pkt[135], test_pkt[136]]);
+        eprintln!("  moon_count: {}", mc);
+    }
+    } // end for encrypted_start
+    } // end for key
+}
+
 /// Verify that ManyTier's actual `dearmor_packet` can verify the official HELLO.
 ///
 /// This uses the same captured packet and identities as the brute-force test,
