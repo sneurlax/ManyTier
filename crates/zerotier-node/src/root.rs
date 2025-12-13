@@ -414,4 +414,110 @@ mod tests {
             RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf, 0).is_err()
         );
     }
+
+    #[test]
+    fn cross_identity_hello_mac_verifies() {
+        // Uses real identities from official zerotier-one and ManyTier to prove
+        // that DH key agreement and HELLO MAC are cross-compatible.
+        use zerotier_crypto::identity::Identity;
+
+        let controller_str = "fe400d805e:0:6824f76ce76976a19879f496c90a83c6fdadcf89cc556eee56fe729530bdba644e0105a6cf05486f0c27c1fa599566785ec8da9bb766f2bfa3a66d1d709776d8:9eb7e22c7ab3bddd793f8f3afa233df28ed86ce650c187e2d2e4a2f5e018a63933c4a56768a1abea9747b886b20928088ab0bd00f89c6df9f221a995c82ef0e4";
+        let controller_id = Identity::parse(controller_str).expect("failed to parse controller");
+
+        let client_str = "faa900da4a:0:fd0c3dc3ff88ff7cbac1df44f638aa22e69a13d4f9cc90f9fb15c882c4f13e732af074384f2b44a3fc211ea490259bcf1d6cd3b6aefc19a92accef90f73ca9ce:254ad73a7b1478e7283e6ab40a81b017dd2c7296b53a6f5348b30a33f890bef1e015930d2b36979bb57bd0f83ccb01c21dfdadc446d641c49a0f9c478905082a";
+        let client_id = Identity::parse(client_str).expect("failed to parse client");
+
+        let client_secret = client_id.secret.as_ref().unwrap();
+        let controller_pub = x25519_dalek::PublicKey::from(controller_id.public_key.dh);
+        let client_dh = zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &controller_pub);
+
+        let controller_secret = controller_id.secret.as_ref().unwrap();
+        let client_pub = x25519_dalek::PublicKey::from(client_id.public_key.dh);
+        let controller_dh = zerotier_crypto::key_agreement::key_agree(&controller_secret.dh, &client_pub);
+
+        assert_eq!(client_dh, controller_dh, "DH shared secrets must match");
+
+        let mut buf = [0u8; 512];
+        let (len, _) = RootManager::build_hello(
+            &client_id,
+            controller_id.address.as_bytes(),
+            "127.0.0.1:29993".parse().unwrap(),
+            1000,
+            &client_dh,
+            &mut buf,
+            0,
+        ).unwrap();
+
+        let result = zerotier_crypto::salsa::dearmor_packet(&controller_dh, &mut buf[..len]);
+        assert!(result.is_ok(), "Controller should verify client HELLO MAC");
+    }
+
+    #[test]
+    fn hello_crypt_field_roundtrip() {
+        // Verify that crypt_packet_field encrypts the moon section correctly
+        // and that a receiver can decrypt it back to the original value.
+        use zerotier_crypto::identity::Identity;
+
+        struct XorShift(u64);
+        impl rand_core::RngCore for XorShift {
+            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                self.0 = x; x
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                let mut pos = 0;
+                while pos < dest.len() {
+                    let val = self.next_u64().to_le_bytes();
+                    let n = core::cmp::min(8, dest.len() - pos);
+                    dest[pos..pos + n].copy_from_slice(&val[..n]);
+                    pos += n;
+                }
+            }
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+                self.fill_bytes(dest); Ok(())
+            }
+        }
+
+        let mut rng = XorShift(123);
+        let client = Identity::generate(&mut rng).unwrap();
+        let mut rng2 = XorShift(456);
+        let server = Identity::generate(&mut rng2).unwrap();
+
+        let client_secret = client.secret.as_ref().unwrap();
+        let server_pub = x25519_dalek::PublicKey::from(server.public_key.dh);
+        let shared = zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &server_pub);
+
+        let mut buf = [0u8; 512];
+        let (len, _) = RootManager::build_hello(
+            &client,
+            server.address.as_bytes(),
+            "127.0.0.1:9993".parse().unwrap(),
+            1000,
+            &shared,
+            &mut buf,
+            0,
+        ).unwrap();
+
+        // Simulate receiver: dearmor then decrypt moon section
+        let server_secret = server.secret.as_ref().unwrap();
+        let client_pub = x25519_dalek::PublicKey::from(client.public_key.dh);
+        let shared2 = zerotier_crypto::key_agreement::key_agree(&server_secret.dh, &client_pub);
+        assert_eq!(shared, shared2);
+
+        // Dearmor (verify MAC)
+        let result = salsa::dearmor_packet(&shared2, &mut buf[..len]);
+        assert!(result.is_ok(), "MAC should verify");
+
+        // Find moon section: header(28) + proto(1) + major(1) + minor(1) + rev(2) + ts(8) +
+        // identity(71) + InetAddress(7 for IPv4) + planet(16) = 135
+        let moon_offset = 28 + 1 + 1 + 1 + 2 + 8 + 71 + 7 + 8 + 8;
+        assert_eq!(moon_offset, 135);
+
+        // Decrypt moon count
+        salsa::crypt_packet_field(&shared2, &mut buf[..len], moon_offset, 2).unwrap();
+        let moon_count = u16::from_be_bytes([buf[moon_offset], buf[moon_offset + 1]]);
+        assert_eq!(moon_count, 0, "Moon count should be 0 after decryption");
+    }
 }

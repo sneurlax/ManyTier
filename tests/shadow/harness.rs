@@ -3799,13 +3799,15 @@ pub mod tests {
         );
 
         // Override local.conf to use fixed port (CONTROLLER_UDP_PORT).
+        // NOTE: No `bind` restriction: the official controller should accept packets
+        // from any local interface. Adding `bind: ["127.0.0.1"]` was found to sometimes
+        // cause UDP reception issues depending on zerotier-one version.
         let local_conf = serde_json::json!({
             "settings": {
                 "primaryPort": CONTROLLER_UDP_PORT,
                 "portMappingEnabled": false,
                 "allowSecondaryPort": false,
-                "softwareUpdate": "disable",
-                "bind": ["127.0.0.1"]
+                "softwareUpdate": "disable"
             }
         });
         std::fs::write(
@@ -4982,14 +4984,14 @@ pub mod tests {
         }
 
         // Use a fixed port so we can track the official client.
+        // NOTE: No `bind` restriction: removed to avoid UDP reception filtering.
         let official_local_conf = serde_json::json!({
             "settings": {
                 "primaryPort": OFFICIAL_UDP_PORT,
                 "portMappingEnabled": false,
                 "allowSecondaryPort": false,
                 "softwareUpdate": "disable",
-                "allowLocalNetworks": true,
-                "bind": ["127.0.0.1"]
+                "allowLocalNetworks": true
             }
         });
         std::fs::write(
