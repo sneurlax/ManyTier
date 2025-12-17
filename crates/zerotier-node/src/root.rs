@@ -86,8 +86,21 @@ impl RootManager {
         let payload_len = hello.serialize(&mut buf[28..])?;
         let moon_count_offset = 28 + payload_len;
         buf[moon_count_offset..moon_count_offset + 2].copy_from_slice(&0u16.to_be_bytes());
-        let total_len = moon_count_offset + 2;
+        let moon_end = moon_count_offset + 2;
 
+        // Empty COR (Certificate of Representation): 2 bytes, count = 0 (big-endian u16).
+        // Plaintext: NOT encrypted via crypt_packet_field. COR is included in the Poly1305
+        // MAC scope because armor_packet MACs everything from verb (byte 27) to end of packet.
+        // This closes 2 bytes of the 17-byte gap against official zerotier-one 1.14.2 HELLOs.
+        // COR must be appended BEFORE crypt_packet_field so that the mangled-key size field
+        // matches what the receiver sees (the full packet length including COR).
+        let cor_offset = moon_end;
+        buf[cor_offset] = 0x00;
+        buf[cor_offset + 1] = 0x00;
+        let total_len = cor_offset + 2;
+
+        // Encrypt the moon-count field (matches official Packet::cryptField on moon section).
+        // Called over the full packet so mangled-key size matches receiver's view.
         salsa::crypt_packet_field(shared_secret, &mut buf[..total_len], moon_count_offset, 2)
             .map_err(ProtocolError::CryptoError)?;
 
@@ -289,6 +302,7 @@ mod tests {
             RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf, 0).unwrap();
 
         assert!(len >= ZT_PROTO_MIN_PACKET_LENGTH);
+        assert_eq!(len, 139, "HELLO length must include 2-byte empty COR trailer");
 
         // Parse header -- verb is encrypted (cipher suite 0 = MAC only, verb is NOT encrypted)
         // Actually cipher suite 0 means no encryption so verb is plaintext
@@ -304,6 +318,86 @@ mod tests {
         assert_eq!(hdr.cipher_suite(), CIPHER_SUITE_C25519_POLY1305_NONE);
         // Verb is Hello (not encrypted for cipher suite 0)
         assert_eq!(hdr.verb_id(), Verb::Hello.to_byte());
+    }
+
+    #[test]
+    fn cor_field_present_in_hello() {
+        // Empty COR (Certificate of Representation) count = 0 per official HELLO layout;
+        // closes 2 bytes of the 17-byte gap to official zerotier-one 1.14.2.
+        use zerotier_crypto::identity::Identity;
+
+        struct XorShift(u64);
+        impl rand_core::RngCore for XorShift {
+            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                self.0 = x; x
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                let mut pos = 0;
+                while pos < dest.len() {
+                    let val = self.next_u64().to_le_bytes();
+                    let n = core::cmp::min(8, dest.len() - pos);
+                    dest[pos..pos + n].copy_from_slice(&val[..n]);
+                    pos += n;
+                }
+            }
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+                self.fill_bytes(dest); Ok(())
+            }
+        }
+
+        let mut rng = XorShift(789);
+        let client = Identity::generate(&mut rng).unwrap();
+        let mut rng2 = XorShift(987);
+        let server = Identity::generate(&mut rng2).unwrap();
+
+        let client_secret = client.secret.as_ref().unwrap();
+        let server_pub = x25519_dalek::PublicKey::from(server.public_key.dh);
+        let shared = zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &server_pub);
+
+        let mut buf = [0u8; 512];
+        let (len, _) = RootManager::build_hello(
+            &client,
+            server.address.as_bytes(),
+            "127.0.0.1:9993".parse().unwrap(),
+            1000,
+            &shared,
+            &mut buf,
+            0,
+        )
+        .unwrap();
+
+        // New HELLO total = previous 137 + 2-byte COR trailer = 139.
+        assert_eq!(len, 139, "HELLO length must include 2-byte empty COR trailer");
+
+        // Receiver-side: dearmor verifies that the MAC scope covers the COR bytes.
+        let server_secret = server.secret.as_ref().unwrap();
+        let client_pub = x25519_dalek::PublicKey::from(client.public_key.dh);
+        let shared2 = zerotier_crypto::key_agreement::key_agree(&server_secret.dh, &client_pub);
+        assert_eq!(shared, shared2);
+
+        let result = salsa::dearmor_packet(&shared2, &mut buf[..len]);
+        assert!(result.is_ok(), "MAC must verify across COR bytes: {:?}", result.err());
+
+        // Layout: header(28) + proto(1) + major(1) + minor(1) + rev(2) + ts(8) +
+        // identity(71) + InetAddress(7 IPv4) + planet ts(8) + planet ts(8) = 135
+        let moon_offset = 28 + 1 + 1 + 1 + 2 + 8 + 71 + 7 + 8 + 8;
+        assert_eq!(moon_offset, 135);
+
+        // Decrypt the moon-count field; it should be 0.
+        salsa::crypt_packet_field(&shared2, &mut buf[..len], moon_offset, 2).unwrap();
+        let moon_count = u16::from_be_bytes([buf[moon_offset], buf[moon_offset + 1]]);
+        assert_eq!(moon_count, 0, "Moon count should be 0");
+
+        // COR bytes are PLAINTEXT: never encrypted via crypt_packet_field.
+        // They live immediately after the moon section at offsets 137..139.
+        assert_eq!(
+            &buf[moon_offset + 2..moon_offset + 4],
+            &[0x00, 0x00],
+            "COR must be empty (count = 0, plaintext)"
+        );
     }
 
     #[test]
@@ -519,5 +613,12 @@ mod tests {
         salsa::crypt_packet_field(&shared2, &mut buf[..len], moon_offset, 2).unwrap();
         let moon_count = u16::from_be_bytes([buf[moon_offset], buf[moon_offset + 1]]);
         assert_eq!(moon_count, 0, "Moon count should be 0 after decryption");
+
+        // COR (Certificate of Representation) bytes are plaintext and must be empty.
+        assert_eq!(
+            &buf[moon_offset + 2..moon_offset + 4],
+            &[0x00, 0x00],
+            "COR must be empty"
+        );
     }
 }
