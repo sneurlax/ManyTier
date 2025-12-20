@@ -3,22 +3,62 @@
 //! This is the main entry point for `manytier service`. It starts the Node
 //! engine, optionally a controller, and the REST API server.
 
-use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
 use zerotier_crypto::identity::Identity;
+use zerotier_node::controller::dictionary::Dictionary;
 use zerotier_node::node::{Node, NodeAction};
-use zerotier_node::traits::Transport;
-use zerotier_node::traits::TunDevice;
+use zerotier_node::traits::{Clock, CryptoProvider, Storage, Transport, TunDevice};
 use zerotier_protocol::constants::ZT_PING_CHECK_INTERVAL;
+use zerotier_protocol::header::PacketHeader;
+use zerotier_protocol::inet_address::InetAddress;
+use zerotier_protocol::verb::Verb;
+use zerotier_protocol::verbs::ok::OkPayload;
 use zerotier_protocol::world::DEFAULT_PLANET;
 
+/// Write a single UDP datagram to `dump_dir` iff it is a HELLO verb, using the
+/// shared `{dir}-hello-*.bin` filename scheme. This helper is shared between
+/// the rx path (`dir = "rx"`, peer is the remote source address) and the tx
+/// path (`dir = "tx"`, peer is the remote destination address).
+///
+/// Gated by `MANYTIER_DUMP_UDP=1`: the caller passes `Some(dump_dir)` only
+/// when the env var is set, so this is zero-cost in normal runs.
+fn dump_hello_if_match(
+    dump_dir: &Path,
+    direction: &str,
+    header: &PacketHeader,
+    peer: &std::net::SocketAddr,
+    now_ms: u64,
+    bytes: &[u8],
+) {
+    if header.verb_id() != Verb::Hello.to_byte() {
+        return;
+    }
+    let src = header.source_address();
+    let dst = header.dest_address();
+    let peer_label = if direction == "rx" { "from" } else { "to" };
+    let filename = format!(
+        "{}-hello-{}-{}-{}-{}-src-{:02x}{:02x}{:02x}{:02x}{:02x}-dst-{:02x}{:02x}{:02x}{:02x}{:02x}-pid-{}.bin",
+        direction,
+        now_ms,
+        peer_label,
+        peer.ip(),
+        peer.port(),
+        src[0], src[1], src[2], src[3], src[4],
+        dst[0], dst[1], dst[2], dst[3], dst[4],
+        header.packet_id()
+    );
+    let _ = std::fs::write(dump_dir.join(filename), bytes);
+}
+
 use crate::api;
+use crate::platform::clock::NativeClock;
+use crate::platform::crypto::NativeCryptoProvider;
+use crate::platform::storage::NativeStorage;
 use crate::platform::transport::NativeTransport;
 use crate::platform::tun::NativeTun;
 use crate::storage::SqliteStorage;
@@ -38,35 +78,59 @@ pub struct ServiceConfig {
 /// This starts the Node engine, UDP transport, and optionally the controller.
 /// The REST API server runs on api_port (default 9993) on localhost.
 pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
-    // 1. Ensure data directory exists
-    fs::create_dir_all(&config.data_dir)?;
+    let clock = NativeClock::new();
+    let crypto = NativeCryptoProvider;
+    let data_storage = NativeStorage::new(&config.data_dir)?;
+    let udp_dump_enabled = std::env::var("MANYTIER_DUMP_UDP")
+        .ok()
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false);
+    let udp_dump_dir = if udp_dump_enabled {
+        let dir = PathBuf::from(&config.data_dir).join("udp-dumps");
+        std::fs::create_dir_all(&dir).ok();
+        Some(dir)
+    } else {
+        None
+    };
+    let (identity_root, identity_key) = storage_scope_and_key(&config.identity_path)?;
+    let identity_storage = NativeStorage::new(&identity_root)?;
 
-    // 2. Load or generate identity
-    let identity = load_or_generate_identity(&config.identity_path)?;
+    // 1. Load or generate identity
+    let identity = load_or_generate_identity(&identity_storage, &crypto, &identity_key).await?;
     let addr = identity.address.as_bytes();
+    let local_zt_address = *addr;
     tracing::info!(
         address = %format!("{:02x}{:02x}{:02x}{:02x}{:02x}", addr[0], addr[1], addr[2], addr[3], addr[4]),
         "starting ManyTier service"
     );
 
-    // 3. Load planet file
-    let planet_data = load_planet(&config.data_dir)?;
+    // 2. Load planet file
+    let planet_data = load_planet(&data_storage).await?;
 
-    // 4. Create Node (identity is moved into node)
-    let node = Node::new(identity, &planet_data)
+    // 3. Create Node (identity is moved into node)
+    let initial_packet_id = (clock.now_wall_ms() & 0x0000_FFFF_FFFF_FFFF) as u64;
+    let node = Node::new(identity, &planet_data, initial_packet_id)
         .map_err(|e| anyhow::anyhow!("failed to create node: {e}"))?;
     let node = Arc::new(Mutex::new(node));
 
-    // 5. Generate or load authtoken.secret
-    let auth_token = load_or_generate_auth_token(&config.data_dir)?;
+    // 4. Generate or load authtoken.secret
+    let auth_token = load_or_generate_auth_token(&data_storage, "authtoken.secret").await?;
 
-    // 6. Optionally create Controller
+    // 5. Optionally create Controller
     let controller = if config.controller_mode {
         let db_path = format!("{}/controller.db", config.data_dir);
         let storage = SqliteStorage::new(&db_path)?;
-        let identity_for_ctrl = load_or_generate_identity(&config.identity_path)?;
+        // Use the SAME identity as the node for the controller
+        let node_guard = node.lock().await;
+        let identity_for_ctrl = node_guard.identity.clone();
+        drop(node_guard);
+
         let secret = identity_for_ctrl
             .secret
+            .clone()
             .expect("controller needs secret identity");
         Some(Arc::new(Mutex::new(
             zerotier_node::controller::engine::Controller::new(
@@ -79,14 +143,14 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
         None
     };
 
-    // 7. Bind UDP transport
+    // 6. Bind UDP transport
     let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.udp_port).parse()?;
     let transport = NativeTransport::bind(bind_addr)
         .await
         .map_err(|e| anyhow::anyhow!("failed to bind UDP on port {}: {}", config.udp_port, e))?;
-    tracing::info!(udp_port = config.udp_port, "UDP transport bound");
+    tracing::info!(udp_bind = %bind_addr, "UDP transport bound");
 
-    // 8. Start API server in background task
+    // 7. Start API server in background task
     let state = Arc::new(api::AppState {
         node: node.clone(),
         auth_token,
@@ -102,27 +166,27 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
         }
     });
 
-    // 9. Bootstrap: send initial HELLO to roots
+    // 8. Bootstrap: send initial HELLO to roots
     {
         let mut n = node.lock().await;
-        let now = now_ms();
+        let now = clock.now_wall_ms();
         let actions = n.bootstrap(now);
+        let whois_actions = drain_whois_actions(&mut n, &actions, now);
         drop(n);
-        execute_actions(&transport, &actions).await;
+        execute_actions(&transport, &actions, udp_dump_dir.as_deref(), now).await;
+        execute_actions(&transport, &whois_actions, udp_dump_dir.as_deref(), now).await;
     }
 
-    // 10. Main event loop
+    // 9. Main event loop
     let mut buf = [0u8; 4096];
-    let mut tick_interval = tokio::time::interval(
-        std::time::Duration::from_millis(ZT_PING_CHECK_INTERVAL),
-    );
+    let mut tick_interval =
+        tokio::time::interval(std::time::Duration::from_millis(ZT_PING_CHECK_INTERVAL));
     // TUN devices per network, created lazily on NetworkConfigured.
     // Arc-wrapped so read tasks can share the device with the main loop.
     let mut tun_devices: HashMap<u64, Arc<NativeTun>> = HashMap::new();
 
     // Channel for TUN reads: avoids borrow checker issues with select!
-    let (tun_tx, mut tun_rx) =
-        tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(64);
+    let (tun_tx, mut tun_rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(64);
 
     // Graceful shutdown signal
     let shutdown = tokio::signal::ctrl_c();
@@ -134,7 +198,43 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
             result = transport.recv_from(&mut buf) => {
                 match result {
                     Ok((n, from)) => {
-                        let now = now_ms();
+                        let now = clock.now_wall_ms();
+                        tracing::info!(event = "udp_raw_received", from = %from, len = n, "UDP packet received");
+                        if let Some(header) = PacketHeader::from_bytes(&buf[..n]) {
+                            let source = header.source_address();
+                            let dest = header.dest_address();
+                            tracing::info!(
+                                event = "udp_packet_received",
+                                from = %from,
+                                packet_id = header.packet_id(),
+                                source = %format_args!(
+                                    "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                    source[0], source[1], source[2], source[3], source[4]
+                                ),
+                                dest = %format_args!(
+                                    "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                    dest[0], dest[1], dest[2], dest[3], dest[4]
+                                ),
+                                cipher_suite = header.cipher_suite(),
+                                verb_id = header.verb_id(),
+                                verb = ?Verb::from_byte(header.verb_id()),
+                                len = n,
+                                "UDP packet received"
+                            );
+
+                            // Opt-in raw HELLO packet dump, used to debug official interop.
+                            // We keep this very narrow to avoid ballooning artifacts in normal runs.
+                            if let Some(ref dump_dir) = udp_dump_dir {
+                                dump_hello_if_match(dump_dir, "rx", &header, &from, now, &buf[..n]);
+                            }
+                        } else {
+                            tracing::info!(
+                                event = "udp_raw_packet_received",
+                                from = %from,
+                                len = n,
+                                "raw UDP packet received (not a valid ZT header)"
+                            );
+                        }
                         let mut node_guard = node.lock().await;
                         let actions = node_guard.receive_packet(&mut buf[..n], from, now);
 
@@ -145,12 +245,21 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
 
                         // Drain any actions queued by controller handling
                         let pending = node_guard.drain_actions();
+                        let whois_actions = drain_whois_actions_from_sets(
+                            &mut node_guard,
+                            [&actions, &pending],
+                            now,
+                        );
                         drop(node_guard);
 
-                        execute_actions(&transport, &actions).await;
-                        execute_actions(&transport, &pending).await;
-                        handle_tun_actions(&actions, &mut tun_devices, &tun_tx).await;
-                        handle_tun_actions(&pending, &mut tun_devices, &tun_tx).await;
+                        execute_actions(&transport, &actions, udp_dump_dir.as_deref(), now).await;
+                        execute_actions(&transport, &pending, udp_dump_dir.as_deref(), now).await;
+                        execute_actions(&transport, &whois_actions, udp_dump_dir.as_deref(), now)
+                            .await;
+                        handle_tun_actions(&actions, &mut tun_devices, &tun_tx, local_zt_address)
+                            .await;
+                        handle_tun_actions(&pending, &mut tun_devices, &tun_tx, local_zt_address)
+                            .await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "UDP recv error");
@@ -160,12 +269,14 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
 
             // Tick timer
             _ = tick_interval.tick() => {
-                let now = now_ms();
+                let now = clock.now_wall_ms();
                 let mut node_guard = node.lock().await;
                 let actions = node_guard.tick(now);
+                let whois_actions = drain_whois_actions(&mut node_guard, &actions, now);
                 drop(node_guard);
-                execute_actions(&transport, &actions).await;
-                handle_tun_actions(&actions, &mut tun_devices, &tun_tx).await;
+                execute_actions(&transport, &actions, udp_dump_dir.as_deref(), now).await;
+                execute_actions(&transport, &whois_actions, udp_dump_dir.as_deref(), now).await;
+                handle_tun_actions(&actions, &mut tun_devices, &tun_tx, local_zt_address).await;
             }
 
             // TUN device read (outbound VL2 traffic)
@@ -179,13 +290,45 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
                     6 => 0x86DDu16,  // IPv6
                     _ => continue,    // Unknown, skip
                 };
+                tracing::info!(
+                    network_id = %format!("{network_id:016x}"),
+                    ethertype = %format!("0x{ethertype:04x}"),
+                    payload_len = frame.len(),
+                    event = "tun_packet_read",
+                    "read outbound packet from TUN"
+                );
                 let mut node_guard = node.lock().await;
                 let our_addr = *node_guard.identity.address.as_bytes();
+                let now = clock.now_wall_ms();
                 let actions = zerotier_node::vl2::process_outbound_frame(
-                    &mut node_guard, network_id, ethertype, &frame, &our_addr,
+                    &mut node_guard, network_id, ethertype, &frame, &our_addr, now,
                 );
+                let whois_actions = drain_whois_actions(&mut node_guard, &actions, now);
                 drop(node_guard);
-                execute_actions(&transport, &actions).await;
+                let send_count = actions
+                    .iter()
+                    .filter(|action| matches!(action, NodeAction::SendTo { .. }))
+                    .count();
+                let local_reply_count = actions
+                    .iter()
+                    .filter(|action| matches!(action, NodeAction::LocalReply { .. }))
+                    .count();
+                let frame_received_count = actions
+                    .iter()
+                    .filter(|action| matches!(action, NodeAction::FrameReceived { .. }))
+                    .count();
+                tracing::info!(
+                    network_id = %format!("{network_id:016x}"),
+                    payload_len = frame.len(),
+                    send_count,
+                    whois_count = whois_actions.len(),
+                    local_reply_count,
+                    frame_received_count,
+                    event = "tun_packet_actions",
+                    "processed outbound TUN packet into VL2 actions"
+                );
+                execute_actions(&transport, &actions, udp_dump_dir.as_deref(), now).await;
+                execute_actions(&transport, &whois_actions, udp_dump_dir.as_deref(), now).await;
             }
 
             // Graceful shutdown
@@ -199,22 +342,111 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Get current time in milliseconds.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+fn storage_scope_and_key(path: &str) -> anyhow::Result<(PathBuf, String)> {
+    let path = Path::new(path);
+    let key = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid storage path: {path:?}"))?;
+    let root = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
+    Ok((root, key.to_string()))
+}
+
+fn public_identity_key(identity_key: &str) -> String {
+    identity_key
+        .strip_suffix(".secret")
+        .map(|stem| format!("{stem}.public"))
+        .unwrap_or_else(|| format!("{identity_key}.public"))
 }
 
 /// Execute SendTo actions via the transport.
-async fn execute_actions(transport: &NativeTransport, actions: &[NodeAction]) {
+///
+/// If `udp_dump_dir` is `Some`, outgoing HELLO datagrams are additionally
+/// dumped as `tx-hello-*.bin` under that directory (symmetric to the rx
+/// dumper). This is gated by the caller on `MANYTIER_DUMP_UDP=1` and is a
+/// no-op when `None`.
+async fn execute_actions(
+    transport: &NativeTransport,
+    actions: &[NodeAction],
+    udp_dump_dir: Option<&Path>,
+    now_ms: u64,
+) {
     for action in actions {
         if let NodeAction::SendTo { data, address } = action {
+            if let Some(header) = PacketHeader::from_bytes(data) {
+                let source = header.source_address();
+                let dest = header.dest_address();
+                tracing::info!(
+                    event = "udp_packet_sent",
+                    to = %address,
+                    packet_id = header.packet_id(),
+                    source = %format_args!(
+                        "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        source[0], source[1], source[2], source[3], source[4]
+                    ),
+                    dest = %format_args!(
+                        "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        dest[0], dest[1], dest[2], dest[3], dest[4]
+                    ),
+                    cipher_suite = header.cipher_suite(),
+                    verb_id = header.verb_id(),
+                    verb = ?Verb::from_byte(header.verb_id()),
+                    len = data.len(),
+                    "UDP packet sent"
+                );
+
+                // Opt-in tx HELLO dump, mirrors the rx dump under
+                // `MANYTIER_DUMP_UDP=1`.
+                if let Some(dump_dir) = udp_dump_dir {
+                    dump_hello_if_match(dump_dir, "tx", &header, address, now_ms, data);
+                }
+            } else {
+                tracing::info!(
+                    event = "udp_raw_packet_sent",
+                    to = %address,
+                    len = data.len(),
+                    "raw UDP packet sent (not a valid ZT header)"
+                );
+            }
             if let Err(e) = transport.send_to(data, *address).await {
                 tracing::warn!(error = %e, "failed to send UDP packet");
             }
         }
+    }
+}
+
+fn drain_whois_actions(
+    node: &mut zerotier_node::node::Node,
+    actions: &[NodeAction],
+    now_ms: u64,
+) -> Vec<NodeAction> {
+    drain_whois_actions_from_sets(node, [actions], now_ms)
+}
+
+fn drain_whois_actions_from_sets<const N: usize>(
+    node: &mut zerotier_node::node::Node,
+    action_sets: [&[NodeAction]; N],
+    now_ms: u64,
+) -> Vec<NodeAction> {
+    let mut targets = BTreeSet::new();
+    for actions in action_sets {
+        for action in actions {
+            if let NodeAction::WhoisNeeded { addresses } = action {
+                targets.extend(addresses.iter().copied());
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        Vec::new()
+    } else {
+        let addresses: Vec<_> = targets.into_iter().collect();
+        node.send_whois(&addresses, now_ms)
     }
 }
 
@@ -227,7 +459,6 @@ async fn handle_controller_actions(
     now_ms: u64,
 ) {
     use zerotier_protocol::constants::CIPHER_SUITE_C25519_POLY1305_SALSA2012;
-    use zerotier_protocol::verb::Verb;
 
     for action in actions {
         if let NodeAction::NetworkConfigRequested {
@@ -237,6 +468,22 @@ async fn handle_controller_actions(
             ..
         } = action
         {
+            let shared_secret_ready = node.shared_secret_for_peer(requester_address).is_some();
+            tracing::info!(
+                event = "controller_network_config_request_received",
+                requester = %format_args!(
+                    "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    requester_address[0],
+                    requester_address[1],
+                    requester_address[2],
+                    requester_address[3],
+                    requester_address[4]
+                ),
+                network_id = %format_args!("{:016x}", network_id),
+                from = %from,
+                shared_secret_ready,
+                "controller handling NETWORK_CONFIG_REQUEST"
+            );
             let ctrl = controller.lock().await;
             let response = ctrl
                 .handle_config_request(*network_id, requester_address, now_ms)
@@ -253,21 +500,37 @@ async fn handle_controller_actions(
 
             // Get shared secret for this peer
             let shared_secret = node
-                .topology
-                .get_peer(requester_address)
-                .and_then(|p| p.shared_secret().map(|s| *s))
+                .shared_secret_for_peer(requester_address)
                 .unwrap_or([0u8; 32]);
+
+            tracing::info!(
+                event = "controller_network_config_response_ready",
+                requester = %format_args!(
+                    "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    requester_address[0],
+                    requester_address[1],
+                    requester_address[2],
+                    requester_address[3],
+                    requester_address[4]
+                ),
+                network_id = %format_args!("{:016x}", network_id),
+                dict_len = response.config.dict_data.len(),
+                credentials_has_com = response.credentials.com.is_some(),
+                "controller built NETWORK_CONFIG response"
+            );
 
             let our_addr = *node.identity.address.as_bytes();
 
-            // Build NETWORK_CONFIG packet
+            // Build NETWORK_CONFIG packet (standalone verb 0x0c)
             let mut pkt_buf = [0u8; 2048];
-            pkt_buf[0..8].copy_from_slice(&now_ms.to_be_bytes());
+            let packet_id = now_ms;
+            pkt_buf[0..8].copy_from_slice(&packet_id.to_be_bytes());
             pkt_buf[8..13].copy_from_slice(requester_address);
             pkt_buf[13..18].copy_from_slice(&our_addr);
-            pkt_buf[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+            pkt_buf[18] = (CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3) | 0x01;
             pkt_buf[19..27].copy_from_slice(&[0u8; 8]);
             pkt_buf[27] = Verb::NetworkConfig.to_byte();
+
             let payload_len = response.config.serialize(&mut pkt_buf[28..]);
             let total = 28 + payload_len;
             if zerotier_crypto::salsa::armor_packet(&shared_secret, &mut pkt_buf[..total], true)
@@ -284,13 +547,13 @@ async fn handle_controller_actions(
                 );
             }
 
-            // Build NETWORK_CREDENTIALS packet
+            // Build NETWORK_CREDENTIALS packet (not an OK response, but usually follows)
             let mut creds_buf = [0u8; 2048];
             let creds_now = now_ms + 1;
             creds_buf[0..8].copy_from_slice(&creds_now.to_be_bytes());
             creds_buf[8..13].copy_from_slice(requester_address);
             creds_buf[13..18].copy_from_slice(&our_addr);
-            creds_buf[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+            creds_buf[18] = (CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3) | 0x01;
             creds_buf[19..27].copy_from_slice(&[0u8; 8]);
             creds_buf[27] = Verb::NetworkCredentials.to_byte();
             let creds_payload_len = response.credentials.serialize(&mut creds_buf[28..]);
@@ -309,7 +572,7 @@ async fn handle_controller_actions(
                 tracing::info!(
                     target: "manytier",
                     event = "network_credentials_sent",
-                    "sent NETWORK_CREDENTIALS response"
+                    "sent NETWORK_CREDENTIALS"
                 );
             }
         }
@@ -324,15 +587,24 @@ async fn handle_tun_actions(
     actions: &[NodeAction],
     tun_devices: &mut HashMap<u64, Arc<NativeTun>>,
     tun_tx: &tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    local_zt_address: [u8; 5],
 ) {
     for action in actions {
         match action {
             NodeAction::FrameReceived {
                 network_id,
+                ethertype,
                 payload,
                 ..
             } => {
                 if let Some(tun) = tun_devices.get(network_id) {
+                    tracing::info!(
+                        network_id = %format!("{network_id:016x}"),
+                        ethertype = %format!("0x{ethertype:04x}"),
+                        payload_len = payload.len(),
+                        event = "tun_packet_inject",
+                        "injecting received VL2 payload into TUN"
+                    );
                     if let Err(e) = tun.write(payload).await {
                         tracing::warn!(error = %e, "TUN write failed");
                     }
@@ -340,10 +612,18 @@ async fn handle_tun_actions(
             }
             NodeAction::LocalReply {
                 network_id,
+                ethertype,
                 payload,
                 ..
             } => {
                 if let Some(tun) = tun_devices.get(network_id) {
+                    tracing::info!(
+                        network_id = %format!("{network_id:016x}"),
+                        ethertype = %format!("0x{ethertype:04x}"),
+                        payload_len = payload.len(),
+                        event = "tun_local_reply_inject",
+                        "injecting local reply into TUN"
+                    );
                     if let Err(e) = tun.write(payload).await {
                         tracing::warn!(error = %e, "TUN write (local reply) failed");
                     }
@@ -355,21 +635,17 @@ async fn handle_tun_actions(
             } => {
                 // Create TUN device if not already exists for this network
                 if !tun_devices.contains_key(network_id) {
-                    let tun_name = format!("zt{:x}", network_id & 0xFFFFFF);
-                    match NativeTun::create(&tun_name, 2800).await {
+                    let tun_name = tun_name_for_network(*network_id, local_zt_address);
+                    let mtu = network_mtu_from_dict_data(dict_data).unwrap_or(2800);
+                    match NativeTun::create(&tun_name, mtu).await {
                         Ok(tun) => {
                             tracing::info!(
                                 network_id = %format!("{:016x}", network_id),
                                 tun_name = %tun.name(),
+                                mtu = mtu,
                                 "TUN device created"
                             );
-                            // TODO: Parse dict_data for managed IPs and routes,
-                            // call tun.set_ip() and tun.add_route().
-                            // For now, TUN is created but IP assignment requires
-                            // dictionary parsing which is complex. IP assignment
-                            // will work via the NetworkMembership.members list
-                            // populated by the controller config.
-                            let _ = dict_data; // suppress unused warning
+                            configure_tun_from_dict_data(&tun, *network_id, dict_data).await;
                             let tun = Arc::new(tun);
                             tun_devices.insert(*network_id, Arc::clone(&tun));
 
@@ -410,80 +686,268 @@ async fn handle_tun_actions(
     }
 }
 
-/// Load an identity from file, or generate a new one and save it.
-fn load_or_generate_identity(path: &str) -> anyhow::Result<Identity> {
-    if Path::new(path).exists() {
-        let secret_str = fs::read_to_string(path)?;
+fn network_mtu_from_dict_data(dict_data: &[u8]) -> Option<usize> {
+    let dict = Dictionary::deserialize(dict_data).ok()?;
+    dict.get_text("mtu")?.parse().ok()
+}
+
+async fn configure_tun_from_dict_data(tun: &NativeTun, network_id: u64, dict_data: &[u8]) {
+    for (addr, prefix) in managed_ips_from_dict_data(dict_data) {
+        if let Err(error) = tun.set_ip(addr, prefix).await {
+            tracing::warn!(
+                error = %error,
+                network_id = %format!("{network_id:016x}"),
+                address = %format!("{addr}/{prefix}"),
+                "failed to configure managed address on TUN device"
+            );
+        } else {
+            tracing::info!(
+                network_id = %format!("{network_id:016x}"),
+                address = %format!("{addr}/{prefix}"),
+                "configured managed address on TUN device"
+            );
+        }
+    }
+
+    for (target, gateway) in managed_routes_from_dict_data(dict_data) {
+        if let Err(error) = tun.add_route(&target, gateway).await {
+            tracing::warn!(
+                error = %error,
+                network_id = %format!("{network_id:016x}"),
+                target = %target,
+                gateway = gateway.map(|ip| ip.to_string()).unwrap_or_else(|| "direct".to_string()),
+                "failed to configure managed route on TUN device"
+            );
+        } else {
+            tracing::info!(
+                network_id = %format!("{network_id:016x}"),
+                target = %target,
+                gateway = gateway.map(|ip| ip.to_string()).unwrap_or_else(|| "direct".to_string()),
+                "configured managed route on TUN device"
+            );
+        }
+    }
+}
+
+fn managed_ips_from_dict_data(dict_data: &[u8]) -> Vec<(std::net::IpAddr, u8)> {
+    let Some(data) = Dictionary::deserialize(dict_data)
+        .ok()
+        .and_then(|dict| dict.get_binary("I").map(|data| data.to_vec()))
+    else {
+        return Vec::new();
+    };
+
+    let mut ips = Vec::new();
+    let mut pos = 0;
+    while pos < data.len() {
+        let Ok((address, consumed)) = InetAddress::deserialize(&data[pos..]) else {
+            break;
+        };
+        pos += consumed;
+        match address {
+            InetAddress::Null => {}
+            InetAddress::V4 { ip, port } => ips.push((std::net::IpAddr::V4(ip.into()), port as u8)),
+            InetAddress::V6 { ip, port } => ips.push((std::net::IpAddr::V6(ip.into()), port as u8)),
+        }
+    }
+
+    ips
+}
+
+fn managed_routes_from_dict_data(dict_data: &[u8]) -> Vec<(String, Option<std::net::IpAddr>)> {
+    let Some(data) = Dictionary::deserialize(dict_data)
+        .ok()
+        .and_then(|dict| dict.get_binary("RT").map(|data| data.to_vec()))
+    else {
+        return Vec::new();
+    };
+
+    let mut routes = Vec::new();
+    let mut pos = 0;
+    while pos < data.len() {
+        let Ok((target, target_consumed)) = InetAddress::deserialize(&data[pos..]) else {
+            break;
+        };
+        pos += target_consumed;
+
+        let Ok((via, via_consumed)) = InetAddress::deserialize(&data[pos..]) else {
+            break;
+        };
+        pos += via_consumed;
+
+        if pos + 2 > data.len() {
+            break;
+        }
+        pos += 2;
+
+        let Some(target_cidr) = inet_address_to_cidr(&target) else {
+            continue;
+        };
+        let gateway = inet_address_to_ip(&via);
+        routes.push((target_cidr, gateway));
+    }
+
+    routes
+}
+
+fn inet_address_to_cidr(address: &InetAddress) -> Option<String> {
+    match address {
+        InetAddress::Null => None,
+        InetAddress::V4 { ip, port } => Some(format!("{}/{}", std::net::Ipv4Addr::from(*ip), port)),
+        InetAddress::V6 { ip, port } => Some(format!("{}/{}", std::net::Ipv6Addr::from(*ip), port)),
+    }
+}
+
+fn inet_address_to_ip(address: &InetAddress) -> Option<std::net::IpAddr> {
+    match address {
+        InetAddress::Null => None,
+        InetAddress::V4 { ip, .. } => Some(std::net::IpAddr::V4((*ip).into())),
+        InetAddress::V6 { ip, .. } => Some(std::net::IpAddr::V6((*ip).into())),
+    }
+}
+
+fn tun_name_for_network(network_id: u64, local_zt_address: [u8; 5]) -> String {
+    let network_suffix = network_id & 0x00FF_FFFF;
+    let node_suffix = u32::from_be_bytes([
+        0,
+        local_zt_address[2],
+        local_zt_address[3],
+        local_zt_address[4],
+    ]);
+    format!("zt{network_suffix:06x}{node_suffix:06x}")
+}
+
+/// Load an identity from native storage, or generate a new one and save it.
+async fn load_or_generate_identity(
+    storage: &NativeStorage,
+    crypto: &NativeCryptoProvider,
+    key: &str,
+) -> anyhow::Result<Identity> {
+    if let Some(secret_bytes) = storage.load(key).await? {
+        let secret_str = String::from_utf8(secret_bytes)
+            .map_err(|_| anyhow::anyhow!("stored identity is not valid UTF-8"))?;
         let identity = Identity::parse(secret_str.trim())
             .map_err(|e| anyhow::anyhow!("failed to parse identity: {:?}", e))?;
-        tracing::info!("loaded identity from {}", path);
+        tracing::info!(identity_key = key, "loaded identity from native storage");
         Ok(identity)
     } else {
-        // Generate new identity
         let mut rng = GetrandomRng;
-        let identity = Identity::generate(&mut rng)
+        let identity_bytes = crypto
+            .generate_identity(&mut rng)
             .map_err(|e| anyhow::anyhow!("failed to generate identity: {:?}", e))?;
+        let secret_str = String::from_utf8(identity_bytes)
+            .map_err(|_| anyhow::anyhow!("generated identity is not valid UTF-8"))?;
+        let identity = Identity::parse(secret_str.trim())
+            .map_err(|e| anyhow::anyhow!("failed to parse generated identity: {:?}", e))?;
 
-        // Save secret identity
-        let secret_str = identity
-            .to_secret_string()
-            .expect("generated identity must have secret");
-        let parent = Path::new(path).parent();
-        if let Some(dir) = parent {
-            fs::create_dir_all(dir)?;
-        }
-        fs::write(path, &secret_str)?;
+        storage.store(key, secret_str.as_bytes()).await?;
+        storage
+            .store(
+                &public_identity_key(key),
+                identity.to_public_string().as_bytes(),
+            )
+            .await?;
 
-        // Save public identity alongside
-        let public_path = path.replace(".secret", ".public");
-        if public_path != path {
-            fs::write(&public_path, identity.to_public_string())?;
-        }
-
-        tracing::info!("generated new identity, saved to {}", path);
+        tracing::info!(
+            identity_key = key,
+            "generated new identity in native storage"
+        );
         Ok(identity)
     }
 }
 
-/// Load planet file from data directory, or use the embedded default.
-fn load_planet(data_dir: &str) -> anyhow::Result<Vec<u8>> {
-    let planet_path = format!("{}/planet", data_dir);
-    if Path::new(&planet_path).exists() {
-        let data = fs::read(&planet_path)?;
-        tracing::info!("loaded planet from {}", planet_path);
-        Ok(data)
-    } else {
-        tracing::info!("using embedded default planet");
-        Ok(DEFAULT_PLANET.to_vec())
+#[cfg(test)]
+mod tests {
+    use super::{managed_ips_from_dict_data, managed_routes_from_dict_data, tun_name_for_network};
+    use zerotier_node::controller::dictionary::Dictionary;
+    use zerotier_protocol::inet_address::InetAddress;
+
+    fn inet_bytes(address: InetAddress) -> Vec<u8> {
+        let mut buf = [0u8; 32];
+        let written = address.serialize(&mut buf);
+        buf[..written].to_vec()
     }
+
+    #[test]
+    fn tun_name_for_network_is_stable_and_node_specific() {
+        let network_id = 0xd73835e5b10894e0;
+        let left = tun_name_for_network(network_id, [0x51, 0x8d, 0x35, 0xae, 0x76]);
+        let right = tun_name_for_network(network_id, [0x34, 0x4c, 0x97, 0x49, 0x46]);
+
+        assert_eq!(left, "zt0894e035ae76");
+        assert_eq!(right, "zt0894e0974946");
+        assert_ne!(left, right);
+        assert!(left.len() <= 15);
+        assert!(right.len() <= 15);
+    }
+
+    #[test]
+    fn parses_managed_ips_and_routes_from_dict_data() {
+        let mut ip_bytes = Vec::new();
+        ip_bytes.extend_from_slice(&inet_bytes(InetAddress::V4 {
+            ip: [10, 147, 20, 7],
+            port: 24,
+        }));
+        ip_bytes.extend_from_slice(&inet_bytes(InetAddress::V6 {
+            ip: [0xfd, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7],
+            port: 64,
+        }));
+
+        let mut route_bytes = Vec::new();
+        route_bytes.extend_from_slice(&inet_bytes(InetAddress::V4 {
+            ip: [10, 147, 20, 0],
+            port: 24,
+        }));
+        route_bytes.extend_from_slice(&inet_bytes(InetAddress::Null));
+        route_bytes.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut dict = Dictionary::new();
+        dict.add_binary("I", ip_bytes);
+        dict.add_binary("RT", route_bytes);
+
+        let dict_data = dict.serialize();
+        let ips = managed_ips_from_dict_data(&dict_data);
+        let routes = managed_routes_from_dict_data(&dict_data);
+
+        assert_eq!(ips.len(), 2);
+        assert_eq!(ips[0].0.to_string(), "10.147.20.7");
+        assert_eq!(ips[0].1, 24);
+        assert_eq!(ips[1].0.to_string(), "fd00::7");
+        assert_eq!(ips[1].1, 64);
+
+        assert_eq!(routes, vec![("10.147.20.0/24".to_string(), None)]);
+    }
+}
+
+/// Load planet file from native storage, or use the embedded default.
+async fn load_planet(storage: &NativeStorage) -> anyhow::Result<Vec<u8>> {
+    for key in ["planet.bin", "planet"] {
+        if let Some(data) = storage.load(key).await? {
+            tracing::info!(planet_key = key, "loaded planet from native storage");
+            return Ok(data);
+        }
+    }
+
+    tracing::info!("using embedded default planet");
+    Ok(DEFAULT_PLANET.to_vec())
 }
 
 /// Load or generate an authentication token for the REST API.
-///
-/// Uses atomic file creation (create_new) to avoid race conditions
-fn load_or_generate_auth_token(data_dir: &str) -> anyhow::Result<String> {
-    let token_path = format!("{}/authtoken.secret", data_dir);
-    if Path::new(&token_path).exists() {
-        let token = fs::read_to_string(&token_path)?;
+async fn load_or_generate_auth_token(storage: &NativeStorage, key: &str) -> anyhow::Result<String> {
+    if let Some(token) = storage.load(key).await? {
+        let token = String::from_utf8(token)
+            .map_err(|_| anyhow::anyhow!("stored auth token is not valid UTF-8"))?;
         Ok(token.trim().to_string())
     } else {
-        // Generate 24 random bytes, encode as 48-char hex
         let mut random_bytes = [0u8; 24];
         getrandom::getrandom(&mut random_bytes)
             .map_err(|e| anyhow::anyhow!("failed to get random bytes: {:?}", e))?;
-        let token: String = random_bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-
-        // Atomic creation to prevent race conditions
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&token_path)?;
-        file.write_all(token.as_bytes())?;
-
-        tracing::info!("generated authtoken.secret at {}", token_path);
+        let token: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        storage.store(key, token.as_bytes()).await?;
+        tracing::info!(
+            auth_token_key = key,
+            "generated auth token in native storage"
+        );
         Ok(token)
     }
 }

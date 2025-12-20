@@ -3924,13 +3924,18 @@ pub mod tests {
         );
 
         // Step 4: Start ManyTier client with the custom planet.
-        let client_process = spawn_manytier_with_planet(
+        // enable MANYTIER_DUMP_UDP=1 so the client dumps tx/rx
+        // HELLOs under its data-dir, producing the ground-truth ManyTier tx
+        // HELLO that Task 2's decoder test will diff against the captured
+        // official HELLO.
+        let client_process = spawn_manytier_with_planet_and_env(
             &shadow_test_dir,
             "manytier-client",
             CLIENT_API_PORT,
             CLIENT_UDP_PORT,
             false, // not controller mode
             Some(&planet_path),
+            vec![("MANYTIER_DUMP_UDP".to_string(), "1".to_string())],
         );
 
         let client_data_dir = client_process.layout.home_dir.clone();
@@ -4274,13 +4279,17 @@ pub mod tests {
 
         // Step 1: Start ManyTier controller.
         // The controller acts as both root and controller in the localhost scenario.
-        let controller_process = spawn_manytier_with_planet(
+        // dump both rx AND tx UDP HELLOs for offline byte-level
+        // comparison with captured official HELLOs. Cheap: the M2M fallback
+        // test does not need sudo and produces a 139-byte tx HELLO.
+        let controller_process = spawn_manytier_with_planet_and_env(
             &shadow_test_dir,
             "manytier-controller",
             CONTROLLER_API_PORT,
             CONTROLLER_UDP_PORT,
             true, // controller mode
             None, // use default official planet (controller will use it for its own bootstrap)
+            vec![("MANYTIER_DUMP_UDP".to_string(), "1".to_string())],
         );
 
         // Step 2: Read ManyTier controller's ZT address and authtoken.
@@ -4362,13 +4371,16 @@ pub mod tests {
         );
 
         // Step 5: Start ManyTier client 1 with the localhost planet.
-        let client_process = spawn_manytier_with_planet(
+        // enable tx/rx HELLO dumping on the client as well so
+        // the non-privileged M2M run produces a `tx-hello-*.bin` artifact.
+        let client_process = spawn_manytier_with_planet_and_env(
             &shadow_test_dir,
             "manytier-client-1",
             CLIENT_API_PORT,
             CLIENT_UDP_PORT,
             false, // client mode
             planet_path.as_deref(),
+            vec![("MANYTIER_DUMP_UDP".to_string(), "1".to_string())],
         );
 
         let client_data_dir = client_process.layout.home_dir.clone();
