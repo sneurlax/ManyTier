@@ -438,3 +438,275 @@ fn dearmor_official_hello_with_manytier_code() {
         Err(e) => panic!("FAILED: ManyTier dearmor_packet rejected official HELLO: {:?}", e),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Side-by-side HELLO layout decoder + diff.
+//
+// Consumes two ground-truth packets:
+//   MANYTIER_DEBUG_MANYTIER_TX_HELLO : a real ManyTier tx HELLO (from the
+//      MANYTIER_DUMP_UDP=1 path wired in Task 1).
+//   MANYTIER_DEBUG_OFFICIAL_RX_HELLO : a real captured official HELLO from
+//      the 2026-04-11 privileged run (629 bytes).
+//
+// Parses the plaintext 27-byte packet header of both, prints field-by-field
+// annotations with offsets, then hex-dumps the entire payload past offset 27
+// with 16 bytes per line. ManyTier's known plaintext HELLO fields (version,
+// version triple, timestamp, sender identity, dest_inet, moon count, COR
+// trailer) are annotated inline where possible so the reader can see exactly
+// where the two diverge.
+//
+// The official HELLO's payload is encrypted under cipher suite 1 so the
+// decoder gracefully marks the payload as "opaque (cipher_suite=1)" and
+// dumps it as raw hex. The point of this test is NOT to decrypt the official
+// payload: that would require the shared secret with the sending root. The
+// point is to expose the STRUCTURAL divergence (cipher suite bit, verb high
+// flags, total size, trailing bytes) so Task 3 can cross-reference upstream
+// source with concrete offsets.
+//
+// Output is printed to stderr AND written to
+// tests/shadow/artifacts/hello-diff-<TIMESTAMP>.txt for offline review.
+
+fn hex_dump_with_offsets(bytes: &[u8], start_offset: usize, out: &mut String) {
+    use std::fmt::Write as _;
+    for (i, chunk) in bytes.chunks(16).enumerate() {
+        let line_off = start_offset + i * 16;
+        let hex: String = chunk
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ascii: String = chunk
+            .iter()
+            .map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        let _ = writeln!(out, "  {:04x}  {:<48}  |{}|", line_off, hex, ascii);
+    }
+}
+
+fn decode_header(label: &str, bytes: &[u8], out: &mut String) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "=== {} ({} bytes) ===", label, bytes.len());
+    if bytes.len() < 28 {
+        let _ = writeln!(out, "  <packet too short to have a verb byte>");
+        return;
+    }
+    let packet_id = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+    let dest: [u8; 5] = bytes[8..13].try_into().unwrap();
+    let src: [u8; 5] = bytes[13..18].try_into().unwrap();
+    let flags = bytes[18];
+    let cipher_suite = flags & 0x38; // bits 3..=5
+    let hops = flags & 0x07;
+    let fragment = flags & 0x40;
+    let mac_hex: String = bytes[19..27]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let verb = bytes[27];
+    let verb_id = verb & 0x1f;
+    let verb_high = verb & 0xe0;
+
+    let _ = writeln!(out, "  offset  0..8   : packet_id       = 0x{:016x}", packet_id);
+    let _ = writeln!(
+        out,
+        "  offset  8..13  : dest_addr       = {:02x}{:02x}{:02x}{:02x}{:02x}",
+        dest[0], dest[1], dest[2], dest[3], dest[4]
+    );
+    let _ = writeln!(
+        out,
+        "  offset 13..18  : src_addr        = {:02x}{:02x}{:02x}{:02x}{:02x}",
+        src[0], src[1], src[2], src[3], src[4]
+    );
+    let _ = writeln!(
+        out,
+        "  offset 18      : flags           = 0x{:02x}  (cipher_suite={}, hops={}, fragment_bit={})",
+        flags,
+        cipher_suite >> 3,
+        hops,
+        if fragment != 0 { 1 } else { 0 }
+    );
+    let _ = writeln!(out, "  offset 19..27  : mac             = {}", mac_hex);
+    let _ = writeln!(
+        out,
+        "  offset 27      : verb+high_flags = 0x{:02x}  (verb_id=0x{:02x}, high_flags=0x{:02x})",
+        verb, verb_id, verb_high
+    );
+    if verb_high != 0 {
+        let _ = writeln!(
+            out,
+            "                                  (0x20=bit5 {}, 0x40=bit6 {}, 0x80=bit7 {})",
+            if verb_high & 0x20 != 0 { "SET" } else { "unset" },
+            if verb_high & 0x40 != 0 { "SET" } else { "unset" },
+            if verb_high & 0x80 != 0 { "SET" } else { "unset" }
+        );
+    }
+}
+
+fn decode_manytier_hello_payload(bytes: &[u8], out: &mut String) {
+    use std::fmt::Write as _;
+    // ManyTier HELLO layout past the 27-byte header (see crates/zerotier-node/src/root.rs::build_hello):
+    //   offset 28     : protocol version (1 byte)
+    //   offset 29     : major version    (1 byte)
+    //   offset 30     : minor version    (1 byte)
+    //   offset 31..33 : revision         (2 bytes BE)
+    //   offset 33..41 : timestamp ms     (8 bytes BE)
+    //   offset 41..N  : sender Identity.serialize()  (variable)
+    //   offset N..M   : InetAddress (dest_inet)       (variable)
+    //   offset M..M+2 : moon_count u16 BE             (2 bytes)
+    //   offset M+2..  : (moon records if any)
+    //   offset end-2  : COR trailer (2 bytes 0x00 0x00)
+    if bytes.len() < 41 {
+        let _ = writeln!(out, "  <payload too short for ManyTier HELLO header>");
+        return;
+    }
+    let proto = bytes[28];
+    let major = bytes[29];
+    let minor = bytes[30];
+    let rev = u16::from_be_bytes([bytes[31], bytes[32]]);
+    let ts = u64::from_be_bytes(bytes[33..41].try_into().unwrap());
+    let _ = writeln!(out, "  offset 28      : proto_version   = 0x{:02x}", proto);
+    let _ = writeln!(out, "  offset 29      : major           = {}", major);
+    let _ = writeln!(out, "  offset 30      : minor           = {}", minor);
+    let _ = writeln!(out, "  offset 31..33  : revision        = {}", rev);
+    let _ = writeln!(out, "  offset 33..41  : timestamp_ms    = {}", ts);
+    let _ = writeln!(out, "  offset 41..    : identity + dest_inet + moon_count + COR (opaque to this decoder)");
+    let _ = writeln!(out, "  ---- raw payload dump from offset 28 ----");
+    hex_dump_with_offsets(&bytes[28..], 28, out);
+}
+
+fn decode_official_hello_payload(bytes: &[u8], cipher_suite: u8, out: &mut String) {
+    use std::fmt::Write as _;
+    if bytes.len() < 28 {
+        let _ = writeln!(out, "  <payload missing>");
+        return;
+    }
+    if cipher_suite == 1 {
+        let _ = writeln!(
+            out,
+            "  payload is OPAQUE: cipher_suite=1 means bytes 28..end are Salsa20/12-encrypted"
+        );
+        let _ = writeln!(
+            out,
+            "  (decrypting would require the shared secret with the sender, which is not available here)"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  payload cipher_suite={}: raw bytes are plaintext per upstream",
+            cipher_suite
+        );
+    }
+    let _ = writeln!(out, "  ---- raw payload dump from offset 28 ----");
+    hex_dump_with_offsets(&bytes[28..], 28, out);
+}
+
+#[test]
+#[ignore]
+fn decode_and_diff_hello_layouts() {
+    use std::fmt::Write as _;
+
+    let manytier_path = std::env::var("MANYTIER_DEBUG_MANYTIER_TX_HELLO").expect(
+        "set MANYTIER_DEBUG_MANYTIER_TX_HELLO to a ManyTier tx HELLO (tx-hello-*.bin); produced by running \
+         the M2M fallback test with MANYTIER_DUMP_UDP=1 (already wired in tests/shadow/harness.rs)",
+    );
+    let official_path = std::env::var("MANYTIER_DEBUG_OFFICIAL_RX_HELLO").expect(
+        "set MANYTIER_DEBUG_OFFICIAL_RX_HELLO to a captured official HELLO (rx-hello-*.bin); a real 629-byte \
+         capture lives at tests/shadow/artifacts/run-20260411T120644/host-assisted-fallback/manytier-controller/manytier-data/udp-dumps/",
+    );
+
+    let manytier_pkt = fs::read(&manytier_path)
+        .unwrap_or_else(|e| panic!("failed to read ManyTier tx HELLO at {}: {}", manytier_path, e));
+    let official_pkt = fs::read(&official_path).unwrap_or_else(|e| {
+        panic!("failed to read official rx HELLO at {}: {}", official_path, e)
+    });
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Side-by-side HELLO layout diff");
+    let _ = writeln!(out, "ManyTier tx HELLO source: {}", manytier_path);
+    let _ = writeln!(out, "Official rx HELLO source: {}", official_path);
+    let _ = writeln!(out);
+
+    // --- ManyTier header + payload ---
+    decode_header("ManyTier tx HELLO", &manytier_pkt, &mut out);
+    decode_manytier_hello_payload(&manytier_pkt, &mut out);
+    let _ = writeln!(out);
+
+    // --- Official header + payload ---
+    decode_header("Official rx HELLO", &official_pkt, &mut out);
+    let official_cipher_suite = if official_pkt.len() >= 19 {
+        (official_pkt[18] & 0x38) >> 3
+    } else {
+        0
+    };
+    decode_official_hello_payload(&official_pkt, official_cipher_suite, &mut out);
+    let _ = writeln!(out);
+
+    // --- Summary ---
+    let _ = writeln!(out, "=== Summary ===");
+    let _ = writeln!(out, "ManyTier total: {} bytes", manytier_pkt.len());
+    let _ = writeln!(out, "Official total: {} bytes", official_pkt.len());
+    let delta = official_pkt.len() as isize - manytier_pkt.len() as isize;
+    let _ = writeln!(out, "delta: {} bytes (official minus ManyTier)", delta);
+    let _ = writeln!(
+        out,
+        "structural divergences observed (unknown: see 17-10-UPSTREAM-HELLO.md for upstream citations):"
+    );
+    if manytier_pkt.len() >= 28 && official_pkt.len() >= 28 {
+        let mt_flags = manytier_pkt[18];
+        let of_flags = official_pkt[18];
+        if (mt_flags & 0x38) != (of_flags & 0x38) {
+            let _ = writeln!(
+                out,
+                "  - cipher_suite differs: ManyTier=0x{:02x} ({}), Official=0x{:02x} ({})",
+                mt_flags & 0x38,
+                (mt_flags & 0x38) >> 3,
+                of_flags & 0x38,
+                (of_flags & 0x38) >> 3
+            );
+        }
+        let mt_verb_high = manytier_pkt[27] & 0xe0;
+        let of_verb_high = official_pkt[27] & 0xe0;
+        if mt_verb_high != of_verb_high {
+            let _ = writeln!(
+                out,
+                "  - verb high flags differ: ManyTier=0x{:02x}, Official=0x{:02x}",
+                mt_verb_high, of_verb_high
+            );
+        }
+        if manytier_pkt.len() != official_pkt.len() {
+            let _ = writeln!(
+                out,
+                "  - total size differs by {} bytes: ManyTier is missing trailing field(s)",
+                delta
+            );
+        }
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "unknown: the {} bytes of payload past ManyTier's HELLO must be identified from upstream ZT 1.14.2 source in Task 3",
+        delta.max(0)
+    );
+
+    // Write the diff to a timestamped file under tests/shadow/artifacts/.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let artifact_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests/shadow/artifacts");
+    let _ = fs::create_dir_all(&artifact_dir);
+    let diff_path = artifact_dir.join(format!("hello-diff-{}.txt", ts));
+    fs::write(&diff_path, &out).expect("failed to write hello-diff file");
+
+    // Also echo to stderr for interactive runs.
+    eprintln!("{}", out);
+    eprintln!("--- wrote diff to {} ---", diff_path.display());
+}

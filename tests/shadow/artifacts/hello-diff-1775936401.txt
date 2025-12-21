@@ -1,0 +1,86 @@
+Plan 17-10 Task 2: side-by-side HELLO layout diff
+ManyTier tx HELLO source: /home/user/src/manytier/manytier/target/shadow-tests/manytier-joins-manytier-controller-fallback/host-assisted-fallback/manytier-controller/manytier-data/udp-dumps/tx-hello-1775936135275-to-79.127.159.187-9993-src-39c7e39971-dst-cafefd6717-pid-1775936135275.bin
+Official rx HELLO source: /home/user/src/manytier/manytier/tests/shadow/artifacts/run-20260411T120644/host-assisted-fallback/manytier-controller/manytier-data/udp-dumps/rx-hello-1775927251395-from-84.17.53.155-9993-src-cafe04eba9-dst-ed8080693a-pid-7487256678436505166.bin
+
+=== ManyTier tx HELLO (139 bytes) ===
+  offset  0..8   : packet_id       = 0x0000019d7e0ae06b
+  offset  8..13  : dest_addr       = cafefd6717
+  offset 13..18  : src_addr        = 39c7e39971
+  offset 18      : flags           = 0x00  (cipher_suite=0, hops=0, fragment_bit=0)
+  offset 19..27  : mac             = 3a8890b3bc3ceae1
+  offset 27      : verb+high_flags = 0x01  (verb_id=0x01, high_flags=0x00)
+  offset 28      : proto_version   = 0x0c
+  offset 29      : major           = 1
+  offset 30      : minor           = 14
+  offset 31..33  : revision        = 2
+  offset 33..41  : timestamp_ms    = 1775936135275
+  offset 41..    : identity + dest_inet + moon_count + COR (opaque to this decoder)
+  ---- raw payload dump from offset 28 ----
+  001c  0c 01 0e 00 02 00 00 01 9d 7e 0a e0 6b 39 c7 e3   |.........~..k9..|
+  002c  99 71 00 52 80 42 5c 16 d4 82 4c 26 dd f1 0c 2b   |.q.R.B\...L&...+|
+  003c  d6 9b 77 a5 30 c3 67 2a 74 a8 c9 68 ad 88 83 04   |..w.0.g*t..h....|
+  004c  ca c1 2b d5 dd 96 5f 9c 18 b8 36 90 82 2d 63 50   |..+..._...6..-cP|
+  005c  91 8f fd 74 07 43 90 fb d7 ad f7 55 af b3 33 aa   |...t.C.....U..3.|
+  006c  0f 5f 11 00 04 4f 7f 9f bb 27 09 00 00 00 00 08   |._...O...'......|
+  007c  ea c9 0a 00 00 01 94 db 79 5b 4e d2 e6 00 00      |........y[N....|
+
+=== Official rx HELLO (629 bytes) ===
+  offset  0..8   : packet_id       = 0x67e81447a461064e
+  offset  8..13  : dest_addr       = ed8080693a
+  offset 13..18  : src_addr        = cafe04eba9
+  offset 18      : flags           = 0x08  (cipher_suite=1, hops=0, fragment_bit=0)
+  offset 19..27  : mac             = 6b279be9e57068af
+  offset 27      : verb+high_flags = 0x61  (verb_id=0x01, high_flags=0x60)
+                                  (0x20=bit5 SET, 0x40=bit6 SET, 0x80=bit7 unset)
+  payload is OPAQUE: cipher_suite=1 means bytes 28..end are Salsa20/12-encrypted
+  (decrypting would require the shared secret with the sender, which is not available here)
+  ---- raw payload dump from offset 28 ----
+  001c  d1 79 1b 0e d9 b7 fd 9f 83 52 2e b2 9f d8 eb fc   |.y.......R......|
+  002c  09 8a da 88 54 21 17 97 a2 dd a3 21 f3 87 91 38   |....T!.....!...8|
+  003c  b5 86 ec ac 2b 94 26 60 22 be 1a 07 dc 46 83 24   |....+.&`"....F.$|
+  004c  7d 34 80 d3 3a 4f 7c 02 66 69 2b fe 47 af a0 e0   |}4..:O|.fi+.G...|
+  005c  7f 7d f5 e0 c5 76 5e 31 aa 7f 92 01 e8 0d ad 57   |.}...v^1.......W|
+  006c  53 d8 8e ba eb d4 a8 c8 74 2a ba 59 af 72 41 94   |S.......t*.Y.rA.|
+  007c  e7 61 a7 00 32 3f ea 62 52 c2 2b 66 10 e1 27 55   |.a..2?.bR.+f..'U|
+  008c  1f fd e2 40 46 cf 19 d5 43 b1 51 60 d2 70 8b 98   |...@F...C.Q`.p..|
+  009c  12 3b 59 d7 3b a3 92 ff df a9 27 02 ad 75 fb ca   |.;Y.;.....'..u..|
+  00ac  8c 03 63 3d 87 ee 73 b6 1a f9 19 f0 1c ae 3d b3   |..c=..s.......=.|
+  00bc  8a a8 5e 4b bc 44 0b 33 5b 9c 9b 71 7c 96 de ab   |..^K.D.3[..q|...|
+  00cc  6b 5c 65 18 5d 26 de b7 e0 47 6c 37 1c 4a 99 07   |k\e.]&...Gl7.J..|
+  00dc  1b 78 23 50 7c 7b cb 64 27 2f dd 3c d7 c0 40 45   |.x#P|{.d'/.<..@E|
+  00ec  f0 9f 91 41 0b c8 ea 07 aa c8 88 35 a0 4a b5 d9   |...A.......5.J..|
+  00fc  7b bb bc 39 df 2e 06 d5 c3 e4 7c 3b 9b 2d 79 e7   |{..9......|;.-y.|
+  010c  97 87 95 ed 69 41 c8 92 6e 93 b5 cf 36 eb c3 83   |....iA..n...6...|
+  011c  d4 cf 7e 4b d2 b4 57 87 3d 4d 2b f0 71 64 ec 3f   |..~K..W.=M+.qd.?|
+  012c  ec a1 a5 6e 56 92 6f 7f 31 df b3 55 6e 12 86 17   |...nV.o.1..Un...|
+  013c  74 ce 9e 67 c8 f6 5f 83 56 99 dd ad 59 0b 19 a7   |t..g.._.V...Y...|
+  014c  99 fa 87 76 1e fe 6a 53 1d 1e 11 28 d8 93 44 67   |...v..jS...(..Dg|
+  015c  c4 12 4d cf 7d 4a b0 13 b9 26 ce 93 98 c9 85 55   |..M.}J...&.....U|
+  016c  46 7d f0 41 c3 3b c2 a0 c7 c6 06 51 fd ac 83 27   |F}.A.;.....Q...'|
+  017c  21 09 ac 34 f7 15 97 24 b1 69 0c 33 e7 3e 3c 26   |!..4...$.i.3.><&|
+  018c  ef 18 ed b0 1f 9b 9f 9d 5a 2f de 8e 80 95 5b 8e   |........Z/....[.|
+  019c  2c 77 5f 32 71 47 e2 8b c2 55 8e cb e9 48 e5 32   |,w_2qG...U...H.2|
+  01ac  ee e3 23 16 4b 72 38 a5 75 c2 19 f7 7d ee 33 68   |..#.Kr8.u...}.3h|
+  01bc  0d 2e 8f 1d 19 60 0b b9 0b ae 14 a5 d9 13 b6 ab   |.....`..........|
+  01cc  ac 1f b5 6c b0 ac 39 fe 01 46 8f f7 8e 45 a0 cd   |...l..9..F...E..|
+  01dc  2b 89 ed 80 60 41 13 7a e6 a5 08 ff 0c d8 06 68   |+...`A.z.......h|
+  01ec  70 d3 70 44 0d c1 b8 96 93 3b 42 de 87 ad 9d cf   |p.pD.....;B.....|
+  01fc  dc f4 c3 7e bf b9 a3 f4 52 a9 84 aa 41 dd ea 97   |...~....R...A...|
+  020c  97 ba 9a 03 36 dc 02 b7 f7 bb 27 be de 42 e3 de   |....6.....'..B..|
+  021c  af 1a 56 71 f4 8c 00 b1 5d 6d 40 a6 10 35 08 fc   |..Vq....]m@..5..|
+  022c  5f 1b f1 e4 5c d9 86 b0 8d 2a bf 09 87 fd a6 f1   |_...\....*......|
+  023c  94 bc 4a 08 de a6 66 5f ec 27 55 a3 47 10 21 a6   |..J...f_.'U.G.!.|
+  024c  bb 6a ef 76 ed fa 80 07 37 af f2 67 74 fe 01 e6   |.j.v....7..gt...|
+  025c  d2 e9 b1 fe 73 8e e7 06 f3 03 62 b3 d0 f8 95 2e   |....s.....b.....|
+  026c  41 44 5e f9 cd 54 d3 41 9e                        |AD^..T.A.|
+
+=== Summary ===
+ManyTier total: 139 bytes
+Official total: 629 bytes
+delta: 490 bytes (official minus ManyTier)
+structural divergences observed (unknown: see 17-10-UPSTREAM-HELLO.md for upstream citations):
+  - cipher_suite differs: ManyTier=0x00 (0), Official=0x08 (1)
+  - verb high flags differ: ManyTier=0x00, Official=0x60
+  - total size differs by 490 bytes: ManyTier is missing trailing field(s)
+
+unknown: the 490 bytes of payload past ManyTier's HELLO must be identified from upstream ZT 1.14.2 source in Task 3
