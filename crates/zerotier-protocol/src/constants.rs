@@ -3,7 +3,7 @@
 // --- Protocol version ---
 
 /// Current protocol version (V1).
-pub const ZT_PROTO_VERSION: u8 = 13;
+pub const ZT_PROTO_VERSION: u8 = 12;
 
 /// Minimum supported protocol version.
 pub const ZT_PROTO_VERSION_MIN: u8 = 4;
@@ -42,13 +42,79 @@ pub const CIPHER_SUITE_AES_GMAC_SIV: u8 = 3;
 
 // --- Packet flags ---
 
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:143 (`ZT_PROTO_FLAG_FRAGMENTED`).
 pub const FLAG_FRAGMENTED: u8 = 0x40;
 
+/// See ZeroTierOne dev/node/Packet.hpp:138 (`ZT_PROTO_FLAG_EXTENDED_ARMOR`).
+/// Not present in 1.14.2; reserved for future dev-branch extended-armor
+/// HELLO support.
 pub const FLAG_EXTENDED_ARMOR: u8 = 0x80;
 
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:148 (`ZT_PROTO_VERB_FLAG_COMPRESSED`).
+/// High bit of the verb byte indicates LZ4-compressed payload.
 pub const VERB_FLAG_COMPRESSED: u8 = 0x80;
 
 pub const FRAGMENT_INDICATOR: u8 = 0xff;
+
+// --- Packet header field indexes ---
+//
+// These constants mirror upstream ZeroTierOne 1.14.2 node/Packet.hpp:223..230.
+// They are currently informational (the on-disk packet layout is enforced by
+// the `PacketHeader` zerocopy struct in zerotier-protocol::header), but
+// expose the offsets to crate-external code that needs to peek inside a raw
+// packet without constructing a `PacketHeader` (e.g. the tx/rx HELLO dumper
+// in zerotier-service).
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:224 (`ZT_PACKET_IDX_IV`).
+pub const ZT_PACKET_IDX_IV: usize = 0;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:225 (`ZT_PACKET_IDX_DEST`).
+pub const ZT_PACKET_IDX_DEST: usize = 8;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:226 (`ZT_PACKET_IDX_SOURCE`).
+pub const ZT_PACKET_IDX_SOURCE: usize = 13;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:227 (`ZT_PACKET_IDX_FLAGS`).
+pub const ZT_PACKET_IDX_FLAGS: usize = 18;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:228 (`ZT_PACKET_IDX_MAC`).
+pub const ZT_PACKET_IDX_MAC: usize = 19;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:229 (`ZT_PACKET_IDX_VERB`).
+pub const ZT_PACKET_IDX_VERB: usize = 27;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:230 (`ZT_PACKET_IDX_PAYLOAD`).
+pub const ZT_PACKET_IDX_PAYLOAD: usize = 28;
+
+// --- HELLO verb field indexes (relative to `ZT_PACKET_IDX_PAYLOAD`) ---
+//
+// See ZeroTierOne 1.14.2 node/Packet.hpp:266..271 and node/Peer.cpp:418-461
+// for the HELLO packet construction. These offsets locate the fixed-size
+// HELLO header fields that precede the variable-length identity + dest_inet
+// + planet + moon sections. The identity, dest_inet, planet, and moon
+// offsets are variable and are computed at serialization time by
+// `HelloPayload::serialize` and `RootManager::build_hello`.
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:266 (`ZT_PROTO_VERB_HELLO_IDX_PROTOCOL_VERSION`).
+pub const ZT_PROTO_VERB_HELLO_IDX_PROTOCOL_VERSION: usize = ZT_PACKET_IDX_PAYLOAD;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:267 (`ZT_PROTO_VERB_HELLO_IDX_MAJOR_VERSION`).
+pub const ZT_PROTO_VERB_HELLO_IDX_MAJOR_VERSION: usize =
+    ZT_PROTO_VERB_HELLO_IDX_PROTOCOL_VERSION + 1;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:268 (`ZT_PROTO_VERB_HELLO_IDX_MINOR_VERSION`).
+pub const ZT_PROTO_VERB_HELLO_IDX_MINOR_VERSION: usize =
+    ZT_PROTO_VERB_HELLO_IDX_MAJOR_VERSION + 1;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:269 (`ZT_PROTO_VERB_HELLO_IDX_REVISION`).
+pub const ZT_PROTO_VERB_HELLO_IDX_REVISION: usize =
+    ZT_PROTO_VERB_HELLO_IDX_MINOR_VERSION + 1;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:270 (`ZT_PROTO_VERB_HELLO_IDX_TIMESTAMP`).
+pub const ZT_PROTO_VERB_HELLO_IDX_TIMESTAMP: usize = ZT_PROTO_VERB_HELLO_IDX_REVISION + 2;
+
+/// See ZeroTierOne 1.14.2 node/Packet.hpp:271 (`ZT_PROTO_VERB_HELLO_IDX_IDENTITY`).
+pub const ZT_PROTO_VERB_HELLO_IDX_IDENTITY: usize = ZT_PROTO_VERB_HELLO_IDX_TIMESTAMP + 8;
 
 // --- Timing constants (milliseconds) ---
 
@@ -133,7 +199,7 @@ mod tests {
 
     #[test]
     fn protocol_version_values() {
-        assert_eq!(ZT_PROTO_VERSION, 13);
+        assert_eq!(ZT_PROTO_VERSION, 12);
         assert_eq!(ZT_PROTO_VERSION_MIN, 4);
     }
 
@@ -186,6 +252,29 @@ mod tests {
     fn address_values() {
         assert_eq!(ZT_ADDRESS_LENGTH, 5);
         assert_eq!(ZT_ADDRESS_RESERVED_PREFIX, 0xff);
+    }
+
+    #[test]
+    fn packet_header_offsets_match_upstream_1_14_2() {
+        // See ZeroTierOne 1.14.2 node/Packet.hpp:224..230
+        assert_eq!(ZT_PACKET_IDX_IV, 0);
+        assert_eq!(ZT_PACKET_IDX_DEST, 8);
+        assert_eq!(ZT_PACKET_IDX_SOURCE, 13);
+        assert_eq!(ZT_PACKET_IDX_FLAGS, 18);
+        assert_eq!(ZT_PACKET_IDX_MAC, 19);
+        assert_eq!(ZT_PACKET_IDX_VERB, 27);
+        assert_eq!(ZT_PACKET_IDX_PAYLOAD, 28);
+    }
+
+    #[test]
+    fn hello_verb_field_offsets_match_upstream_1_14_2() {
+        // See ZeroTierOne 1.14.2 node/Packet.hpp:266..271
+        assert_eq!(ZT_PROTO_VERB_HELLO_IDX_PROTOCOL_VERSION, 28);
+        assert_eq!(ZT_PROTO_VERB_HELLO_IDX_MAJOR_VERSION, 29);
+        assert_eq!(ZT_PROTO_VERB_HELLO_IDX_MINOR_VERSION, 30);
+        assert_eq!(ZT_PROTO_VERB_HELLO_IDX_REVISION, 31);
+        assert_eq!(ZT_PROTO_VERB_HELLO_IDX_TIMESTAMP, 33);
+        assert_eq!(ZT_PROTO_VERB_HELLO_IDX_IDENTITY, 41);
     }
 
     #[test]

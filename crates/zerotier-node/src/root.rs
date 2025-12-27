@@ -34,6 +34,13 @@ impl RootManager {
     ///
     /// HELLO uses cipher suite 0 (MAC only, no encryption per Pitfall 1).
     /// The shared_secret is used only for MAC computation, not encryption.
+    ///
+    /// `planet_world_id` must be the actual planet world id from the caller's
+    /// topology. Upstream ZeroTierOne 1.14.2 emits this at
+    /// `node/Peer.cpp:430`: `outp.append((uint64_t)RR->topology->planetWorldId())`.
+    /// Previously this field was hardcoded to `WORLD_ID_EARTH` in `HelloPayload::new`, which
+    /// made ManyTier lie about its planet when running against any non-Earth
+    /// planet (e.g. the localhost M2M test planet).
     pub fn build_hello(
         our_identity: &Identity,
         dest_address: &[u8; 5],
@@ -41,6 +48,7 @@ impl RootManager {
         now_ms: u64,
         shared_secret: &[u8; 32],
         buf: &mut [u8],
+        planet_world_id: u64,
         planet_world_timestamp: u64,
     ) -> Result<(usize, u64), ProtocolError> {
         if buf.len() < ZT_PROTO_MIN_PACKET_LENGTH + 128 {
@@ -81,6 +89,8 @@ impl RootManager {
             now_ms,
             dest_inet,
         );
+        // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+        hello.planet_world_id = planet_world_id;
         hello.planet_world_timestamp = planet_world_timestamp;
 
         let payload_len = hello.serialize(&mut buf[28..])?;
@@ -298,8 +308,11 @@ mod tests {
         let secret = test_shared_secret();
         let mut buf = [0u8; 512];
 
-        let (len, _packet_id) =
-            RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf, 0).unwrap();
+        let (len, _packet_id) = RootManager::build_hello(
+            &id, &dest, dest_phys, 1000, &secret, &mut buf,
+            WORLD_ID_EARTH, 0,
+        )
+        .unwrap();
 
         assert!(len >= ZT_PROTO_MIN_PACKET_LENGTH);
         assert_eq!(len, 139, "HELLO length must include 2-byte empty COR trailer");
@@ -365,6 +378,7 @@ mod tests {
             1000,
             &shared,
             &mut buf,
+            WORLD_ID_EARTH,
             0,
         )
         .unwrap();
@@ -398,6 +412,121 @@ mod tests {
             &[0x00, 0x00],
             "COR must be empty (count = 0, plaintext)"
         );
+    }
+
+    #[test]
+    fn hello_contains_planet_world_id_at_correct_offset() {
+        // Verify that build_hello emits the caller-supplied
+        // planet_world_id at the correct offset (119..127), matching upstream
+        // ZeroTierOne 1.14.2 node/Peer.cpp:430 which writes planetWorldId()
+        // after the sender identity and destination InetAddress.
+        //
+        // Layout past the 28-byte header:
+        //   offset 28: proto_version (1)
+        //   offset 29: vMajor (1)
+        //   offset 30: vMinor (1)
+        //   offset 31: vRevision (2)
+        //   offset 33: timestamp (8)
+        //   offset 41: identity (71) = addr(5) + type(1) + DH(32) + ED(32) + priv_len(1)
+        //   offset 112: dest InetAddress (7 bytes for IPv4)
+        //   offset 119: planet_world_id (8 bytes BE)   <-- this test asserts this field
+        //   offset 127: planet_world_timestamp (8 bytes BE)
+        //   offset 135: moon_count (2 bytes, cryptField-encrypted)
+        //   offset 137: COR trailer (2 bytes 0x00 0x00, plaintext)
+        //   offset 139: end
+
+        use zerotier_crypto::identity::Identity;
+
+        struct XorShift(u64);
+        impl rand_core::RngCore for XorShift {
+            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                self.0 = x; x
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                let mut pos = 0;
+                while pos < dest.len() {
+                    let val = self.next_u64().to_le_bytes();
+                    let n = core::cmp::min(8, dest.len() - pos);
+                    dest[pos..pos + n].copy_from_slice(&val[..n]);
+                    pos += n;
+                }
+            }
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+                self.fill_bytes(dest); Ok(())
+            }
+        }
+
+        let mut rng = XorShift(0xC0DEF00D);
+        let client = Identity::generate(&mut rng).unwrap();
+        let mut rng2 = XorShift(0xDEADBEEF);
+        let server = Identity::generate(&mut rng2).unwrap();
+
+        let client_secret = client.secret.as_ref().unwrap();
+        let server_pub = x25519_dalek::PublicKey::from(server.public_key.dh);
+        let shared = zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &server_pub);
+
+        // Pick a non-Earth planet_world_id so the assertion is
+        // meaningful. The value 0xDEAD_BEEF_CAFE_BABE is distinct from
+        // WORLD_ID_EARTH (149_604_618) so any hardcoded-Earth fallback would
+        // fail this test.
+        let custom_planet_id: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let custom_planet_ts: u64 = 0x0000_0001_AABB_CCDD;
+
+        let mut buf = [0u8; 512];
+        let (len, _) = RootManager::build_hello(
+            &client,
+            server.address.as_bytes(),
+            "127.0.0.1:9993".parse().unwrap(),
+            1000,
+            &shared,
+            &mut buf,
+            custom_planet_id,
+            custom_planet_ts,
+        )
+        .unwrap();
+
+        assert_eq!(len, 139, "HELLO length must be 139 bytes");
+
+        // Dearmor to confirm the MAC covers the planet fields correctly.
+        let server_secret = server.secret.as_ref().unwrap();
+        let client_pub = x25519_dalek::PublicKey::from(client.public_key.dh);
+        let shared2 = zerotier_crypto::key_agreement::key_agree(&server_secret.dh, &client_pub);
+        salsa::dearmor_packet(&shared2, &mut buf[..len])
+            .expect("MAC must verify across planet_world_id bytes");
+
+        // Planet world id and timestamp sit in the plaintext region (before
+        // the cryptField-encrypted moon count), so they can be read directly.
+        const PLANET_ID_OFFSET: usize = 28 + 1 + 1 + 1 + 2 + 8 + 71 + 7; // 119
+        const PLANET_TS_OFFSET: usize = PLANET_ID_OFFSET + 8; // 127
+        assert_eq!(PLANET_ID_OFFSET, 119);
+        assert_eq!(PLANET_TS_OFFSET, 127);
+
+        let got_id = u64::from_be_bytes(
+            buf[PLANET_ID_OFFSET..PLANET_ID_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let got_ts = u64::from_be_bytes(
+            buf[PLANET_TS_OFFSET..PLANET_TS_OFFSET + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            got_id, custom_planet_id,
+            "planet_world_id at offset 119..127 must match the value passed to build_hello"
+        );
+        assert_eq!(
+            got_ts, custom_planet_ts,
+            "planet_world_timestamp at offset 127..135 must match the value passed to build_hello"
+        );
+
+        // Cross-check the regression: building a HELLO with WORLD_ID_EARTH
+        // must NOT collide with our custom value (sanity check that the old
+        // hardcoded path would have failed this test).
+        assert_ne!(custom_planet_id, WORLD_ID_EARTH);
     }
 
     #[test]
@@ -480,6 +609,7 @@ mod tests {
             1000,
             &client_dh,
             &mut buf,
+            WORLD_ID_EARTH,
             0,
         )
         .unwrap();
@@ -504,9 +634,11 @@ mod tests {
         let secret = test_shared_secret();
         let mut buf = [0u8; 10];
 
-        assert!(
-            RootManager::build_hello(&id, &dest, dest_phys, 1000, &secret, &mut buf, 0).is_err()
-        );
+        assert!(RootManager::build_hello(
+            &id, &dest, dest_phys, 1000, &secret, &mut buf,
+            WORLD_ID_EARTH, 0,
+        )
+        .is_err());
     }
 
     #[test]
@@ -539,6 +671,7 @@ mod tests {
             1000,
             &client_dh,
             &mut buf,
+            WORLD_ID_EARTH,
             0,
         ).unwrap();
 
@@ -591,6 +724,7 @@ mod tests {
             1000,
             &shared,
             &mut buf,
+            WORLD_ID_EARTH,
             0,
         ).unwrap();
 

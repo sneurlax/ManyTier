@@ -596,14 +596,11 @@ impl Node {
             Err(_) => return,
         };
 
-        // HELLO MAC verification: try DH-derived key first, then accept without
-        // verification if it fails. The bypass is required because x25519_dalek
-        // and the official ZeroTier C25519 implementation produce different DH
-        // shared secrets for cross-implementation key pairs. ManyTier-to-ManyTier
-        // HELLOs verify correctly; official-to-ManyTier HELLOs fail MAC check.
-        //
-        // TODO(interop): Investigate DH key agreement difference. Once resolved,
-        // remove the bypass and enforce strict MAC verification.
+        // HELLO MAC verification using DH-derived shared secret.
+        // DH key agreement between x25519_dalek and official ZeroTier C25519 has
+        // been verified to produce identical shared secrets (cross_identity_hello_mac_verifies).
+        // The bypass remains because official-to-ManyTier HELLOs use a different
+        // crypt_packet_field key derivation that changes the MAC input bytes.
         if let Some(ref our_secret) = self.identity.secret {
             let shared_secret = zerotier_crypto::key_agreement::key_agree(
                 &our_secret.dh,
@@ -759,6 +756,13 @@ impl Node {
                                 let hello_secret = self
                                     .shared_secret_for_peer(&addr_bytes)
                                     .unwrap_or([0u8; 32]);
+                                // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+                                let planet_id = self
+                                    .topology
+                                    .planet
+                                    .as_ref()
+                                    .map(|p| p.id)
+                                    .unwrap_or(zerotier_protocol::constants::WORLD_ID_EARTH);
                                 let planet_ts = self
                                     .topology
                                     .planet
@@ -773,6 +777,7 @@ impl Node {
                                     now_ms,
                                     &hello_secret,
                                     &mut hello_buf,
+                                    planet_id,
                                     planet_ts,
                                 ) {
                                     self.actions.push(NodeAction::SendTo {
@@ -1045,6 +1050,13 @@ impl Node {
                 let hello_secret = self
                     .shared_secret_for_peer(&rendezvous.peer_address)
                     .unwrap_or([0u8; 32]);
+                // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+                let planet_id = self
+                    .topology
+                    .planet
+                    .as_ref()
+                    .map(|p| p.id)
+                    .unwrap_or(zerotier_protocol::constants::WORLD_ID_EARTH);
                 let planet_ts = self
                     .topology
                     .planet
@@ -1059,6 +1071,7 @@ impl Node {
                     now_ms,
                     &hello_secret,
                     &mut buf,
+                    planet_id,
                     planet_ts,
                 ) {
                     tracing::info!(
@@ -1320,6 +1333,13 @@ impl Node {
             // Always use the DH-derived shared secret for HELLO armoring.
             // The official controller verifies the MAC using key_agree(sender_pubkey, ctrl_privkey).
             let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+            let planet_id = self
+                .topology
+                .planet
+                .as_ref()
+                .map(|p| p.id)
+                .unwrap_or(zerotier_protocol::constants::WORLD_ID_EARTH);
             let planet_ts = self
                 .topology
                 .planet
@@ -1335,6 +1355,7 @@ impl Node {
                 now_ms,
                 &hello_secret,
                 &mut buf,
+                planet_id,
                 planet_ts,
             ) {
                 tracing::info!(
@@ -1368,6 +1389,13 @@ impl Node {
             // practice this causes `zerotier-one` to drop our HELLO in the localhost
             // controller harness, resulting in zero replies and no config assignment.
             let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+            let planet_id = self
+                .topology
+                .planet
+                .as_ref()
+                .map(|p| p.id)
+                .unwrap_or(zerotier_protocol::constants::WORLD_ID_EARTH);
             let planet_ts = self
                 .topology
                 .planet
@@ -1383,6 +1411,7 @@ impl Node {
                 now_ms,
                 &hello_secret,
                 &mut buf,
+                planet_id,
                 planet_ts,
             ) {
                 self.actions.push(NodeAction::SendTo {
@@ -1405,6 +1434,13 @@ impl Node {
         // 5. Reconnect stale peers with exponential HELLO backoff.
         for (addr, phys_addr) in &reconnect_targets {
             let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+            let planet_id = self
+                .topology
+                .planet
+                .as_ref()
+                .map(|p| p.id)
+                .unwrap_or(zerotier_protocol::constants::WORLD_ID_EARTH);
             let planet_ts = self
                 .topology
                 .planet
@@ -1419,6 +1455,7 @@ impl Node {
                 now_ms,
                 &hello_secret,
                 &mut buf,
+                planet_id,
                 planet_ts,
             ) {
                 self.actions.push(NodeAction::SendTo {
@@ -1456,6 +1493,13 @@ impl Node {
         for (addr, phys_addr) in &root_reconnect {
             // Always use the DH-derived shared secret for HELLO armoring.
             let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+            let planet_id = self
+                .topology
+                .planet
+                .as_ref()
+                .map(|p| p.id)
+                .unwrap_or(zerotier_protocol::constants::WORLD_ID_EARTH);
             let planet_ts = self
                 .topology
                 .planet
@@ -1470,6 +1514,7 @@ impl Node {
                 now_ms,
                 &hello_secret,
                 &mut buf,
+                planet_id,
                 planet_ts,
             ) {
                 tracing::info!(
@@ -1796,6 +1841,13 @@ impl Node {
         // Build HELLO for each root
         for (root_addr, phys_addr) in root_info {
             let hello_secret = self.shared_secret_for_peer(&root_addr).unwrap_or([0u8; 32]);
+            // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
+            let planet_id = self
+                .topology
+                .planet
+                .as_ref()
+                .map(|p| p.id)
+                .unwrap_or(zerotier_protocol::constants::WORLD_ID_EARTH);
             let planet_ts = self
                 .topology
                 .planet
@@ -1810,6 +1862,7 @@ impl Node {
                 now_ms,
                 &hello_secret,
                 &mut buf,
+                planet_id,
                 planet_ts,
             ) {
                 self.actions.push(NodeAction::SendTo {
