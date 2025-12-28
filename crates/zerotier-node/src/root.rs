@@ -41,6 +41,11 @@ impl RootManager {
     /// Previously this field was hardcoded to `WORLD_ID_EARTH` in `HelloPayload::new`, which
     /// made ManyTier lie about its planet when running against any non-Earth
     /// planet (e.g. the localhost M2M test planet).
+    ///
+    /// The verb byte at offset 27 is set to `Verb::Hello.to_byte()` with no
+    /// high-nibble flags. Upstream 1.14.2 defines only `VERB_FLAG_COMPRESSED`
+    /// (`0x80`) as a verb flag (`node/Packet.hpp:148`), which does not apply
+    /// to HELLO; no other verb flags exist in 1.14.2.
     pub fn build_hello(
         our_identity: &Identity,
         dest_address: &[u8; 5],
