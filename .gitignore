@@ -2,6 +2,9 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+tests/upstream-dohello-replay/vendored/
+tests/upstream-dohello-replay/replay
+tests/upstream-dohello-replay/*.o
 identity.secret
 identity.public
 tests/fixtures/zerotier-one
