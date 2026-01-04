@@ -597,10 +597,10 @@ impl Node {
         };
 
         // HELLO MAC verification using DH-derived shared secret.
-        // DH key agreement between x25519_dalek and official ZeroTier C25519 has
-        // been verified to produce identical shared secrets (cross_identity_hello_mac_verifies).
-        // The bypass remains because official-to-ManyTier HELLOs use a different
-        // crypt_packet_field key derivation that changes the MAC input bytes.
+        // The DH key agreement between x25519_dalek and official ZeroTier C25519
+        // produces byte-identical shared secrets (verified by the
+        // cross_identity_hello_mac_verifies test). The prior "accept anyway"
+        // bypass was a carry-over from interop debugging and has been removed.
         if let Some(ref our_secret) = self.identity.secret {
             let shared_secret = zerotier_crypto::key_agreement::key_agree(
                 &our_secret.dh,
@@ -611,9 +611,20 @@ impl Node {
                     target: "manytier",
                     event = "hello_mac_mismatch",
                     packet_id,
-                    "HELLO MAC does not match DH-derived key (accepting anyway for interop)"
+                    "HELLO MAC does not match DH-derived key: dropping"
                 );
+                return;
             }
+        } else {
+            // No local secret means we cannot DH-verify; preserve prior behavior
+            // and drop the HELLO to avoid adding an unverified peer.
+            tracing::debug!(
+                target: "manytier",
+                event = "hello_no_local_secret",
+                packet_id,
+                "No local identity secret for DH; dropping HELLO"
+            );
+            return;
         }
 
         // Verify minimum protocol version
