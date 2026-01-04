@@ -2634,4 +2634,156 @@ mod tests {
 
         assert_eq!(node.find_network(network_id).unwrap().mtu, 1400);
     }
+
+    // ---------------------------------------------------------------
+    // Strict HELLO MAC verification (bypass removal).
+    // ---------------------------------------------------------------
+    // Tests:
+    //  1. handle_hello_valid_mac_adds_active_peer: a well-formed HELLO
+    //     built with the sender's DH key is accepted and promotes the
+    //     peer to PeerState::Active on the controller side.
+    //  2. handle_hello_tampered_mac_is_dropped: flipping a MAC byte
+    //     causes handle_hello to drop the packet: the peer is NOT
+    //     promoted to Active (this test FAILED under the pre-17-11
+    //     bypass, which logged and accepted anyway).
+    //  3. handle_hello_without_local_secret_drops: when the receiving
+    //     Node has no identity secret, the HELLO is dropped (no peer
+    //     added, no Active state).
+
+    struct XorShift17_11(u64);
+    impl rand_core::RngCore for XorShift17_11 {
+        fn next_u32(&mut self) -> u32 {
+            self.next_u64() as u32
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            let mut pos = 0;
+            while pos < dest.len() {
+                let val = self.next_u64().to_le_bytes();
+                let n = core::cmp::min(8, dest.len() - pos);
+                dest[pos..pos + n].copy_from_slice(&val[..n]);
+                pos += n;
+            }
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    fn plan_17_11_build_hello_env(
+        seed: u64,
+    ) -> (Identity, Identity, [u8; 32], Vec<u8>) {
+        let mut rng = XorShift17_11(seed);
+        let client = Identity::generate(&mut rng).unwrap();
+        let controller = Identity::generate(&mut rng).unwrap();
+
+        let client_secret = client.secret.as_ref().unwrap();
+        let controller_pub = x25519_dalek::PublicKey::from(controller.public_key.dh);
+        let shared_secret = zerotier_crypto::key_agreement::key_agree(
+            &client_secret.dh,
+            &controller_pub,
+        );
+
+        let mut buf = [0u8; 512];
+        let (len, _pkt_id) = RootManager::build_hello(
+            &client,
+            controller.address.as_bytes(),
+            "127.0.0.1:9993".parse().unwrap(),
+            1000,
+            &shared_secret,
+            &mut buf,
+            zerotier_protocol::constants::WORLD_ID_EARTH,
+            0,
+        )
+        .unwrap();
+
+        (client, controller, shared_secret, buf[..len].to_vec())
+    }
+
+    #[test]
+    fn handle_hello_valid_mac_adds_active_peer() {
+        let (client, controller, _shared, hello_bytes) = plan_17_11_build_hello_env(42);
+
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(controller, &planet, 1).unwrap();
+        let client_addr = *client.address.as_bytes();
+        let from: SocketAddr = "10.0.0.2:9993".parse().unwrap();
+
+        let mut data = hello_bytes.clone();
+        node.receive_packet(&mut data, from, 2000);
+
+        let peer = node
+            .topology
+            .get_peer(&client_addr)
+            .expect("peer must be added on valid HELLO");
+        assert!(
+            matches!(peer.state, PeerState::Active { .. }),
+            "peer must be promoted to Active after a valid HELLO, got {:?}",
+            peer.state
+        );
+    }
+
+    #[test]
+    fn handle_hello_tampered_mac_is_dropped() {
+        let (client, controller, _shared, hello_bytes) = plan_17_11_build_hello_env(43);
+
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(controller, &planet, 1).unwrap();
+        let client_addr = *client.address.as_bytes();
+        let from: SocketAddr = "10.0.0.2:9993".parse().unwrap();
+
+        // MAC field lives at bytes 19..27. Flip the first MAC byte.
+        let mut data = hello_bytes.clone();
+        data[19] ^= 0xff;
+
+        node.receive_packet(&mut data, from, 2000);
+
+        // Strict MAC verification MUST drop this HELLO: no peer promoted
+        // to Active. (Under the pre-17-11 bypass, the peer was promoted
+        // to Active anyway: that is the regression this test guards.)
+        if let Some(peer) = node.topology.get_peer(&client_addr) {
+            assert!(
+                !matches!(peer.state, PeerState::Active { .. }),
+                "peer must NOT be Active after a tampered HELLO MAC (bypass removed), got {:?}",
+                peer.state
+            );
+        }
+    }
+
+    #[test]
+    fn handle_hello_without_local_secret_drops() {
+        let (client, controller, _shared, hello_bytes) = plan_17_11_build_hello_env(44);
+
+        // Strip the controller's secret so the DH verification path has
+        // nothing to verify against; strict behavior is to drop.
+        let controller_no_secret = Identity {
+            address: controller.address,
+            public_key: controller.public_key.clone(),
+            secret: None,
+        };
+
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(controller_no_secret, &planet, 1).unwrap();
+        let client_addr = *client.address.as_bytes();
+        let from: SocketAddr = "10.0.0.2:9993".parse().unwrap();
+
+        let mut data = hello_bytes.clone();
+        node.receive_packet(&mut data, from, 2000);
+
+        if let Some(peer) = node.topology.get_peer(&client_addr) {
+            assert!(
+                !matches!(peer.state, PeerState::Active { .. }),
+                "peer must NOT be Active when local node has no identity secret, got {:?}",
+                peer.state
+            );
+        }
+    }
 }
