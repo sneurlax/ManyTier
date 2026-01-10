@@ -254,10 +254,154 @@ int main(int argc, char **argv)
     fprintf(stderr, "locallyValidate PASSED\n");
 
     // Reached the // VALID comment at IncomingPacket.cpp:459.
-    // _doHELLO line 535+: peer->setRemoteVersion and peer->received would fire here,
-    // populating the member JSON fields vMajor, identity, ipAssignments via the
-    // controller's auth callback. No early return beyond this point in normal flow.
-    fprintf(stderr, "TRACE: reached // VALID at IncomingPacket.cpp:459: would call peer->setRemoteVersion + peer->received\n");
+    fprintf(stderr, "TRACE: reached // VALID at IncomingPacket.cpp:459\n");
+
+    // _doHELLO line 463-471: external surface address deserialization.
+    //
+    //   InetAddress externalSurfaceAddress;
+    //   if (ptr < size()) {
+    //       ptr += externalSurfaceAddress.deserialize(*this,ptr);
+    //       ...
+    //   }
+    //
+    // InetAddress::deserialize (InetAddress.hpp:580-630) throws std::out_of_range
+    // if the type byte is unknown or the required bytes aren't present. This
+    // throw is NOT caught in _doHELLO: it propagates up to tryDecode's outer
+    // catch(...) at IncomingPacket.cpp:160-164, which logs "unexpected exception
+    // in tryDecode()" and drops the packet silently with drop_branch=other.
+    //
+    // Recompute ptr: after Identity::deserialize consumed (id_end - HELLO_IDX_IDENTITY)
+    // bytes, ptr = HELLO_IDX_IDENTITY + id.deserialize(...). id.deserialize returns
+    // the number of bytes read. We already called id.deserialize above without
+    // capturing its return value: we'd need to re-call it or compute from the
+    // bytes. Since the harness already verified the identity parses, we can
+    // recompute ptr by re-deserializing into a throwaway Identity.
+    Identity id2;
+    unsigned int consumed = 0;
+    try {
+        consumed = id2.deserialize(pkt, ZT_PROTO_VERB_HELLO_IDX_IDENTITY);
+    } catch (...) {
+        // This can't happen: we already deserialized successfully above.
+        printf("drop_branch=parse_exception\n");
+        return 0;
+    }
+    unsigned int ptr = ZT_PROTO_VERB_HELLO_IDX_IDENTITY + consumed;
+    fprintf(stderr, "post-identity ptr=%u size=%u remaining=%u\n", ptr, pkt.size(), pkt.size() - ptr);
+
+    // _doHELLO line 465-471: externalSurfaceAddress.deserialize
+    InetAddress externalSurfaceAddress;
+    if (ptr < pkt.size()) {
+        try {
+            unsigned int ea_consumed = externalSurfaceAddress.deserialize(pkt, ptr);
+            ptr += ea_consumed;
+            fprintf(stderr, "externalSurfaceAddress parsed (%u bytes consumed): ptr now %u\n", ea_consumed, ptr);
+        } catch (const std::exception &e) {
+            fprintf(stderr, "TRACE: externalSurfaceAddress.deserialize threw std::exception: %s\n", e.what());
+            fprintf(stderr, "  upstream IncomingPacket.cpp:466 (inside _doHELLO body, NOT caught locally)\n");
+            fprintf(stderr, "  propagates up to tryDecode catch(...) at IncomingPacket.cpp:160-164 -> incomingPacketInvalid \"unexpected exception\"\n");
+            printf("drop_branch=other\n");
+            return 0;
+        } catch (...) {
+            fprintf(stderr, "TRACE: externalSurfaceAddress.deserialize threw unknown exception\n");
+            printf("drop_branch=other\n");
+            return 0;
+        }
+    }
+
+    // _doHELLO line 474-481: planet world ID + timestamp read
+    uint64_t planetWorldId = 0;
+    uint64_t planetWorldTimestamp = 0;
+    if ((ptr + 16) <= pkt.size()) {
+        try {
+            planetWorldId = pkt.at<uint64_t>(ptr);
+            ptr += 8;
+            planetWorldTimestamp = pkt.at<uint64_t>(ptr);
+            ptr += 8;
+            fprintf(stderr, "planetWorldId=0x%016llx timestamp=0x%016llx: ptr now %u\n",
+                    (unsigned long long)planetWorldId, (unsigned long long)planetWorldTimestamp, ptr);
+        } catch (...) {
+            fprintf(stderr, "TRACE: planetWorldId/timestamp at<uint64_t> threw\n");
+            printf("drop_branch=other\n");
+            return 0;
+        }
+    }
+
+    // _doHELLO line 483-500: cryptField decrypts remainder, then reads numMoons and loops.
+    //
+    //   if (ptr < size()) {
+    //       cryptField(peer->key(),ptr,size() - ptr);
+    //       if ((ptr + 2) <= size()) {
+    //           const unsigned int numMoons = at<uint16_t>(ptr);
+    //           ptr += 2;
+    //           for(unsigned int i=0;i<numMoons;++i) {
+    //               if ((World::Type)(*this)[ptr++] == World::TYPE_MOON) { ... }
+    //               ptr += 16;
+    //           }
+    //       }
+    //   }
+    //
+    // Note: cryptField uses peer->key() (the DH-agreed session key) NOT a fresh key.
+    // In _doHELLO's "new peer" branch, peer = topology->addPeer(newPeer), and
+    // newPeer->key() is the same 32-byte key we computed above via controllerId.agree(id, key).
+    //
+    // The moon loop is the MOST LIKELY silent-drop site: if the decrypted numMoons
+    // is a large uncontrolled 16-bit integer, the loop reads WAY past the packet,
+    // throwing std::out_of_range from the Buffer bounds check, which propagates up
+    // to tryDecode catch(...) as "unexpected exception in tryDecode()" ->
+    // incomingPacketInvalid -> silent drop.
+    if (ptr < pkt.size()) {
+        const unsigned int remaining = pkt.size() - ptr;
+        fprintf(stderr, "post-planet: %u bytes remaining after ptr=%u: entering cryptField+moon-loop region\n", remaining, ptr);
+        // Reproduce cryptField using the same DH-agreed key we computed for dearmor.
+        pkt.cryptField(key, ptr, remaining);
+        fprintf(stderr, "cryptField decrypted %u bytes at offset %u\n", remaining, ptr);
+
+        if ((ptr + 2) <= pkt.size()) {
+            unsigned int numMoons = 0;
+            try {
+                numMoons = pkt.at<uint16_t>(ptr);
+            } catch (...) {
+                fprintf(stderr, "TRACE: at<uint16_t>(numMoons) threw: tryDecode catch(...) -> silent drop\n");
+                printf("drop_branch=other\n");
+                return 0;
+            }
+            ptr += 2;
+            fprintf(stderr, "decrypted numMoons=%u (0x%04x): starting moon loop\n", numMoons, numMoons);
+            // Compute expected bytes the loop needs: each iteration reads 1 byte (type) + 16 bytes (id+ts) = 17 bytes
+            const unsigned int needed = numMoons * 17u;
+            const unsigned int available = pkt.size() > ptr ? pkt.size() - ptr : 0;
+            fprintf(stderr, "moon-loop needs %u bytes, has %u bytes available\n", needed, available);
+            try {
+                for (unsigned int i = 0; i < numMoons; ++i) {
+                    uint8_t moonType = pkt[ptr++];
+                    (void)moonType;
+                    // Read 16 bytes (id+ts) via indexing.
+                    if (ptr + 16 > pkt.size()) {
+                        // This is the out_of_range case: upstream would throw
+                        // via at<uint64_t> reads inside the std::pair construction.
+                        throw std::out_of_range("moon-loop exceeds packet size");
+                    }
+                    ptr += 16;
+                }
+                fprintf(stderr, "moon loop completed cleanly (ptr=%u)\n", ptr);
+            } catch (const std::exception &e) {
+                fprintf(stderr, "TRACE: moon loop threw std::exception: %s\n", e.what());
+                fprintf(stderr, "  upstream IncomingPacket.cpp:489-497 (inside _doHELLO body, NOT caught locally)\n");
+                fprintf(stderr, "  propagates up to tryDecode catch(...) at IncomingPacket.cpp:160-164 -> incomingPacketInvalid \"unexpected exception\"\n");
+                fprintf(stderr, "  SILENT DROP: no incomingPacketDroppedHELLO trace fires, member JSON stays unchanged\n");
+                printf("drop_branch=other\n");
+                return 0;
+            } catch (...) {
+                fprintf(stderr, "TRACE: moon loop threw unknown exception: silent drop\n");
+                printf("drop_branch=other\n");
+                return 0;
+            }
+        }
+    }
+
+    // _doHELLO line 535+: peer->setRemoteVersion and peer->received fire; OK(HELLO)
+    // is built and sent. No more early-return paths. Accepted.
+    fprintf(stderr, "TRACE: full _doHELLO body ran without throwing: OK(HELLO) would be sent, peer->setRemoteVersion + received fire\n");
     printf("drop_branch=accepted\n");
     return 0;
 }
