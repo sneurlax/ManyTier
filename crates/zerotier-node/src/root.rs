@@ -10,7 +10,7 @@ use zerotier_crypto::salsa;
 use zerotier_protocol::constants::*;
 use zerotier_protocol::inet_address::InetAddress;
 use zerotier_protocol::verb::Verb;
-use zerotier_protocol::verbs::hello::HelloPayload;
+use zerotier_protocol::verbs::hello::{HelloPayload, MANYTIER_ADVERTISED_PROTOCOL_VERSION};
 use zerotier_protocol::verbs::ok::OkPayload;
 use zerotier_protocol::verbs::rendezvous::RendezvousPayload;
 use zerotier_protocol::verbs::whois::WhoisRequest;
@@ -213,7 +213,10 @@ impl RootManager {
             in_re_packet_id,
             sub_payload: zerotier_protocol::verbs::ok::OkSubPayload::Hello {
                 timestamp_echo,
-                protocol_version: ZT_PROTO_VERSION,
+                // See ZeroTierOne 1.14.2 node/Peer.hpp:618-619.
+                // Advertise only the protocol version ManyTier can actually
+                // receive without AES_GMAC_SIV support.
+                protocol_version: MANYTIER_ADVERTISED_PROTOCOL_VERSION,
                 major_version: 0,
                 minor_version: 1,
                 revision: 0,
@@ -314,13 +317,22 @@ mod tests {
         let mut buf = [0u8; 512];
 
         let (len, _packet_id) = RootManager::build_hello(
-            &id, &dest, dest_phys, 1000, &secret, &mut buf,
-            WORLD_ID_EARTH, 0,
+            &id,
+            &dest,
+            dest_phys,
+            1000,
+            &secret,
+            &mut buf,
+            WORLD_ID_EARTH,
+            0,
         )
         .unwrap();
 
         assert!(len >= ZT_PROTO_MIN_PACKET_LENGTH);
-        assert_eq!(len, 139, "HELLO length must include 2-byte empty COR trailer");
+        assert_eq!(
+            len, 139,
+            "HELLO length must include 2-byte empty COR trailer"
+        );
 
         // Parse header -- verb is encrypted (cipher suite 0 = MAC only, verb is NOT encrypted)
         // Actually cipher suite 0 means no encryption so verb is plaintext
@@ -336,6 +348,41 @@ mod tests {
         assert_eq!(hdr.cipher_suite(), CIPHER_SUITE_C25519_POLY1305_NONE);
         // Verb is Hello (not encrypted for cipher suite 0)
         assert_eq!(hdr.verb_id(), Verb::Hello.to_byte());
+        assert_eq!(buf[28], MANYTIER_ADVERTISED_PROTOCOL_VERSION);
+        assert!(buf[28] < ZT_PROTO_VERSION);
+    }
+
+    #[test]
+    fn build_ok_hello_avoids_aes_gmac_siv_upgrade_gate() {
+        let id = build_test_identity();
+        let dest = [0x01, 0x02, 0x03, 0x04, 0x05];
+        let secret = test_shared_secret();
+        let mut buf = [0u8; 512];
+
+        let len = RootManager::build_ok_hello(
+            &id,
+            &dest,
+            0x0102_0304_0506_0708,
+            1234,
+            &secret,
+            2000,
+            false,
+            &mut buf,
+        )
+        .unwrap();
+
+        salsa::dearmor_packet(&secret, &mut buf[..len]).unwrap();
+        let ok = OkPayload::deserialize(&buf[28..len]).unwrap();
+
+        let zerotier_protocol::verbs::ok::OkSubPayload::Hello {
+            protocol_version, ..
+        } = ok.sub_payload
+        else {
+            panic!("expected OK(HELLO) payload");
+        };
+
+        assert_eq!(protocol_version, MANYTIER_ADVERTISED_PROTOCOL_VERSION);
+        assert!(protocol_version < ZT_PROTO_VERSION);
     }
 
     #[test]
@@ -346,11 +393,16 @@ mod tests {
 
         struct XorShift(u64);
         impl rand_core::RngCore for XorShift {
-            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u32(&mut self) -> u32 {
+                self.next_u64() as u32
+            }
             fn next_u64(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-                self.0 = x; x
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
             }
             fn fill_bytes(&mut self, dest: &mut [u8]) {
                 let mut pos = 0;
@@ -362,7 +414,8 @@ mod tests {
                 }
             }
             fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-                self.fill_bytes(dest); Ok(())
+                self.fill_bytes(dest);
+                Ok(())
             }
         }
 
@@ -389,7 +442,10 @@ mod tests {
         .unwrap();
 
         // New HELLO total = previous 137 + 2-byte COR trailer = 139.
-        assert_eq!(len, 139, "HELLO length must include 2-byte empty COR trailer");
+        assert_eq!(
+            len, 139,
+            "HELLO length must include 2-byte empty COR trailer"
+        );
 
         // Receiver-side: dearmor verifies that the MAC scope covers the COR bytes.
         let server_secret = server.secret.as_ref().unwrap();
@@ -398,7 +454,11 @@ mod tests {
         assert_eq!(shared, shared2);
 
         let result = salsa::dearmor_packet(&shared2, &mut buf[..len]);
-        assert!(result.is_ok(), "MAC must verify across COR bytes: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "MAC must verify across COR bytes: {:?}",
+            result.err()
+        );
 
         // Layout: header(28) + proto(1) + major(1) + minor(1) + rev(2) + ts(8) +
         // identity(71) + InetAddress(7 IPv4) + planet ts(8) + planet ts(8) = 135
@@ -444,11 +504,16 @@ mod tests {
 
         struct XorShift(u64);
         impl rand_core::RngCore for XorShift {
-            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u32(&mut self) -> u32 {
+                self.next_u64() as u32
+            }
             fn next_u64(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-                self.0 = x; x
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
             }
             fn fill_bytes(&mut self, dest: &mut [u8]) {
                 let mut pos = 0;
@@ -460,7 +525,8 @@ mod tests {
                 }
             }
             fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-                self.fill_bytes(dest); Ok(())
+                self.fill_bytes(dest);
+                Ok(())
             }
         }
 
@@ -559,7 +625,9 @@ mod tests {
 
         struct XorShift(u64);
         impl rand_core::RngCore for XorShift {
-            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u32(&mut self) -> u32 {
+                self.next_u64() as u32
+            }
             fn next_u64(&mut self) -> u64 {
                 let mut x = self.0;
                 x ^= x << 13;
@@ -590,18 +658,14 @@ mod tests {
         // Client computes DH shared secret
         let client_secret = client_id.secret.as_ref().unwrap();
         let controller_pub = x25519_dalek::PublicKey::from(controller_id.public_key.dh);
-        let client_dh = zerotier_crypto::key_agreement::key_agree(
-            &client_secret.dh,
-            &controller_pub,
-        );
+        let client_dh =
+            zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &controller_pub);
 
         // Controller computes DH shared secret (should be the same)
         let controller_secret = controller_id.secret.as_ref().unwrap();
         let client_pub = x25519_dalek::PublicKey::from(client_id.public_key.dh);
-        let controller_dh = zerotier_crypto::key_agreement::key_agree(
-            &controller_secret.dh,
-            &client_pub,
-        );
+        let controller_dh =
+            zerotier_crypto::key_agreement::key_agree(&controller_secret.dh, &client_pub);
 
         assert_eq!(client_dh, controller_dh, "DH shared secrets must match");
 
@@ -620,10 +684,7 @@ mod tests {
         .unwrap();
 
         // Controller verifies MAC using controller-side DH key
-        let result = zerotier_crypto::salsa::dearmor_packet(
-            &controller_dh,
-            &mut buf[..len],
-        );
+        let result = zerotier_crypto::salsa::dearmor_packet(&controller_dh, &mut buf[..len]);
         assert!(
             result.is_ok(),
             "Controller should verify HELLO MAC with DH key: {:?}",
@@ -640,8 +701,14 @@ mod tests {
         let mut buf = [0u8; 10];
 
         assert!(RootManager::build_hello(
-            &id, &dest, dest_phys, 1000, &secret, &mut buf,
-            WORLD_ID_EARTH, 0,
+            &id,
+            &dest,
+            dest_phys,
+            1000,
+            &secret,
+            &mut buf,
+            WORLD_ID_EARTH,
+            0,
         )
         .is_err());
     }
@@ -660,11 +727,13 @@ mod tests {
 
         let client_secret = client_id.secret.as_ref().unwrap();
         let controller_pub = x25519_dalek::PublicKey::from(controller_id.public_key.dh);
-        let client_dh = zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &controller_pub);
+        let client_dh =
+            zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &controller_pub);
 
         let controller_secret = controller_id.secret.as_ref().unwrap();
         let client_pub = x25519_dalek::PublicKey::from(client_id.public_key.dh);
-        let controller_dh = zerotier_crypto::key_agreement::key_agree(&controller_secret.dh, &client_pub);
+        let controller_dh =
+            zerotier_crypto::key_agreement::key_agree(&controller_secret.dh, &client_pub);
 
         assert_eq!(client_dh, controller_dh, "DH shared secrets must match");
 
@@ -678,7 +747,8 @@ mod tests {
             &mut buf,
             WORLD_ID_EARTH,
             0,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = zerotier_crypto::salsa::dearmor_packet(&controller_dh, &mut buf[..len]);
         assert!(result.is_ok(), "Controller should verify client HELLO MAC");
@@ -692,11 +762,16 @@ mod tests {
 
         struct XorShift(u64);
         impl rand_core::RngCore for XorShift {
-            fn next_u32(&mut self) -> u32 { self.next_u64() as u32 }
+            fn next_u32(&mut self) -> u32 {
+                self.next_u64() as u32
+            }
             fn next_u64(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-                self.0 = x; x
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
             }
             fn fill_bytes(&mut self, dest: &mut [u8]) {
                 let mut pos = 0;
@@ -708,7 +783,8 @@ mod tests {
                 }
             }
             fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-                self.fill_bytes(dest); Ok(())
+                self.fill_bytes(dest);
+                Ok(())
             }
         }
 
@@ -731,7 +807,8 @@ mod tests {
             &mut buf,
             WORLD_ID_EARTH,
             0,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Simulate receiver: dearmor then decrypt moon section
         let server_secret = server.secret.as_ref().unwrap();

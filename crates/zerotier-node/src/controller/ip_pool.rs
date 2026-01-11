@@ -80,10 +80,7 @@ mod tests {
     #[test]
     fn ip_pool_skips_assigned_ips() {
         let pools = vec![pool([10, 0, 0, 1], [10, 0, 0, 5])];
-        let assigned = vec![
-            String::from("10.0.0.1/24"),
-            String::from("10.0.0.2/24"),
-        ];
+        let assigned = vec![String::from("10.0.0.1/24"), String::from("10.0.0.2/24")];
         let result = allocate_ipv4(&pools, &assigned);
         assert_eq!(result, Some([10, 0, 0, 3]));
     }
@@ -91,10 +88,7 @@ mod tests {
     #[test]
     fn ip_pool_returns_none_when_exhausted() {
         let pools = vec![pool([10, 0, 0, 1], [10, 0, 0, 2])];
-        let assigned = vec![
-            String::from("10.0.0.1/24"),
-            String::from("10.0.0.2/24"),
-        ];
+        let assigned = vec![String::from("10.0.0.1/24"), String::from("10.0.0.2/24")];
         let result = allocate_ipv4(&pools, &assigned);
         assert_eq!(result, None);
     }
@@ -120,10 +114,7 @@ mod tests {
 
     #[test]
     fn ip_pool_parse_without_prefix() {
-        assert_eq!(
-            parse_ipv4_from_assignment("10.0.0.1"),
-            Some([10, 0, 0, 1])
-        );
+        assert_eq!(parse_ipv4_from_assignment("10.0.0.1"), Some([10, 0, 0, 1]));
     }
 
     #[test]

@@ -1,10 +1,9 @@
+use crate::error::ProtocolError;
+use crate::identity_wire;
 ///
 /// WHOIS request: sequence of 5-byte ZeroTier addresses.
 /// WHOIS response (OK(WHOIS)): sequence of serialized identities.
-
 use alloc::vec::Vec;
-use crate::error::ProtocolError;
-use crate::identity_wire;
 use zerotier_crypto::identity::Identity;
 
 /// WHOIS request payload: a list of 5-byte ZeroTier addresses to look up.
@@ -26,12 +25,10 @@ impl WhoisRequest {
     }
 
     /// Deserialize a WHOIS request from the given data.
-    /// The data length must be a multiple of 5.
+    /// Parses as many complete 5-byte addresses as are present.
+    /// Any trailing partial address bytes are ignored.
     pub fn deserialize(data: &[u8]) -> Result<Self, ProtocolError> {
-        if data.len() % 5 != 0 {
-            return Err(ProtocolError::InvalidPacket);
-        }
-
+        // See ZeroTierOne 1.14.2 node/IncomingPacket.cpp:714-717.
         let count = data.len() / 5;
         let mut addresses = Vec::with_capacity(count);
         for i in 0..count {
@@ -155,9 +152,20 @@ mod tests {
     }
 
     #[test]
-    fn whois_request_invalid_length() {
-        let data = [0u8; 7]; // not a multiple of 5
-        assert!(WhoisRequest::deserialize(&data).is_err());
+    fn whois_request_ignores_trailing_partial_address() {
+        let data = [0xa0, 0xb1, 0xc2, 0xd3, 0xe4, 0xff, 0xee];
+        let parsed = WhoisRequest::deserialize(&data).unwrap();
+
+        assert_eq!(
+            parsed.addresses,
+            alloc::vec![[0xa0, 0xb1, 0xc2, 0xd3, 0xe4]]
+        );
+    }
+
+    #[test]
+    fn whois_request_short_trailing_bytes_parse_as_empty() {
+        let parsed = WhoisRequest::deserialize(&[0x01, 0x02, 0x03, 0x04]).unwrap();
+        assert!(parsed.addresses.is_empty());
     }
 
     #[test]

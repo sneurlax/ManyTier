@@ -8,7 +8,7 @@ description = "ZeroTier node engine with platform-abstracted I/O traits"
 
 [features]
 default = ["native"]
-native = ["dep:tokio", "dep:tun2", "dep:socket2", "dep:serde_json"]
+native = ["dep:tokio", "dep:tun2", "dep:socket2", "dep:serde_json", "dep:lz4_flex"]
 wasm = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 wasi = []
 
@@ -28,6 +28,7 @@ tokio = { workspace = true, optional = true }
 tun2 = { workspace = true, optional = true }
 socket2 = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+lz4_flex = { workspace = true, optional = true }
 
 # WASM browser-only (optional)
 wasm-bindgen = { workspace = true, optional = true }

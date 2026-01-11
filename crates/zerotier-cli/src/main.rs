@@ -4,6 +4,7 @@
 //! with the ManyTier service via its HTTP API on localhost:9993.
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::filter::LevelFilter;
 
 mod client;
 mod commands;
@@ -90,14 +91,17 @@ enum IdentityAction {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .with_max_level(LevelFilter::INFO)
+        .try_init();
+
     let cli = Cli::parse();
 
     // Resolve auth token: CLI arg > env var > file lookup
     let auth_token = cli.auth_token.unwrap_or_else(|| {
-        let paths = [
-            "authtoken.secret",
-            "/var/lib/manytier/authtoken.secret",
-        ];
+        let paths = ["authtoken.secret", "/var/lib/manytier/authtoken.secret"];
         for path in &paths {
             if let Ok(token) = std::fs::read_to_string(path) {
                 return token.trim().to_string();
@@ -133,8 +137,7 @@ async fn main() -> anyhow::Result<()> {
             controller_mode,
             identity,
         } => {
-            commands::service::run(&data_dir, api_port, udp_port, controller_mode, identity)
-                .await?
+            commands::service::run(&data_dir, api_port, udp_port, controller_mode, identity).await?
         }
     }
 

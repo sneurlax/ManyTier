@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection};
 use zerotier_node::controller::storage::ControllerStorage;
-use zerotier_node::controller::types::{IpPool, MemberRecord, NetworkRecord};
+use zerotier_node::controller::types::{IpPool, ManagedRoute, MemberRecord, NetworkRecord};
 
 /// SQLite-backed controller storage error.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +61,12 @@ impl SqliteStorage {
                 range_start BLOB NOT NULL,
                 range_end BLOB NOT NULL,
                 PRIMARY KEY (network_id, range_start, range_end)
+            );
+            CREATE TABLE IF NOT EXISTS routes (
+                network_id INTEGER NOT NULL,
+                target TEXT NOT NULL,
+                via TEXT,
+                PRIMARY KEY (network_id, target)
             );",
         )?;
         Ok(Self {
@@ -198,24 +204,21 @@ impl ControllerStorage for SqliteStorage {
                 "SELECT network_id, node_id, authorized, ip_assignments, creation_time, \
                  last_seen, name FROM members WHERE network_id = ?1 AND node_id = ?2",
             )?;
-            let result = stmt.query_row(
-                params![network_id as i64, node_id.as_slice()],
-                |row| {
-                    let node_blob: Vec<u8> = row.get(1)?;
-                    let mut nid = [0u8; 5];
-                    nid.copy_from_slice(&node_blob[..5]);
-                    let ip_json: String = row.get(3)?;
-                    Ok((
-                        row.get::<_, i64>(0)? as u64,
-                        nid,
-                        row.get::<_, i32>(2)? != 0,
-                        ip_json,
-                        row.get::<_, i64>(4)? as u64,
-                        row.get::<_, i64>(5)? as u64,
-                        row.get::<_, String>(6)?,
-                    ))
-                },
-            );
+            let result = stmt.query_row(params![network_id as i64, node_id.as_slice()], |row| {
+                let node_blob: Vec<u8> = row.get(1)?;
+                let mut nid = [0u8; 5];
+                nid.copy_from_slice(&node_blob[..5]);
+                let ip_json: String = row.get(3)?;
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    nid,
+                    row.get::<_, i32>(2)? != 0,
+                    ip_json,
+                    row.get::<_, i64>(4)? as u64,
+                    row.get::<_, i64>(5)? as u64,
+                    row.get::<_, String>(6)?,
+                ))
+            });
             match result {
                 Ok((nw_id, nid, authorized, ip_json, creation_time, last_seen, name)) => {
                     let ip_assignments: Vec<String> = serde_json::from_str(&ip_json)?;
@@ -261,11 +264,7 @@ impl ControllerStorage for SqliteStorage {
         .await?
     }
 
-    async fn delete_member(
-        &self,
-        network_id: u64,
-        node_id: &[u8; 5],
-    ) -> Result<(), Self::Error> {
+    async fn delete_member(&self, network_id: u64, node_id: &[u8; 5]) -> Result<(), Self::Error> {
         let conn = self.conn.clone();
         let node_id = *node_id;
         tokio::task::spawn_blocking(move || {
@@ -283,8 +282,7 @@ impl ControllerStorage for SqliteStorage {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            let mut stmt =
-                conn.prepare("SELECT node_id FROM members WHERE network_id = ?1")?;
+            let mut stmt = conn.prepare("SELECT node_id FROM members WHERE network_id = ?1")?;
             let ids = stmt
                 .query_map(params![network_id as i64], |row| {
                     let blob: Vec<u8> = row.get(0)?;
@@ -302,9 +300,8 @@ impl ControllerStorage for SqliteStorage {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT range_start, range_end FROM ip_pools WHERE network_id = ?1",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT range_start, range_end FROM ip_pools WHERE network_id = ?1")?;
             let pools = stmt
                 .query_map(params![network_id as i64], |row| {
                     let start: Vec<u8> = row.get(0)?;
@@ -324,11 +321,7 @@ impl ControllerStorage for SqliteStorage {
         .await?
     }
 
-    async fn set_ip_pools(
-        &self,
-        network_id: u64,
-        pools: &[IpPool],
-    ) -> Result<(), Self::Error> {
+    async fn set_ip_pools(&self, network_id: u64, pools: &[IpPool]) -> Result<(), Self::Error> {
         let pools: Vec<IpPool> = pools.to_vec();
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -357,20 +350,60 @@ impl ControllerStorage for SqliteStorage {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT ip_assignments FROM members WHERE network_id = ?1",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT ip_assignments FROM members WHERE network_id = ?1")?;
             let mut all_ips = Vec::new();
-            let rows = stmt.query_map(params![network_id as i64], |row| {
-                row.get::<_, String>(0)
-            })?;
+            let rows = stmt.query_map(params![network_id as i64], |row| row.get::<_, String>(0))?;
             for row in rows {
                 let ip_json = row?;
-                let ips: Vec<String> = serde_json::from_str(&ip_json)
-                    .unwrap_or_default();
+                let ips: Vec<String> = serde_json::from_str(&ip_json).unwrap_or_default();
                 all_ips.extend(ips);
             }
             Ok(all_ips)
+        })
+        .await?
+    }
+
+    async fn get_routes(&self, network_id: u64) -> Result<Vec<ManagedRoute>, Self::Error> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT target, via FROM routes WHERE network_id = ?1")?;
+            let routes = stmt
+                .query_map(params![network_id as i64], |row| {
+                    Ok(ManagedRoute {
+                        target: row.get(0)?,
+                        via: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(routes)
+        })
+        .await?
+    }
+
+    async fn set_routes(
+        &self,
+        network_id: u64,
+        routes: &[ManagedRoute],
+    ) -> Result<(), Self::Error> {
+        let routes: Vec<ManagedRoute> = routes.to_vec();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM routes WHERE network_id = ?1",
+                params![network_id as i64],
+            )?;
+            for route in &routes {
+                tx.execute(
+                    "INSERT INTO routes (network_id, target, via) VALUES (?1, ?2, ?3)",
+                    params![network_id as i64, route.target, route.via],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
         })
         .await?
     }

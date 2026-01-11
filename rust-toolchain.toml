@@ -1,4 +1,6 @@
 [toolchain]
-channel = "1.77.2"
+# Cargo.lock currently includes dependencies that declare `edition = "2024"`,
+# which requires Rust/Cargo >= 1.85. Pin to a modern stable toolchain.
+channel = "1.94.0"
 components = ["clippy", "rustfmt"]
 targets = ["wasm32-unknown-unknown"]

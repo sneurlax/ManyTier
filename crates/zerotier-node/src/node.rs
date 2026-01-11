@@ -7,6 +7,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeSet;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -16,7 +17,7 @@ use zerotier_protocol::constants::*;
 use zerotier_protocol::fragment::ReassemblyBuffer;
 use zerotier_protocol::inet_address::InetAddress;
 use zerotier_protocol::verb::Verb;
-use zerotier_protocol::verbs::hello::HelloPayload;
+use zerotier_protocol::verbs::hello::{HelloPayload, MANYTIER_ADVERTISED_PROTOCOL_VERSION};
 use zerotier_protocol::verbs::network_config::{
     CertificateOfMembership, NetworkConfigPayload, NetworkCredentialsPayload,
 };
@@ -90,6 +91,58 @@ struct PendingMulticastGather {
     adi: u32,
 }
 
+#[derive(Debug, Clone)]
+struct PendingNetworkConfig {
+    network_id: u64,
+    config_update_id: u64,
+    total_length: usize,
+    data: Vec<u8>,
+    received: Vec<bool>,
+    received_bytes: usize,
+}
+
+impl PendingNetworkConfig {
+    fn new(network_id: u64, config_update_id: u64, total_length: usize) -> Self {
+        Self {
+            network_id,
+            config_update_id,
+            total_length,
+            data: vec![0u8; total_length],
+            received: vec![false; total_length],
+            received_bytes: 0,
+        }
+    }
+
+    fn ingest(&mut self, chunk_index: usize, chunk: &[u8]) {
+        for (offset, &byte) in chunk.iter().enumerate() {
+            let index = chunk_index + offset;
+            self.data[index] = byte;
+            if !self.received[index] {
+                self.received[index] = true;
+                self.received_bytes += 1;
+            }
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.received_bytes == self.total_length
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingEncryptedPacket {
+    source: [u8; 5],
+    from: SocketAddr,
+    packet_id: u64,
+    received_at_ms: u64,
+    data: Vec<u8>,
+}
+
+// ZeroTierOne 1.14.2 uses a 1432-byte physical MTU for packet buffers.
+const ZT_PACKET_DECOMPRESS_CAPACITY: usize = ZT_MAX_PACKET_FRAGMENTS * 1432;
+const ZT_PENDING_ENCRYPTED_PACKET_LIMIT: usize = 32;
+const ZT_PENDING_ENCRYPTED_PACKET_TTL_MS: u64 = 30_000;
+
 /// The main ZeroTier VL1 node engine.
 pub struct Node {
     pub identity: Identity,
@@ -106,6 +159,8 @@ pub struct Node {
     pub networks: Vec<NetworkMembership>,
     pub multicast_manager: MulticastManager,
     pending_multicast_gathers: Vec<PendingMulticastGather>,
+    pending_network_configs: Vec<PendingNetworkConfig>,
+    pending_encrypted_packets: Vec<PendingEncryptedPacket>,
 }
 
 impl Node {
@@ -127,10 +182,18 @@ impl Node {
             topology,
             reassembly: ReassemblyBuffer::new(256),
             actions: Vec::new(),
-            next_packet_id: initial_packet_id,
+            // Bootstrap HELLOs may use the initial seed value directly; start the
+            // allocator one step ahead so the first post-bootstrap encrypted
+            // packet cannot reuse that packet ID.
+            next_packet_id: match initial_packet_id.wrapping_add(1) {
+                0 => 1,
+                next => next,
+            },
             networks: Vec::new(),
             multicast_manager: MulticastManager::new(),
             pending_multicast_gathers: Vec::new(),
+            pending_network_configs: Vec::new(),
+            pending_encrypted_packets: Vec::new(),
         })
     }
 
@@ -191,26 +254,103 @@ impl Node {
                 net.mtu = mtu;
             }
 
-            // Extract our IP assignments from "I" key in dictionary
-            if let Ok(dict) = Dictionary::deserialize(dict_data) {
+            // Extract our IP assignments and COM from the network config dictionary.
+            let dict = match Dictionary::deserialize(dict_data) {
+                Ok(dict) => Some(dict),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "manytier",
+                        event = "network_config_dict_decode_failed",
+                        network_id = %format_args!("{:016x}", network_id),
+                        error = %error,
+                        len = dict_data.len(),
+                        first_nul = ?dict_data.iter().position(|byte| *byte == 0),
+                        first_cr = ?dict_data.iter().position(|byte| *byte == b'\r'),
+                        first_lf = ?dict_data.iter().position(|byte| *byte == b'\n'),
+                        first_eq = ?dict_data.iter().position(|byte| *byte == b'='),
+                        prefix = %summarize_dict_bytes_hex(dict_data, 96),
+                        suffix = %summarize_dict_bytes_hex_tail(dict_data, 48),
+                        ascii = %summarize_dict_ascii_preview(dict_data, 96),
+                        "failed to decode network config dictionary"
+                    );
+                    None
+                }
+            };
+            if let Some(dict) = dict {
+                tracing::info!(
+                    target: "manytier",
+                    event = "network_config_dict_decoded",
+                    network_id = %format_args!("{:016x}", network_id),
+                    text_entries = %summarize_dict_text_entries(&dict),
+                    binary_entries = %summarize_dict_binary_entries(&dict),
+                    i_len = dict.get_binary("I").map(|data| data.len()).unwrap_or(0),
+                    c_len = dict.get_binary("C").map(|data| data.len()).unwrap_or(0),
+                    rt_len = dict.get_binary("RT").map(|data| data.len()).unwrap_or(0),
+                    pm_len = dict.get_binary("PM").map(|data| data.len()).unwrap_or(0),
+                    v4s = dict.get_text("v4s").unwrap_or(""),
+                    v6s = dict.get_text("v6s").unwrap_or(""),
+                    "decoded network config dictionary"
+                );
+
+                if let Some(com_data) = dict.get_binary("C") {
+                    if let Ok((com, _)) = CertificateOfMembership::deserialize(com_data) {
+                        net.our_com = Some(com);
+                    }
+                }
+
+                let mut parsed_assignment = false;
                 if let Some(ip_data) = dict.get_binary("I") {
                     let mut pos = 0;
                     while pos < ip_data.len() {
-                        if let Ok((inet, consumed)) = InetAddress::deserialize(&ip_data[pos..]) {
-                            match inet {
-                                InetAddress::V4 { ip, .. } => {
-                                    net.assigned_ipv4 = Some(Ipv4Addr::from(ip));
+                        match InetAddress::deserialize(&ip_data[pos..]) {
+                            Ok((inet, consumed)) => {
+                                match inet {
+                                    InetAddress::V4 { ip, port } => {
+                                        let ip = Ipv4Addr::from(ip);
+                                        net.assigned_ipv4 = Some(ip);
+                                        parsed_assignment = true;
+                                        tracing::info!(
+                                            target: "manytier",
+                                            event = "ip_assignment_received",
+                                            source = "I",
+                                            ip = %ip,
+                                            prefix = port,
+                                            "applied IPv4 assignment"
+                                        );
+                                    }
+                                    InetAddress::V6 { ip, port } => {
+                                        let ip = Ipv6Addr::from(ip);
+                                        net.assigned_ipv6 = Some(ip);
+                                        parsed_assignment = true;
+                                        tracing::info!(
+                                            target: "manytier",
+                                            event = "ip_assignment_received",
+                                            source = "I",
+                                            ip = %ip,
+                                            prefix = port,
+                                            "applied IPv6 assignment"
+                                        );
+                                    }
+                                    InetAddress::Null => {}
                                 }
-                                InetAddress::V6 { ip, .. } => {
-                                    net.assigned_ipv6 = Some(Ipv6Addr::from(ip));
-                                }
-                                _ => {}
+                                pos += consumed;
                             }
-                            pos += consumed;
-                        } else {
-                            break;
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "manytier",
+                                    event = "network_config_static_ip_decode_failed",
+                                    offset = pos,
+                                    first_tag = ip_data.get(pos).copied().unwrap_or_default(),
+                                    error = %error,
+                                    "failed to decode static IP assignment blob"
+                                );
+                                break;
+                            }
                         }
                     }
+                }
+                if !parsed_assignment {
+                    apply_legacy_ip_assignments(net, &dict);
                 }
 
                 // Extract managed routes from "RT" key
@@ -334,6 +474,87 @@ impl Node {
         ))
     }
 
+    fn queue_pending_encrypted_packet(
+        &mut self,
+        source: [u8; 5],
+        from: SocketAddr,
+        packet_id: u64,
+        received_at_ms: u64,
+        data: &[u8],
+    ) {
+        self.pending_encrypted_packets.retain(|pending| {
+            received_at_ms.saturating_sub(pending.received_at_ms)
+                <= ZT_PENDING_ENCRYPTED_PACKET_TTL_MS
+        });
+
+        if self.pending_encrypted_packets.iter().any(|pending| {
+            pending.source == source && pending.from == from && pending.packet_id == packet_id
+        }) {
+            return;
+        }
+
+        if self.pending_encrypted_packets.len() >= ZT_PENDING_ENCRYPTED_PACKET_LIMIT {
+            self.pending_encrypted_packets.remove(0);
+        }
+
+        tracing::debug!(
+            target: "manytier",
+            event = "pending_encrypted_packet_queued",
+            source = %format_args!(
+                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                source[0], source[1], source[2], source[3], source[4]
+            ),
+            from = %from,
+            packet_id,
+            packet_len = data.len(),
+            "queued relayed encrypted packet pending WHOIS"
+        );
+
+        self.pending_encrypted_packets.push(PendingEncryptedPacket {
+            source,
+            from,
+            packet_id,
+            received_at_ms,
+            data: data.to_vec(),
+        });
+    }
+
+    fn replay_pending_encrypted_packets_for(&mut self, source: &[u8; 5], now_ms: u64) {
+        let mut index = 0;
+        let mut pending = Vec::new();
+        while index < self.pending_encrypted_packets.len() {
+            if &self.pending_encrypted_packets[index].source == source {
+                pending.push(self.pending_encrypted_packets.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+
+        if pending.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            target: "manytier",
+            event = "pending_encrypted_packets_replaying",
+            source = %format_args!(
+                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                source[0], source[1], source[2], source[3], source[4]
+            ),
+            count = pending.len(),
+            "replaying relayed encrypted packets after WHOIS"
+        );
+
+        for mut buffered in pending {
+            let replay_now = core::cmp::max(now_ms, buffered.received_at_ms);
+            let mut preserved_actions = core::mem::take(&mut self.actions);
+            let replayed_actions =
+                self.receive_packet(buffered.data.as_mut_slice(), buffered.from, replay_now);
+            preserved_actions.extend(replayed_actions);
+            self.actions = preserved_actions;
+        }
+    }
+
     /// Send WHOIS requests to roots for the given addresses.
     /// Returns SendTo actions with the WHOIS packets.
     pub fn send_whois(&mut self, addresses: &[[u8; 5]], now_ms: u64) -> Vec<NodeAction> {
@@ -414,6 +635,27 @@ impl Node {
             // MAC verification failed or no shared secret available
             // For cipher suite 0 (HELLO), we still try to process
             if cipher_suite != CIPHER_SUITE_C25519_POLY1305_NONE {
+                let source_known = self.topology.get_peer(&source).is_some();
+                let from_known_root_path = self.topology.roots.iter().any(|root_addr| {
+                    self.topology
+                        .get_peer(root_addr)
+                        .map(|root_peer| root_peer.paths.iter().any(|path| path.address == from))
+                        .unwrap_or(false)
+                });
+                if !source_known && from_known_root_path {
+                    self.queue_pending_encrypted_packet(source, from, packet_id, now_ms, data);
+                    tracing::info!(
+                        target: "manytier",
+                        event = "whois_requested_for_unknown_relay_source",
+                        source = %format_args!("{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            source[0], source[1], source[2], source[3], source[4]),
+                        from = %from,
+                        "requesting WHOIS for unknown source after relayed encrypted packet"
+                    );
+                    self.actions.push(NodeAction::WhoisNeeded {
+                        addresses: vec![source],
+                    });
+                }
                 tracing::warn!(
                     target: "manytier",
                     event = "dearmor_failed",
@@ -430,8 +672,39 @@ impl Node {
             }
         }
 
-        // Re-read verb after potential decryption
-        let verb_id = if dearmored { data[27] & 0x1f } else { verb_id };
+        let mut decompressed_packet =
+            if dearmored && (data[ZT_PACKET_IDX_VERB] & VERB_FLAG_COMPRESSED != 0) {
+                match decompress_packet(data) {
+                    Some(packet) => Some(packet),
+                    None => {
+                        tracing::warn!(
+                            target: "manytier",
+                            event = "packet_decompress_failed",
+                            cipher_suite = cipher_suite,
+                            packet_id,
+                            source = %format_args!("{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                source[0], source[1], source[2], source[3], source[4]),
+                            from = %from,
+                            packet_len = data.len(),
+                            "compressed packet decompression failed: dropping"
+                        );
+                        return core::mem::take(&mut self.actions);
+                    }
+                }
+            } else {
+                None
+            };
+        let packet: &mut [u8] = match decompressed_packet.as_mut() {
+            Some(packet) => packet.as_mut_slice(),
+            None => data,
+        };
+
+        // Re-read verb after potential decryption and decompression
+        let verb_id = if dearmored {
+            packet[ZT_PACKET_IDX_VERB] & 0x1f
+        } else {
+            verb_id
+        };
 
         // Determine if this packet arrived via relay (from a root's physical address)
         let is_relayed = self.topology.roots.iter().any(|root_addr| {
@@ -473,22 +746,22 @@ impl Node {
         }
 
         // Extract verb payload (after verb byte at offset 28)
-        let verb_payload = if data.len() > 28 {
-            &data[28..]
+        let verb_payload = if packet.len() > ZT_PACKET_IDX_PAYLOAD {
+            &packet[ZT_PACKET_IDX_PAYLOAD..]
         } else {
             &[] as &[u8]
         };
 
         match Verb::from_byte(verb_id) {
-            Some(Verb::Hello) => self.handle_hello(data, from, now_ms, packet_id),
-            Some(Verb::Ok) => self.handle_ok(data, from, now_ms),
-            Some(Verb::Error) => self.handle_error(data, from, now_ms),
-            Some(Verb::Whois) => self.handle_whois(data, from, now_ms),
-            Some(Verb::Rendezvous) => self.handle_rendezvous(data, from, now_ms),
-            Some(Verb::Echo) => self.handle_echo(data, from, now_ms, packet_id),
-            Some(Verb::PushDirectPaths) => self.handle_push_direct_paths(data, from, now_ms),
-            Some(Verb::NetworkConfig) => self.handle_network_config(data, from, now_ms),
-            Some(Verb::NetworkCredentials) => self.handle_network_credentials(data, from, now_ms),
+            Some(Verb::Hello) => self.handle_hello(packet, from, now_ms, packet_id),
+            Some(Verb::Ok) => self.handle_ok(packet, from, now_ms),
+            Some(Verb::Error) => self.handle_error(packet, from, now_ms),
+            Some(Verb::Whois) => self.handle_whois(packet, from, now_ms),
+            Some(Verb::Rendezvous) => self.handle_rendezvous(packet, from, now_ms),
+            Some(Verb::Echo) => self.handle_echo(packet, from, now_ms, packet_id),
+            Some(Verb::PushDirectPaths) => self.handle_push_direct_paths(packet, from, now_ms),
+            Some(Verb::NetworkConfig) => self.handle_network_config(packet, from, now_ms),
+            Some(Verb::NetworkCredentials) => self.handle_network_credentials(packet, from, now_ms),
             Some(Verb::Frame) => {
                 crate::vl2::handle_frame(self, &source, verb_payload, from, now_ms)
             }
@@ -800,11 +1073,20 @@ impl Node {
                             }
                         }
                     }
+
+                    self.replay_pending_encrypted_packets_for(&addr_bytes, now_ms);
                 }
             }
             OkSubPayload::Generic { data } => {
                 if ok.in_re_verb == Verb::MulticastGather {
                     self.handle_multicast_gather_ok(ok.in_re_packet_id, &data, now_ms);
+                } else if ok.in_re_verb == Verb::NetworkConfigRequest {
+                    // See ZeroTierOne 1.14.2 node/IncomingPacket.cpp:645-649.
+                    // Official controllers return config chunks as
+                    // OK(NETWORK_CONFIG_REQUEST), not only as VERB_NETWORK_CONFIG.
+                    if let Ok(nc) = NetworkConfigPayload::deserialize(&data) {
+                        self.apply_received_network_config(nc);
+                    }
                 }
             }
         }
@@ -857,7 +1139,12 @@ impl Node {
         let mut unknown = Vec::new();
 
         for addr in &whois.addresses {
-            if let Some(peer) = self.topology.get_peer(addr) {
+            // See ZeroTierOne 1.14.2 node/Topology.cpp:116-123.
+            if *addr == *self.identity.address.as_bytes() {
+                let mut public_id = self.identity.clone();
+                public_id.secret = None;
+                known_identities.push(public_id);
+            } else if let Some(peer) = self.topology.get_peer(addr) {
                 // Re-parse as public-only identity (Identity doesn't impl Clone)
                 if let Ok(public_id) = Identity::parse(&peer.identity.to_public_string()) {
                     known_identities.push(public_id);
@@ -990,27 +1277,158 @@ impl Node {
     fn handle_network_config(&mut self, data: &[u8], _from: SocketAddr, _now_ms: u64) {
         let payload_data = if data.len() > 28 { &data[28..] } else { return };
         if let Ok(nc) = NetworkConfigPayload::deserialize(payload_data) {
-            if self.find_network(nc.network_id).is_none() {
-                return;
+            self.apply_received_network_config(nc);
+        }
+    }
+
+    fn apply_received_network_config(&mut self, nc: NetworkConfigPayload) {
+        if self.find_network(nc.network_id).is_none() {
+            return;
+        }
+        let Some(nc) = self.assemble_network_config(nc) else {
+            return;
+        };
+        let advertised_mtu = network_mtu_from_dict_data(&nc.dict_data);
+        tracing::info!(
+            target: "manytier",
+            event = "network_config_received",
+            network_id = %format_args!("{:016x}", nc.network_id),
+            dict_len = nc.dict_data.len(),
+            mtu = advertised_mtu,
+            "NETWORK_CONFIG received"
+        );
+        self.apply_network_config(nc.network_id, &nc.dict_data);
+        if let Some(net) = self.find_network_mut(nc.network_id) {
+            net.pending_config_request = false;
+        }
+        self.actions.push(NodeAction::NetworkConfigured {
+            network_id: nc.network_id,
+            dict_data: nc.dict_data,
+        });
+    }
+
+    fn assemble_network_config(
+        &mut self,
+        nc: NetworkConfigPayload,
+    ) -> Option<NetworkConfigPayload> {
+        let (config_update_id, total_length, chunk_index) =
+            match (nc.config_update_id, nc.total_length, nc.chunk_index) {
+                (None, None, None) => return Some(nc),
+                (Some(config_update_id), Some(total_length), Some(chunk_index)) => (
+                    config_update_id,
+                    total_length as usize,
+                    chunk_index as usize,
+                ),
+                _ => {
+                    tracing::warn!(
+                        target: "manytier",
+                        event = "network_config_chunk_metadata_incomplete",
+                        network_id = %format_args!("{:016x}", nc.network_id),
+                        has_flags = nc.flags.is_some(),
+                        has_config_update_id = nc.config_update_id.is_some(),
+                        has_total_length = nc.total_length.is_some(),
+                        has_chunk_index = nc.chunk_index.is_some(),
+                        has_signature_type = nc.signature_type.is_some(),
+                        has_signature = nc.signature.is_some(),
+                        "NETWORK_CONFIG chunk metadata was incomplete"
+                    );
+                    return None;
+                }
+            };
+
+        let chunk_len = nc.dict_data.len();
+        let Some(chunk_end) = chunk_index.checked_add(chunk_len) else {
+            tracing::warn!(
+                target: "manytier",
+                event = "network_config_chunk_out_of_bounds",
+                network_id = %format_args!("{:016x}", nc.network_id),
+                chunk_index,
+                chunk_len,
+                total_length,
+                "NETWORK_CONFIG chunk offset overflowed"
+            );
+            return None;
+        };
+        if total_length == 0 || chunk_end > total_length {
+            tracing::warn!(
+                target: "manytier",
+                event = "network_config_chunk_out_of_bounds",
+                network_id = %format_args!("{:016x}", nc.network_id),
+                chunk_index,
+                chunk_len,
+                total_length,
+                "NETWORK_CONFIG chunk exceeded assembled dictionary bounds"
+            );
+            return None;
+        }
+
+        let pending_index = match self.pending_network_configs.iter().position(|pending| {
+            pending.network_id == nc.network_id && pending.config_update_id == config_update_id
+        }) {
+            Some(index) => {
+                if self.pending_network_configs[index].total_length != total_length {
+                    self.pending_network_configs.swap_remove(index);
+                    self.pending_network_configs.push(PendingNetworkConfig::new(
+                        nc.network_id,
+                        config_update_id,
+                        total_length,
+                    ));
+                    self.pending_network_configs.len() - 1
+                } else {
+                    index
+                }
             }
-            let advertised_mtu = network_mtu_from_dict_data(&nc.dict_data);
+            None => {
+                self.pending_network_configs
+                    .retain(|pending| pending.network_id != nc.network_id);
+                self.pending_network_configs.push(PendingNetworkConfig::new(
+                    nc.network_id,
+                    config_update_id,
+                    total_length,
+                ));
+                self.pending_network_configs.len() - 1
+            }
+        };
+
+        {
+            let pending = &mut self.pending_network_configs[pending_index];
+            pending.ingest(chunk_index, &nc.dict_data);
             tracing::info!(
                 target: "manytier",
-                event = "network_config_received",
+                event = "network_config_chunk_received",
                 network_id = %format_args!("{:016x}", nc.network_id),
-                dict_len = nc.dict_data.len(),
-                mtu = advertised_mtu,
-                "NETWORK_CONFIG received"
+                config_update_id = %format_args!("{:016x}", config_update_id),
+                chunk_index,
+                chunk_len,
+                total_length,
+                received_bytes = pending.received_bytes,
+                "NETWORK_CONFIG chunk received"
             );
-            self.apply_network_config(nc.network_id, &nc.dict_data);
-            if let Some(net) = self.find_network_mut(nc.network_id) {
-                net.pending_config_request = false;
+            if !pending.is_complete() {
+                return None;
             }
-            self.actions.push(NodeAction::NetworkConfigured {
-                network_id: nc.network_id,
-                dict_data: nc.dict_data,
-            });
         }
+
+        let pending = self.pending_network_configs.swap_remove(pending_index);
+        tracing::info!(
+            target: "manytier",
+            event = "network_config_assembled",
+            network_id = %format_args!("{:016x}", pending.network_id),
+            config_update_id = %format_args!("{:016x}", pending.config_update_id),
+            dict_len = pending.data.len(),
+            "assembled complete NETWORK_CONFIG dictionary"
+        );
+
+        Some(NetworkConfigPayload {
+            network_id: nc.network_id,
+            dict_data: pending.data,
+            flags: nc.flags,
+            config_update_id: Some(config_update_id),
+            total_length: Some(total_length as u32),
+            chunk_index: Some(0),
+            signature_type: nc.signature_type,
+            signature: None,
+        })
     }
 
     fn handle_network_credentials(&mut self, data: &[u8], _from: SocketAddr, _now_ms: u64) {
@@ -1620,49 +2038,9 @@ impl Node {
                     Some(s) => s,
                     None => continue,
                 };
-                let mut dict = Dictionary::new();
-                dict.add_int("v", 1);
-                dict.add_int("rev", 0);
-                let mac = crate::ethernet::derive_mac(&our_address_bytes, *network_id);
-                let mac_str = alloc::format!(
-                    "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    mac[0],
-                    mac[1],
-                    mac[2],
-                    mac[3],
-                    mac[4],
-                    mac[5]
-                );
-                dict.add_text("mac", &mac_str);
-
-                // Add missing fields for parity with official client
-                let our_addr_hex = alloc::format!(
-                    "{:02x}{:02x}{:02x}{:02x}{:02x}",
-                    our_address_bytes[0],
-                    our_address_bytes[1],
-                    our_address_bytes[2],
-                    our_address_bytes[3],
-                    our_address_bytes[4]
-                );
-                dict.add_text("id", &our_addr_hex);
-                dict.add_int("vmaj", 1);
-                dict.add_int("vmin", 14);
-                dict.add_int("vrev", 2);
-                dict.add_int("pv", ZT_PROTO_VERSION as u64);
-                dict.add_int("maxr", 128);
-                dict.add_int("maxc", 32);
-                dict.add_int("maxcr", 128);
-                dict.add_int("maxt", 32);
-                dict.add_int("f", 0);
-                dict.add_int("rev", 0);
-                dict.add_text("arch", "x64");
-                dict.add_text("vendor", "ZeroTier");
-                dict.add_int("allowAutoAssign", 1);
-
                 let req = zerotier_protocol::verbs::network_config::NetworkConfigRequestPayload {
                     network_id: *network_id,
-                    hop_count: 0,
-                    dict_data: dict.serialize(),
+                    dict_data: build_network_config_request_metadata(),
                 };
 
                 let mut payload = [0u8; 512];
@@ -1902,9 +2280,242 @@ impl Node {
     }
 }
 
+#[cfg(feature = "native")]
+fn decompress_packet(packet: &[u8]) -> Option<Vec<u8>> {
+    if packet.len() < ZT_PACKET_IDX_PAYLOAD {
+        return None;
+    }
+
+    let mut payload = vec![0u8; ZT_PACKET_DECOMPRESS_CAPACITY - ZT_PACKET_IDX_PAYLOAD];
+    let decompressed_len =
+        lz4_flex::block::decompress_into(&packet[ZT_PACKET_IDX_PAYLOAD..], &mut payload).ok()?;
+
+    let mut decompressed = packet[..ZT_PACKET_IDX_PAYLOAD].to_vec();
+    decompressed[ZT_PACKET_IDX_VERB] &= !VERB_FLAG_COMPRESSED;
+    decompressed.extend_from_slice(&payload[..decompressed_len]);
+    Some(decompressed)
+}
+
+#[cfg(not(feature = "native"))]
+fn decompress_packet(_packet: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
+fn apply_legacy_ip_assignments(net: &mut NetworkMembership, dict: &Dictionary) -> bool {
+    let mut parsed_assignment = false;
+
+    if let Some(v4s) = dict.get_text("v4s") {
+        for assignment in v4s.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((ip, prefix)) = parse_ipv4_cidr_text(assignment) {
+                net.assigned_ipv4 = Some(ip);
+                parsed_assignment = true;
+                tracing::info!(
+                    target: "manytier",
+                    event = "ip_assignment_received",
+                    source = "v4s",
+                    ip = %ip,
+                    prefix,
+                    "applied IPv4 assignment"
+                );
+            }
+        }
+    }
+
+    if let Some(v6s) = dict.get_text("v6s") {
+        for assignment in v6s.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((ip, prefix)) = parse_ipv6_cidr_text(assignment) {
+                net.assigned_ipv6 = Some(ip);
+                parsed_assignment = true;
+                tracing::info!(
+                    target: "manytier",
+                    event = "ip_assignment_received",
+                    source = "v6s",
+                    ip = %ip,
+                    prefix,
+                    "applied IPv6 assignment"
+                );
+            }
+        }
+    }
+
+    parsed_assignment
+}
+
+fn parse_ipv4_cidr_text(value: &str) -> Option<(Ipv4Addr, u8)> {
+    let (ip, prefix) = value.split_once('/')?;
+    Some((ip.parse().ok()?, prefix.parse().ok()?))
+}
+
+fn parse_ipv6_cidr_text(value: &str) -> Option<(Ipv6Addr, u8)> {
+    let (ip, prefix) = value.split_once('/')?;
+    Some((ip.parse().ok()?, prefix.parse().ok()?))
+}
+
+fn summarize_dict_text_entries(dict: &Dictionary) -> String {
+    let mut entries = Vec::new();
+    for entry in dict.entries() {
+        if !is_binary_dict_key(entry.key()) {
+            if let Some(value) = entry.value_as_text() {
+                entries.push(alloc::format!(
+                    "{}={}",
+                    entry.key(),
+                    summarize_dict_text_value(value)
+                ));
+            } else {
+                entries.push(alloc::format!(
+                    "{}:<non-utf8:{}>",
+                    entry.key(),
+                    entry.value().len()
+                ));
+            }
+        }
+    }
+    summarize_dict_entries(entries)
+}
+
+fn summarize_dict_binary_entries(dict: &Dictionary) -> String {
+    let mut entries = Vec::new();
+    for entry in dict.entries() {
+        if is_binary_dict_key(entry.key()) {
+            entries.push(alloc::format!("{}:{}", entry.key(), entry.value().len()));
+        }
+    }
+    summarize_dict_entries(entries)
+}
+
+fn is_binary_dict_key(key: &str) -> bool {
+    matches!(
+        key,
+        "C" | "CAP" | "COO" | "DNS" | "I" | "PM" | "R" | "RT" | "S" | "TAG"
+    )
+}
+
+fn summarize_dict_entries(entries: Vec<String>) -> String {
+    if entries.is_empty() {
+        return String::from("-");
+    }
+    entries.join(",")
+}
+
+fn summarize_dict_text_value(value: &str) -> String {
+    if value.len() <= 64 {
+        return String::from(value);
+    }
+
+    let mut summary: String = value.chars().take(64).collect();
+    summary.push_str("...");
+    summary
+}
+
+fn summarize_dict_bytes_hex(data: &[u8], max_len: usize) -> String {
+    if data.is_empty() {
+        return String::from("-");
+    }
+
+    let take_len = data.len().min(max_len);
+    let mut summary = String::new();
+    for (index, byte) in data[..take_len].iter().enumerate() {
+        if index > 0 {
+            summary.push(' ');
+        }
+        summary.push_str(&alloc::format!("{:02x}", byte));
+    }
+    if take_len < data.len() {
+        summary.push_str(" ...");
+    }
+    summary
+}
+
+fn summarize_dict_bytes_hex_tail(data: &[u8], max_len: usize) -> String {
+    if data.is_empty() {
+        return String::from("-");
+    }
+
+    if data.len() <= max_len {
+        return summarize_dict_bytes_hex(data, max_len);
+    }
+
+    let start = data.len() - max_len;
+    let mut summary = String::from("... ");
+    summary.push_str(&summarize_dict_bytes_hex(&data[start..], max_len));
+    summary
+}
+
+fn summarize_dict_ascii_preview(data: &[u8], max_len: usize) -> String {
+    if data.is_empty() {
+        return String::from("-");
+    }
+
+    let take_len = data.len().min(max_len);
+    let mut summary = String::new();
+    for &byte in &data[..take_len] {
+        match byte {
+            b'\r' => summary.push_str("\\r"),
+            b'\n' => summary.push_str("\\n"),
+            b'\t' => summary.push_str("\\t"),
+            0x20..=0x7e => summary.push(byte as char),
+            _ => summary.push('.'),
+        }
+    }
+    if take_len < data.len() {
+        summary.push_str("...");
+    }
+    summary
+}
+
 fn network_mtu_from_dict_data(dict_data: &[u8]) -> Option<u16> {
     let dict = Dictionary::deserialize(dict_data).ok()?;
-    dict.get_text("mtu")?.parse().ok()
+    dict.get_hex_u64("mtu")?.try_into().ok()
+}
+
+const MANYTIER_NETWORK_CONFIG_VERSION: u64 = 7;
+const MANYTIER_VENDOR_ZEROTIER: u64 = 1;
+const MANYTIER_RULES_ENGINE_REVISION: u64 = 1;
+const MANYTIER_MAX_NETWORK_RULES: u64 = 1024;
+const MANYTIER_MAX_NETWORK_CAPABILITIES: u64 = 128;
+const MANYTIER_MAX_CAPABILITY_RULES: u64 = 64;
+const MANYTIER_MAX_NETWORK_TAGS: u64 = 128;
+
+fn build_network_config_request_metadata() -> Vec<u8> {
+    let mut dict = Dictionary::new();
+    dict.add_int("v", MANYTIER_NETWORK_CONFIG_VERSION);
+    dict.add_int("vend", MANYTIER_VENDOR_ZEROTIER);
+    // Keep the capability dictionary aligned with the HELLO/OK(HELLO) wire
+    // version so the controller does not promote us into AES_GMAC_SIV.
+    dict.add_int("pv", MANYTIER_ADVERTISED_PROTOCOL_VERSION as u64);
+    dict.add_int("majv", 1);
+    dict.add_int("minv", 14);
+    dict.add_int("revv", 2);
+    dict.add_int("mr", MANYTIER_MAX_NETWORK_RULES);
+    dict.add_int("mc", MANYTIER_MAX_NETWORK_CAPABILITIES);
+    dict.add_int("mcr", MANYTIER_MAX_CAPABILITY_RULES);
+    dict.add_int("mt", MANYTIER_MAX_NETWORK_TAGS);
+    dict.add_int("f", 0);
+    dict.add_int("revr", MANYTIER_RULES_ENGINE_REVISION);
+    dict.add_text("o", manytier_network_config_request_os_arch());
+    dict.serialize()
+}
+
+fn manytier_network_config_request_os_arch() -> &'static str {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "linux/x86_64"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86")) {
+        "linux/x86"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "linux/arm64"
+    } else if cfg!(all(target_os = "linux", target_arch = "arm")) {
+        "linux/arm"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "macos/x86_64"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "macos/arm64"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "windows/x86_64"
+    } else if cfg!(all(target_os = "windows", target_arch = "x86")) {
+        "windows/x86"
+    } else {
+        "unknown/unknown"
+    }
 }
 
 fn peer_directory_from_dict_data(
@@ -2004,8 +2615,13 @@ mod tests {
     use core::net::Ipv4Addr;
     use zerotier_crypto::identity::{Address, PublicKey};
     use zerotier_crypto::salsa;
+    use zerotier_protocol::constants::{
+        CIPHER_SUITE_C25519_POLY1305_SALSA2012, VERB_FLAG_COMPRESSED,
+    };
     use zerotier_protocol::inet_address::InetAddress;
-    use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
+    use zerotier_protocol::verbs::network_config::{
+        CertificateOfMembership, ComQualifier, NetworkConfigPayload, NetworkConfigRequestPayload,
+    };
     use zerotier_protocol::world::{World, WorldRoot, WorldType};
 
     fn test_identity(addr_byte: u8) -> Identity {
@@ -2119,6 +2735,27 @@ mod tests {
     fn dearmor_for_test(data: &[u8], shared_secret: &[u8; 32]) -> Vec<u8> {
         let mut packet = data.to_vec();
         salsa::dearmor_packet(shared_secret, &mut packet).unwrap();
+        packet
+    }
+
+    fn build_compressed_encrypted_verb_packet(
+        packet_id: u64,
+        our_address: &[u8; 5],
+        dest_address: &[u8; 5],
+        verb: Verb,
+        payload: &[u8],
+        shared_secret: &[u8; 32],
+    ) -> Vec<u8> {
+        let compressed_payload = lz4_flex::block::compress(payload);
+        let mut packet = vec![0u8; ZT_PACKET_IDX_PAYLOAD + compressed_payload.len()];
+        packet[0..8].copy_from_slice(&packet_id.to_be_bytes());
+        packet[8..13].copy_from_slice(dest_address);
+        packet[13..18].copy_from_slice(our_address);
+        packet[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+        packet[19..27].copy_from_slice(&[0u8; 8]);
+        packet[27] = verb.to_byte() | VERB_FLAG_COMPRESSED;
+        packet[ZT_PACKET_IDX_PAYLOAD..].copy_from_slice(&compressed_payload);
+        salsa::armor_packet(shared_secret, &mut packet, true).unwrap();
         packet
     }
 
@@ -2364,6 +3001,472 @@ mod tests {
             "queued request should send as soon as controller becomes reachable: {:?}",
             second
         );
+    }
+
+    #[test]
+    fn handle_ok_network_config_request_applies_config_chunk() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 32];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+        let network_id = network_id_for_controller(controller_address);
+        node.join_network(NetworkMembership::new(network_id, 2800));
+        node.find_network_mut(network_id)
+            .unwrap()
+            .pending_config_request = true;
+
+        let mut assigned_ip = [0u8; 7];
+        let assigned_len = InetAddress::V4 {
+            ip: [192, 168, 192, 10],
+            port: 24,
+        }
+        .serialize(&mut assigned_ip);
+
+        let mut dict = Dictionary::new();
+        dict.add_int("mtu", 1400);
+        dict.add_binary("I", assigned_ip[..assigned_len].to_vec());
+
+        let config = NetworkConfigPayload {
+            network_id,
+            dict_data: dict.serialize(),
+            flags: None,
+            config_update_id: None,
+            total_length: None,
+            chunk_index: None,
+            signature_type: None,
+            signature: None,
+        };
+        let mut config_buf = [0u8; 512];
+        let config_len = config.serialize(&mut config_buf);
+
+        let ok = OkPayload {
+            in_re_verb: Verb::NetworkConfigRequest,
+            in_re_packet_id: 0x0102_0304_0506_0708,
+            sub_payload: OkSubPayload::Generic {
+                data: config_buf[..config_len].to_vec(),
+            },
+        };
+        let mut ok_buf = [0u8; 1024];
+        let ok_len = ok.serialize(&mut ok_buf).unwrap();
+        let mut packet = crate::vl2::build_encrypted_verb_packet(
+            0x1112_1314_1516_1718,
+            &controller_address,
+            node.identity.address.as_bytes(),
+            Verb::Ok,
+            &ok_buf[..ok_len],
+            &shared_secret,
+        )
+        .unwrap();
+
+        let actions = node.receive_packet(&mut packet, controller_socket, 2000);
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            NodeAction::NetworkConfigured { network_id: configured, .. }
+                if *configured == network_id
+        )));
+
+        let network = node.find_network(network_id).unwrap();
+        assert_eq!(network.mtu, 1400);
+        assert_eq!(
+            network.assigned_ipv4,
+            Some(Ipv4Addr::new(192, 168, 192, 10))
+        );
+        assert!(!network.pending_config_request);
+    }
+
+    #[test]
+    fn handle_compressed_ok_network_config_request_applies_config_chunk() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 32];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+        let network_id = network_id_for_controller(controller_address);
+        node.join_network(NetworkMembership::new(network_id, 2800));
+        node.find_network_mut(network_id)
+            .unwrap()
+            .pending_config_request = true;
+
+        let mut assigned_ip = [0u8; 7];
+        let assigned_len = InetAddress::V4 {
+            ip: [192, 168, 192, 11],
+            port: 24,
+        }
+        .serialize(&mut assigned_ip);
+
+        let mut dict = Dictionary::new();
+        dict.add_int("mtu", 1450);
+        dict.add_binary("I", assigned_ip[..assigned_len].to_vec());
+
+        let config = NetworkConfigPayload {
+            network_id,
+            dict_data: dict.serialize(),
+            flags: None,
+            config_update_id: None,
+            total_length: None,
+            chunk_index: None,
+            signature_type: None,
+            signature: None,
+        };
+        let mut config_buf = [0u8; 512];
+        let config_len = config.serialize(&mut config_buf);
+
+        let ok = OkPayload {
+            in_re_verb: Verb::NetworkConfigRequest,
+            in_re_packet_id: 0x1112_1314_1516_1718,
+            sub_payload: OkSubPayload::Generic {
+                data: config_buf[..config_len].to_vec(),
+            },
+        };
+        let mut ok_buf = [0u8; 1024];
+        let ok_len = ok.serialize(&mut ok_buf).unwrap();
+        let mut packet = build_compressed_encrypted_verb_packet(
+            0x2122_2324_2526_2728,
+            &controller_address,
+            node.identity.address.as_bytes(),
+            Verb::Ok,
+            &ok_buf[..ok_len],
+            &shared_secret,
+        );
+
+        let actions = node.receive_packet(&mut packet, controller_socket, 2000);
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            NodeAction::NetworkConfigured { network_id: configured, .. }
+                if *configured == network_id
+        )));
+
+        let network = node.find_network(network_id).unwrap();
+        assert_eq!(network.mtu, 1450);
+        assert_eq!(
+            network.assigned_ipv4,
+            Some(Ipv4Addr::new(192, 168, 192, 11))
+        );
+        assert!(!network.pending_config_request);
+    }
+
+    #[test]
+    fn bootstrap_hello_and_first_config_request_use_distinct_packet_ids() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1000).unwrap();
+
+        let bootstrap_hello = node
+            .bootstrap(1000)
+            .into_iter()
+            .find_map(|action| match action {
+                NodeAction::SendTo { data, .. } => Some(data),
+                _ => None,
+            })
+            .expect("missing bootstrap HELLO packet");
+        let bootstrap_header =
+            PacketHeader::from_bytes(&bootstrap_hello).expect("bootstrap HELLO header");
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 32];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+        let network_id = network_id_for_controller(controller_address);
+        node.join_network(NetworkMembership::new(network_id, 2800));
+
+        let config_request = node
+            .tick(1005)
+            .into_iter()
+            .find_map(|action| match action {
+                NodeAction::SendTo { data, address } if address == controller_socket => Some(data),
+                _ => None,
+            })
+            .expect("missing NETWORK_CONFIG_REQUEST packet");
+        let config_header =
+            PacketHeader::from_bytes(&config_request).expect("NETWORK_CONFIG_REQUEST header");
+
+        assert_ne!(
+            bootstrap_header.packet_id(),
+            config_header.packet_id(),
+            "first post-bootstrap NETWORK_CONFIG_REQUEST must not reuse the bootstrap HELLO packet ID"
+        );
+    }
+
+    #[test]
+    fn tick_emits_official_network_config_request_metadata() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 32];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+        let network_id = network_id_for_controller(controller_address);
+        node.join_network(NetworkMembership::new(network_id, 2800));
+
+        let mut packet = node
+            .tick(1000)
+            .into_iter()
+            .find_map(|action| match action {
+                NodeAction::SendTo { data, address } if address == controller_socket => Some(data),
+                _ => None,
+            })
+            .expect("missing NETWORK_CONFIG_REQUEST packet");
+
+        salsa::dearmor_packet(&shared_secret, &mut packet).expect("request should decrypt");
+        let request =
+            NetworkConfigRequestPayload::deserialize(&packet[28..]).expect("request should parse");
+        let dict = Dictionary::deserialize(&request.dict_data).expect("metadata should parse");
+        let advertised_pv = alloc::format!("{:x}", MANYTIER_ADVERTISED_PROTOCOL_VERSION);
+
+        assert_eq!(request.network_id, network_id);
+        assert_eq!(dict.get_text("v"), Some("7"));
+        assert_eq!(dict.get_text("vend"), Some("1"));
+        assert_eq!(dict.get_text("pv"), Some(advertised_pv.as_str()));
+        assert_eq!(dict.get_text("majv"), Some("1"));
+        assert_eq!(dict.get_text("minv"), Some("e"));
+        assert_eq!(dict.get_text("revv"), Some("2"));
+        assert_eq!(dict.get_text("mr"), Some("400"));
+        assert_eq!(dict.get_text("mc"), Some("80"));
+        assert_eq!(dict.get_text("mcr"), Some("40"));
+        assert_eq!(dict.get_text("mt"), Some("80"));
+        assert_eq!(dict.get_text("f"), Some("0"));
+        assert_eq!(dict.get_text("revr"), Some("1"));
+        assert_eq!(
+            dict.get_text("o"),
+            Some(manytier_network_config_request_os_arch())
+        );
+
+        for legacy_key in [
+            "rev",
+            "mac",
+            "id",
+            "vmaj",
+            "vmin",
+            "vrev",
+            "maxr",
+            "maxc",
+            "maxcr",
+            "maxt",
+            "arch",
+            "vendor",
+            "allowAutoAssign",
+        ] {
+            assert_eq!(
+                dict.get_text(legacy_key),
+                None,
+                "legacy alias key {legacy_key} should not be emitted"
+            );
+        }
+    }
+
+    #[test]
+    fn receive_whois_for_our_identity_sends_ok_response() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 32];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(node.identity.address.as_bytes());
+        payload.extend_from_slice(&[0xaa, 0xbb]);
+
+        let packet_id = 0x1112_1314_1516_1718;
+        let mut packet = crate::vl2::build_encrypted_verb_packet(
+            packet_id,
+            &controller_address,
+            node.identity.address.as_bytes(),
+            Verb::Whois,
+            &payload,
+            &shared_secret,
+        )
+        .unwrap();
+
+        let actions = node.receive_packet(&mut packet, controller_socket, 2000);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, NodeAction::WhoisNeeded { .. })),
+            "self WHOIS should be answered directly"
+        );
+
+        let response = actions
+            .into_iter()
+            .find_map(|action| match action {
+                NodeAction::SendTo { data, address } if address == controller_socket => Some(data),
+                _ => None,
+            })
+            .expect("expected OK(WHOIS) response");
+
+        let packet = dearmor_for_test(&response, &shared_secret);
+        assert_eq!(packet[27] & 0x1f, Verb::Ok.to_byte());
+
+        let ok = OkPayload::deserialize(&packet[28..]).expect("OK payload should parse");
+        assert_eq!(ok.in_re_verb, Verb::Whois);
+        assert_eq!(ok.in_re_packet_id, packet_id);
+        match ok.sub_payload {
+            OkSubPayload::Whois { identities } => {
+                assert_eq!(identities.len(), 1);
+                assert_eq!(identities[0].address, node.identity.address);
+                assert!(identities[0].secret.is_none());
+            }
+            other => panic!("expected WHOIS identities, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encrypted_packet_from_unknown_source_via_root_requests_whois() {
+        let id = test_identity(0x24);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let root_addr = node.topology.roots[0];
+        let root_socket = node
+            .topology
+            .get_peer(&root_addr)
+            .and_then(|peer| peer.paths.first())
+            .map(|path| path.address)
+            .expect("synthetic planet should provide a root path");
+
+        let unknown_peer = test_identity(0x66);
+        let unknown_addr = *unknown_peer.address.as_bytes();
+        let mut packet = crate::vl2::build_encrypted_verb_packet(
+            0x0102_0304_0506_0708,
+            &unknown_addr,
+            node.identity.address.as_bytes(),
+            Verb::RemoteTrace,
+            &[0xaa, 0xbb, 0xcc],
+            &[0x11; 32],
+        )
+        .expect("packet should build");
+
+        let actions = node.receive_packet(&mut packet, root_socket, 2000);
+        let requested = actions.iter().find_map(|action| match action {
+            NodeAction::WhoisNeeded { addresses } => Some(addresses.clone()),
+            _ => None,
+        });
+
+        assert_eq!(requested, Some(vec![unknown_addr]));
+    }
+
+    #[test]
+    fn whois_response_replays_pending_encrypted_packet_from_root() {
+        let mut rng = XorShift17_11(0x18_10_0001);
+        let id = Identity::generate(&mut rng).unwrap();
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let root_addr = node.topology.roots[0];
+        let root_socket = node
+            .topology
+            .get_peer(&root_addr)
+            .and_then(|peer| peer.paths.first())
+            .map(|path| path.address)
+            .expect("synthetic planet should provide a root path");
+        let root_shared = node
+            .shared_secret_for_peer(&root_addr)
+            .expect("root should have a derivable shared secret");
+
+        let unknown_peer = Identity::generate(&mut rng).unwrap();
+        let unknown_addr = *unknown_peer.address.as_bytes();
+        let unknown_shared = zerotier_crypto::key_agreement::key_agree(
+            &node
+                .identity
+                .secret
+                .as_ref()
+                .expect("test identity should include a secret")
+                .dh,
+            &x25519_dalek::PublicKey::from(unknown_peer.public_key.dh),
+        );
+
+        let network_id = 0x0123_4567_89ab_cdef;
+        let dict_data = b"v=7\n".to_vec();
+        let request = NetworkConfigRequestPayload {
+            network_id,
+            dict_data: dict_data.clone(),
+        };
+        let mut request_buf = [0u8; 128];
+        let request_len = request.serialize(&mut request_buf);
+        let mut pending_packet = crate::vl2::build_encrypted_verb_packet(
+            0x0102_0304_0506_0708,
+            &unknown_addr,
+            node.identity.address.as_bytes(),
+            Verb::NetworkConfigRequest,
+            &request_buf[..request_len],
+            &unknown_shared,
+        )
+        .expect("packet should build");
+
+        let actions = node.receive_packet(&mut pending_packet, root_socket, 2000);
+        let requested = actions.iter().find_map(|action| match action {
+            NodeAction::WhoisNeeded { addresses } => Some(addresses.clone()),
+            _ => None,
+        });
+        assert_eq!(requested, Some(vec![unknown_addr]));
+        assert_eq!(node.pending_encrypted_packets.len(), 1);
+
+        let mut unknown_public = unknown_peer.clone();
+        unknown_public.secret = None;
+        let ok = OkPayload {
+            in_re_verb: Verb::Whois,
+            in_re_packet_id: 0x1112_1314_1516_1718,
+            sub_payload: OkSubPayload::Whois {
+                identities: vec![unknown_public],
+            },
+        };
+        let mut ok_buf = [0u8; 512];
+        let ok_len = ok.serialize(&mut ok_buf).expect("OK payload should serialize");
+        let mut ok_packet = crate::vl2::build_encrypted_verb_packet(
+            0x2122_2324_2526_2728,
+            &root_addr,
+            node.identity.address.as_bytes(),
+            Verb::Ok,
+            &ok_buf[..ok_len],
+            &root_shared,
+        )
+        .expect("OK(WHOIS) packet should build");
+
+        let actions = node.receive_packet(&mut ok_packet, root_socket, 3000);
+
+        let replayed_request = actions
+            .iter()
+            .find_map(|action| match action {
+                NodeAction::NetworkConfigRequested {
+                    requester_address,
+                    network_id,
+                    dict_data,
+                    from,
+                    ..
+                } if requester_address == &unknown_addr => {
+                    Some((*network_id, dict_data.clone(), *from))
+                }
+                _ => None,
+            })
+            .expect("WHOIS resolution should replay the buffered encrypted packet");
+        assert_eq!(replayed_request.0, network_id);
+        assert_eq!(replayed_request.1, dict_data);
+        assert_eq!(replayed_request.2, root_socket);
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, NodeAction::SendTo { address, .. } if *address == root_socket)),
+            "WHOIS resolution should still queue a HELLO via the root"
+        );
+        assert!(node.pending_encrypted_packets.is_empty());
     }
 
     #[test]
@@ -2646,6 +3749,31 @@ mod tests {
         assert_eq!(node.find_network(network_id).unwrap().mtu, 1400);
     }
 
+    #[test]
+    fn apply_network_config_reads_legacy_static_ip_and_binary_com() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+        let network_id = 0xff00000000abcdef;
+        node.join_network(NetworkMembership::new(network_id, 2800));
+
+        let com = make_com(network_id, 42, *node.identity.address.as_bytes());
+        let mut com_buf = [0u8; 256];
+        let com_len = com.serialize(&mut com_buf);
+
+        let mut dict = Dictionary::new();
+        dict.add_text("v4s", "192.168.192.15/24");
+        dict.add_binary("C", com_buf[..com_len].to_vec());
+        node.apply_network_config(network_id, &dict.serialize());
+
+        let network = node.find_network(network_id).unwrap();
+        assert_eq!(
+            network.assigned_ipv4,
+            Some(Ipv4Addr::new(192, 168, 192, 15))
+        );
+        assert_eq!(network.our_com, Some(com));
+    }
+
     // ---------------------------------------------------------------
     // Strict HELLO MAC verification (bypass removal).
     // ---------------------------------------------------------------
@@ -2689,19 +3817,15 @@ mod tests {
         }
     }
 
-    fn plan_17_11_build_hello_env(
-        seed: u64,
-    ) -> (Identity, Identity, [u8; 32], Vec<u8>) {
+    fn plan_17_11_build_hello_env(seed: u64) -> (Identity, Identity, [u8; 32], Vec<u8>) {
         let mut rng = XorShift17_11(seed);
         let client = Identity::generate(&mut rng).unwrap();
         let controller = Identity::generate(&mut rng).unwrap();
 
         let client_secret = client.secret.as_ref().unwrap();
         let controller_pub = x25519_dalek::PublicKey::from(controller.public_key.dh);
-        let shared_secret = zerotier_crypto::key_agreement::key_agree(
-            &client_secret.dh,
-            &controller_pub,
-        );
+        let shared_secret =
+            zerotier_crypto::key_agreement::key_agree(&client_secret.dh, &controller_pub);
 
         let mut buf = [0u8; 512];
         let (len, _pkt_id) = RootManager::build_hello(

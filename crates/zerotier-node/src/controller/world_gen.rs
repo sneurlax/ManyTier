@@ -26,7 +26,15 @@ pub fn generate_moon(
     signing_key: &ed25519_dalek::SigningKey,
     public_key_bytes: &[u8; 64],
 ) -> Vec<u8> {
-    generate_world(WorldType::Moon, moon_id, timestamp, roots, signing_key, public_key_bytes, Some(Vec::new()))
+    generate_world(
+        WorldType::Moon,
+        moon_id,
+        timestamp,
+        roots,
+        signing_key,
+        public_key_bytes,
+        Some(Vec::new()),
+    )
 }
 
 /// Generate a planet world file binary.
@@ -39,7 +47,15 @@ pub fn generate_planet(
     signing_key: &ed25519_dalek::SigningKey,
     public_key_bytes: &[u8; 64],
 ) -> Vec<u8> {
-    generate_world(WorldType::Planet, planet_id, timestamp, roots, signing_key, public_key_bytes, None)
+    generate_world(
+        WorldType::Planet,
+        planet_id,
+        timestamp,
+        roots,
+        signing_key,
+        public_key_bytes,
+        None,
+    )
 }
 
 /// Internal: generate a signed world binary of the given type.
@@ -71,7 +87,9 @@ fn generate_world(
 
     // Serialize the complete world binary
     let mut out_buf = [0u8; 8192];
-    let n = world.serialize(&mut out_buf).expect("world serialization buffer too small");
+    let n = world
+        .serialize(&mut out_buf)
+        .expect("world serialization buffer too small");
     out_buf[..n].to_vec()
 }
 

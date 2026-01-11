@@ -2,11 +2,10 @@
 ///
 /// Manages the set of known peers, root servers (from planet/moon definitions),
 /// and pending WHOIS requests for address resolution.
-
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
 use zerotier_crypto::identity::Identity;
 use zerotier_protocol::world::World;
 
@@ -14,24 +13,24 @@ use crate::peer::Peer;
 
 /// Topology manager: peer table and root tracking.
 pub struct Topology {
-    pub peers: HashMap<[u8; 5], Peer>,
+    pub peers: BTreeMap<[u8; 5], Peer>,
     /// Addresses of root servers (subset of peers).
     pub roots: Vec<[u8; 5]>,
     pub planet: Option<World>,
     /// Loaded moon definitions.
     pub moons: Vec<World>,
-    pub pending_whois: HashMap<[u8; 5], (u64, u64)>,
+    pub pending_whois: BTreeMap<[u8; 5], (u64, u64)>,
 }
 
 impl Topology {
     /// Create a new empty topology.
     pub fn new() -> Self {
         Topology {
-            peers: HashMap::new(),
+            peers: BTreeMap::new(),
             roots: Vec::new(),
             planet: None,
             moons: Vec::new(),
-            pending_whois: HashMap::new(),
+            pending_whois: BTreeMap::new(),
         }
     }
 

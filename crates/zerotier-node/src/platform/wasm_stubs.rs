@@ -68,11 +68,7 @@ impl TunDevice for StubTunDevice {
         unimplemented!("WASM stub -- TUN is not available in browsers")
     }
 
-    async fn add_route(
-        &self,
-        _target: &str,
-        _gateway: Option<IpAddr>,
-    ) -> Result<(), Self::Error> {
+    async fn add_route(&self, _target: &str, _gateway: Option<IpAddr>) -> Result<(), Self::Error> {
         unimplemented!("WASM stub -- TUN is not available in browsers")
     }
 }

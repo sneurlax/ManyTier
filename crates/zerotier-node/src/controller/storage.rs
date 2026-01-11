@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::types::{IpPool, MemberRecord, NetworkRecord};
+use super::types::{IpPool, ManagedRoute, MemberRecord, NetworkRecord};
 
 /// Trait for controller storage backends.
 ///
@@ -45,11 +45,7 @@ pub trait ControllerStorage: Send + Sync {
     async fn upsert_member(&self, member: &MemberRecord) -> Result<(), Self::Error>;
 
     /// Delete a member from a network.
-    async fn delete_member(
-        &self,
-        network_id: u64,
-        node_id: &[u8; 5],
-    ) -> Result<(), Self::Error>;
+    async fn delete_member(&self, network_id: u64, node_id: &[u8; 5]) -> Result<(), Self::Error>;
 
     /// List all member node IDs in a network.
     async fn list_members(&self, network_id: u64) -> Result<Vec<[u8; 5]>, Self::Error>;
@@ -59,6 +55,13 @@ pub trait ControllerStorage: Send + Sync {
 
     /// Set (replace) all IP pools for a network.
     async fn set_ip_pools(&self, network_id: u64, pools: &[IpPool]) -> Result<(), Self::Error>;
+
+    /// Get all managed routes for a network.
+    async fn get_routes(&self, network_id: u64) -> Result<Vec<ManagedRoute>, Self::Error>;
+
+    /// Set (replace) all managed routes for a network.
+    async fn set_routes(&self, network_id: u64, routes: &[ManagedRoute])
+        -> Result<(), Self::Error>;
 
     /// Get all assigned IPs across all members in a network.
     async fn get_assigned_ips(&self, network_id: u64) -> Result<Vec<String>, Self::Error>;

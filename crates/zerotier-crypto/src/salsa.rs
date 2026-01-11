@@ -51,6 +51,21 @@ pub fn mangle_key(shared_secret: &[u8; 32], packet_header: &[u8], packet_size: u
     key
 }
 
+fn extract_poly1305_key_and_advance(cipher: &mut Salsa12) -> [u8; 32] {
+    let mut poly_key = [0u8; 32];
+    cipher.apply_keystream(&mut poly_key);
+
+    // ZeroTierOne 1.14.2 drives Salsa20 via `Salsa20::crypt12()`, which always
+    // advances by a full 64-byte block even when asked to emit only the first
+    // 32 bytes for the Poly1305 key. Packet payload crypt therefore begins at
+    // byte 64 of the keystream, not byte 32. See node/Salsa20.cpp's
+    // `bytes <= 64` early-return path.
+    let mut discard = [0u8; 32];
+    cipher.apply_keystream(&mut discard);
+
+    poly_key
+}
+
 /// Encrypt a packet in-place using the ZeroTier V1 encrypt-then-MAC scheme.
 ///
 /// 1. Mangle the shared secret with packet header to get per-packet key
@@ -77,8 +92,7 @@ pub fn armor_packet(
     let mut cipher = Salsa12::new(&mangled.into(), &nonce.into());
 
     // Generate Poly1305 one-time key from first 32 bytes of keystream
-    let mut poly_key = [0u8; 32];
-    cipher.apply_keystream(&mut poly_key);
+    let poly_key = extract_poly1305_key_and_advance(&mut cipher);
 
     // Encrypt verb + payload (offset 27+) if requested
     if encrypt_payload && packet.len() > PACKET_VERB_OFFSET {
@@ -111,8 +125,7 @@ pub fn dearmor_packet_unmangled(key: &[u8; 32], packet: &mut [u8]) -> Result<(),
 
     let mut cipher = Salsa12::new(&(*key).into(), &nonce.into());
 
-    let mut poly_key = [0u8; 32];
-    cipher.apply_keystream(&mut poly_key);
+    let poly_key = extract_poly1305_key_and_advance(&mut cipher);
 
     if !verify_mac(&poly_key, &packet[PACKET_VERB_OFFSET..], &saved_mac) {
         return Err(CryptoError::MacVerificationFailed);
@@ -138,8 +151,7 @@ pub fn armor_packet_unmangled(
 
     let mut cipher = Salsa12::new(&(*key).into(), &nonce.into());
 
-    let mut poly_key = [0u8; 32];
-    cipher.apply_keystream(&mut poly_key);
+    let poly_key = extract_poly1305_key_and_advance(&mut cipher);
 
     if encrypt_payload && packet.len() > PACKET_VERB_OFFSET {
         cipher.apply_keystream(&mut packet[PACKET_VERB_OFFSET..]);
@@ -177,8 +189,7 @@ pub fn dearmor_packet(shared_secret: &[u8; 32], packet: &mut [u8]) -> Result<(),
     let mut cipher = Salsa12::new(&mangled.into(), &nonce.into());
 
     // Generate Poly1305 one-time key
-    let mut poly_key = [0u8; 32];
-    cipher.apply_keystream(&mut poly_key);
+    let poly_key = extract_poly1305_key_and_advance(&mut cipher);
 
     if !verify_mac(&poly_key, &packet[PACKET_VERB_OFFSET..], &saved_mac) {
         return Err(CryptoError::MacVerificationFailed);
@@ -247,8 +258,7 @@ mod tests {
 
     fn set_cipher_suite(pkt: &mut [u8], suite: u8) {
         // Flags byte layout: FFCCCHHH (2 flag bits, 3 cipher suite, 3 hop count)
-        pkt[PACKET_FLAGS_OFFSET] =
-            (pkt[PACKET_FLAGS_OFFSET] & 0xC7) | ((suite & 0x07) << 3);
+        pkt[PACKET_FLAGS_OFFSET] = (pkt[PACKET_FLAGS_OFFSET] & 0xC7) | ((suite & 0x07) << 3);
     }
 
     // Helper: create a minimal test packet (28 bytes minimum)
@@ -279,6 +289,27 @@ mod tests {
             *b = (i as u8).wrapping_mul(7).wrapping_add(0x42);
         }
         secret
+    }
+
+    #[test]
+    fn dearmor_matches_official_ok_hello_capture() {
+        let shared_secret = [
+            0x15, 0x79, 0x95, 0x8b, 0x95, 0x6d, 0xb9, 0x4d, 0x18, 0xfa, 0xb1, 0x0f, 0x13, 0x48,
+            0xcc, 0x0d, 0x98, 0x7d, 0x26, 0xa1, 0x5d, 0x24, 0x88, 0x64, 0xaf, 0xe4, 0x29, 0x41,
+            0xb0, 0xa2, 0xe4, 0x9f,
+        ];
+        let mut packet = [
+            0x5f, 0x49, 0x89, 0x44, 0xa5, 0xd8, 0x1d, 0x63, 0x0f, 0x7a, 0x0b, 0x04, 0x3f, 0x46,
+            0xa5, 0xb4, 0xd1, 0xe8, 0x88, 0x9e, 0x32, 0x4a, 0x99, 0x7c, 0xa9, 0x8c, 0x83, 0x1e,
+            0x4a, 0xbb, 0x10, 0x84, 0x07, 0x21, 0xa0, 0x2a, 0x8a, 0x1d, 0xce, 0x12, 0x11, 0x1a,
+            0xe9, 0xd4, 0x96, 0xd9, 0x00, 0x1c, 0xc4, 0x04, 0x6a, 0x2a, 0xa3, 0x8f, 0x0c, 0xca,
+            0xc4, 0xfc, 0x8f,
+        ];
+
+        dearmor_packet(&shared_secret, &mut packet).expect("captured OK(HELLO) should decrypt");
+
+        assert_eq!(packet[PACKET_VERB_OFFSET] & 0x1f, 0x03);
+        assert_eq!(packet[PACKET_VERB_OFFSET + 1], 0x01);
     }
 
     // --- mangle_key tests ---
@@ -529,7 +560,11 @@ mod tests {
 
         let mut saved_mac = [0u8; 8];
         saved_mac.copy_from_slice(&pkt[19..27]);
-        assert!(crate::poly::verify_mac(&poly_key, &pkt[PACKET_VERB_OFFSET..], &saved_mac));
+        assert!(crate::poly::verify_mac(
+            &poly_key,
+            &pkt[PACKET_VERB_OFFSET..],
+            &saved_mac
+        ));
         assert_eq!(&pkt[27..], &original_payload[..]);
     }
 

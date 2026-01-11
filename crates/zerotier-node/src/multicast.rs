@@ -3,7 +3,6 @@
 /// Tracks which ZeroTier peers are subscribed to which multicast groups on each network,
 /// supports querying subscribers with limits, expiring stale entries, and building
 /// MULTICAST_LIKE payloads.
-
 extern crate alloc;
 
 use alloc::vec::Vec;
@@ -51,7 +50,11 @@ impl MulticastManager {
         zt_address: [u8; 5],
         now_ms: u64,
     ) {
-        let key = MulticastGroupKey { network_id, mac, adi };
+        let key = MulticastGroupKey {
+            network_id,
+            mac,
+            adi,
+        };
 
         // Find existing group or create new
         let group_subs = match self.subscriptions.iter_mut().find(|(k, _)| k == &key) {
@@ -73,6 +76,34 @@ impl MulticastManager {
                     subscribed_at_ms: now_ms,
                 });
             }
+        }
+    }
+
+    /// Replace a peer's subscription snapshot for a network with the groups
+    /// currently advertised in its MULTICAST_LIKE.
+    pub fn replace_subscriptions(
+        &mut self,
+        network_id: u64,
+        zt_address: [u8; 5],
+        groups: &[MulticastGroup],
+        now_ms: u64,
+    ) {
+        for (key, subs) in &mut self.subscriptions {
+            if key.network_id != network_id {
+                continue;
+            }
+
+            let keep = groups.iter().any(|group| {
+                group.network_id == key.network_id && group.mac == key.mac && group.adi == key.adi
+            });
+            if !keep {
+                subs.retain(|subscriber| subscriber.zt_address != zt_address);
+            }
+        }
+        self.subscriptions.retain(|(_, subs)| !subs.is_empty());
+
+        for group in groups {
+            self.subscribe(group.network_id, group.mac, group.adi, zt_address, now_ms);
         }
     }
 
@@ -100,11 +131,7 @@ impl MulticastManager {
             adi,
         };
         match self.subscriptions.iter().find(|(k, _)| k == &key) {
-            Some((_, subs)) => subs
-                .iter()
-                .take(limit)
-                .map(|s| s.zt_address)
-                .collect(),
+            Some((_, subs)) => subs.iter().take(limit).map(|s| s.zt_address).collect(),
             None => Vec::new(),
         }
     }
@@ -138,9 +165,7 @@ impl MulticastManager {
     /// Remove subscriptions older than `max_age_ms` relative to `now_ms`.
     pub fn expire_old(&mut self, now_ms: u64, max_age_ms: u64) {
         for (_, subs) in &mut self.subscriptions {
-            subs.retain(|s| {
-                now_ms.saturating_sub(s.subscribed_at_ms) <= max_age_ms
-            });
+            subs.retain(|s| now_ms.saturating_sub(s.subscribed_at_ms) <= max_age_ms);
         }
         // Remove empty groups
         self.subscriptions.retain(|(_, subs)| !subs.is_empty());
@@ -155,14 +180,36 @@ impl MulticastManager {
             .collect()
     }
 
+    /// Return the multicast groups a specific subscriber is currently a member of
+    /// on a given network.
+    pub fn groups_for_subscriber(
+        &self,
+        network_id: u64,
+        zt_address: &[u8; 5],
+    ) -> Vec<MulticastGroupKey> {
+        self.subscriptions
+            .iter()
+            .filter(|(k, subs)| {
+                k.network_id == network_id
+                    && subs
+                        .iter()
+                        .any(|subscriber| &subscriber.zt_address == zt_address)
+            })
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     /// Build a MULTICAST_LIKE payload for all groups this node is subscribed to
     /// on the given network.
-    pub fn build_multicast_like(&self, network_id: u64) -> MulticastLikePayload {
+    pub fn build_multicast_like(
+        &self,
+        network_id: u64,
+        zt_address: &[u8; 5],
+    ) -> MulticastLikePayload {
         let groups = self
-            .subscriptions
-            .iter()
-            .filter(|(k, _)| k.network_id == network_id)
-            .map(|(k, _)| MulticastGroup {
+            .groups_for_subscriber(network_id, zt_address)
+            .into_iter()
+            .map(|k| MulticastGroup {
                 network_id: k.network_id,
                 mac: k.mac,
                 adi: k.adi,
@@ -186,6 +233,7 @@ pub fn arp_multicast_group(network_id: u64) -> MulticastGroupKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn subscribe_adds_to_group() {
@@ -203,7 +251,11 @@ mod tests {
         mgr.subscribe(1, [0xff; 6], 100, addr, 1000);
         mgr.subscribe(1, [0xff; 6], 100, addr, 2000);
         let subs = mgr.get_subscribers(1, &[0xff; 6], 100, 100);
-        assert_eq!(subs.len(), 1, "duplicate subscribe must not create second entry");
+        assert_eq!(
+            subs.len(),
+            1,
+            "duplicate subscribe must not create second entry"
+        );
     }
 
     #[test]
@@ -261,7 +313,7 @@ mod tests {
         mgr.subscribe(1, [0x01; 6], 200, addr, 1000);
         mgr.subscribe(2, [0xff; 6], 100, addr, 1000); // different network
 
-        let like = mgr.build_multicast_like(1);
+        let like = mgr.build_multicast_like(1, &addr);
         assert_eq!(like.groups.len(), 2, "should only include network 1 groups");
         assert!(like.groups.iter().all(|g| g.network_id == 1));
     }
@@ -371,5 +423,27 @@ mod tests {
         mgr.expire_old(6000, 3000);
         let subs = mgr.get_subscribers(1, &[0xff; 6], 100, 100);
         assert_eq!(subs.len(), 1, "subscribe should update timestamp");
+    }
+
+    #[test]
+    fn replace_subscriptions_prunes_absent_groups() {
+        let mut mgr = MulticastManager::new();
+        let addr = [0x01, 0x02, 0x03, 0x04, 0x05];
+        mgr.subscribe(1, [0xff; 6], 100, addr, 1000);
+        mgr.subscribe(1, [0x01; 6], 200, addr, 1000);
+
+        mgr.replace_subscriptions(
+            1,
+            addr,
+            &[MulticastGroup {
+                network_id: 1,
+                mac: [0x01; 6],
+                adi: 200,
+            }],
+            2000,
+        );
+
+        assert!(mgr.get_subscribers(1, &[0xff; 6], 100, 10).is_empty());
+        assert_eq!(mgr.get_subscribers(1, &[0x01; 6], 200, 10), vec![addr]);
     }
 }

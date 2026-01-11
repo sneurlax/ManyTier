@@ -227,7 +227,6 @@ fn protocol_roundtrips_cover_all_payload_codecs() {
 
         let request = NetworkConfigRequestPayload {
             network_id: seed,
-            hop_count: 0,
             dict_data: payload.clone(),
         };
         let mut request_buf = vec![0u8; 256];
@@ -239,9 +238,12 @@ fn protocol_roundtrips_cover_all_payload_codecs() {
         let config = NetworkConfigPayload {
             network_id: seed,
             dict_data: payload.clone(),
-            chunk_index: Some(seed as u16),
-            total_chunks: Some(seed as u16 + 1),
-            signature: Some(make_bytes(seed ^ 5, 64).try_into().unwrap()),
+            flags: Some(0),
+            config_update_id: Some(seed ^ 0x0102_0304_0506_0708),
+            total_length: Some(payload.len() as u32 + 4096),
+            chunk_index: Some(seed as u32),
+            signature_type: Some(1),
+            signature: Some(make_bytes(seed ^ 5, 96)),
         };
         let mut config_buf = vec![0u8; 512];
         let config_len = config.serialize(&mut config_buf);

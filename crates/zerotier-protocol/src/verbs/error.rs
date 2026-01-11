@@ -1,8 +1,7 @@
-///
-
-use alloc::vec::Vec;
 use crate::error::ProtocolError;
 use crate::verb::Verb;
+///
+use alloc::vec::Vec;
 
 /// ZeroTier V1 error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,14 +74,11 @@ impl ErrorPayload {
             });
         }
 
-        let in_re_verb = Verb::from_byte(data[0])
-            .ok_or(ProtocolError::InvalidVerb(data[0]))?;
+        let in_re_verb = Verb::from_byte(data[0]).ok_or(ProtocolError::InvalidVerb(data[0]))?;
         let in_re_packet_id = u64::from_be_bytes([
-            data[1], data[2], data[3], data[4],
-            data[5], data[6], data[7], data[8],
+            data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
         ]);
-        let error_code = ErrorCode::from_byte(data[9])
-            .ok_or(ProtocolError::InvalidPacket)?;
+        let error_code = ErrorCode::from_byte(data[9]).ok_or(ProtocolError::InvalidPacket)?;
         let payload = if data.len() > 10 {
             data[10..].to_vec()
         } else {
@@ -106,14 +102,35 @@ mod tests {
     fn error_code_from_byte_all() {
         assert_eq!(ErrorCode::from_byte(0x00), Some(ErrorCode::None));
         assert_eq!(ErrorCode::from_byte(0x01), Some(ErrorCode::InvalidRequest));
-        assert_eq!(ErrorCode::from_byte(0x02), Some(ErrorCode::BadProtocolVersion));
+        assert_eq!(
+            ErrorCode::from_byte(0x02),
+            Some(ErrorCode::BadProtocolVersion)
+        );
         assert_eq!(ErrorCode::from_byte(0x03), Some(ErrorCode::ObjectNotFound));
-        assert_eq!(ErrorCode::from_byte(0x04), Some(ErrorCode::IdentityCollision));
-        assert_eq!(ErrorCode::from_byte(0x05), Some(ErrorCode::UnsupportedOperation));
-        assert_eq!(ErrorCode::from_byte(0x06), Some(ErrorCode::NeedMembershipCertificate));
-        assert_eq!(ErrorCode::from_byte(0x07), Some(ErrorCode::NetworkAccessDenied));
-        assert_eq!(ErrorCode::from_byte(0x08), Some(ErrorCode::UnwantedMulticast));
-        assert_eq!(ErrorCode::from_byte(0x09), Some(ErrorCode::NetworkAuthenticationRequired));
+        assert_eq!(
+            ErrorCode::from_byte(0x04),
+            Some(ErrorCode::IdentityCollision)
+        );
+        assert_eq!(
+            ErrorCode::from_byte(0x05),
+            Some(ErrorCode::UnsupportedOperation)
+        );
+        assert_eq!(
+            ErrorCode::from_byte(0x06),
+            Some(ErrorCode::NeedMembershipCertificate)
+        );
+        assert_eq!(
+            ErrorCode::from_byte(0x07),
+            Some(ErrorCode::NetworkAccessDenied)
+        );
+        assert_eq!(
+            ErrorCode::from_byte(0x08),
+            Some(ErrorCode::UnwantedMulticast)
+        );
+        assert_eq!(
+            ErrorCode::from_byte(0x09),
+            Some(ErrorCode::NetworkAuthenticationRequired)
+        );
         assert_eq!(ErrorCode::from_byte(0x0a), None);
         assert_eq!(ErrorCode::from_byte(0xff), None);
     }
@@ -171,7 +188,10 @@ mod tests {
         let n = err.serialize(&mut buf);
 
         assert_eq!(buf[0], Verb::Hello.to_byte()); // in_re_verb
-        assert_eq!(&buf[1..9], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]); // packet ID
+        assert_eq!(
+            &buf[1..9],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        ); // packet ID
         assert_eq!(buf[9], 0x09); // NetworkAuthenticationRequired
         assert_eq!(n, 10);
     }

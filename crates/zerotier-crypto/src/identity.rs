@@ -99,6 +99,7 @@ impl PublicKey {
 }
 
 /// ZeroTier V1 identity secret key: x25519 static secret + Ed25519 signing key.
+#[derive(Clone)]
 pub struct SecretKey {
     /// X25519 Diffie-Hellman secret key.
     pub dh: x25519_dalek::StaticSecret,
@@ -157,7 +158,7 @@ impl Drop for SecretKey {
 }
 
 /// A ZeroTier V1 identity: address + public key + optional secret key.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Identity {
     /// The 40-bit ZeroTier address derived from the public key via PoW.
     pub address: Address,
@@ -364,6 +365,19 @@ mod tests {
         assert_eq!(pk.to_bytes(), bytes);
     }
 
+    #[test]
+    fn identity_parse_validates_known_official_identity_public() {
+        // Captured from a local `zerotier-one` 1.14.2 test run (identity.public format).
+        // If this fails, our public-key byte ordering does not match official, which would
+        // break DH shared-secret derivation and interop with official peers.
+        let s = "4b9ccad987:0:ad8a2faec3b1ada48c39b28c9d07edad693279dd7f0a2d3ad718ae877ea51373c6ffccdfcaa1cf0f497ece33a949979bdf7fd564527bc5b95da3e9346912916a";
+        let id = Identity::parse(s).expect("failed to parse identity.public");
+        assert!(
+            id.validate_address(),
+            "official identity.public should validate its address against the public key"
+        );
+    }
+
     // --- SecretKey tests ---
 
     #[test]
@@ -567,6 +581,11 @@ mod tests {
                 dest[i..i + to_copy].copy_from_slice(&val[..to_copy]);
                 i += to_copy;
             }
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
         }
     }
 }

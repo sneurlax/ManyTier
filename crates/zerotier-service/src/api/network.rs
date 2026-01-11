@@ -22,7 +22,9 @@ fn membership_to_response(
     net: &zerotier_node::network::NetworkMembership,
     our_addr: &[u8; 5],
 ) -> NetworkResponse {
-    // Collect assigned addresses from members matching our address
+    // Collect assigned addresses from members matching our address.
+    // Dynamic controller-delivered assignments are tracked directly on the
+    // membership, so include those as the source of truth for live joins.
     let mut assigned = Vec::new();
     if let Some(member) = net.members.iter().find(|m| m.zt_address == *our_addr) {
         if let Some((ip, prefix)) = &member.ipv4 {
@@ -30,6 +32,18 @@ fn membership_to_response(
         }
         if let Some((ip, prefix)) = &member.ipv6 {
             assigned.push(format!("{}/{}", ip, prefix));
+        }
+    }
+    if let Some(ip) = net.assigned_ipv4 {
+        let ip = format!("{}/32", ip);
+        if !assigned.contains(&ip) {
+            assigned.push(ip);
+        }
+    }
+    if let Some(ip) = net.assigned_ipv6 {
+        let ip = format!("{}/128", ip);
+        if !assigned.contains(&ip) {
+            assigned.push(ip);
         }
     }
 
@@ -51,9 +65,7 @@ fn membership_to_response(
 }
 
 /// List all joined networks.
-pub async fn list_networks(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<NetworkResponse>> {
+pub async fn list_networks(State(state): State<Arc<AppState>>) -> Json<Vec<NetworkResponse>> {
     let node = state.node.lock().await;
     let our_addr = node.identity.address.as_bytes();
 
@@ -73,13 +85,22 @@ pub async fn join_network(
 ) -> Result<Json<NetworkResponse>, StatusCode> {
     let network_id = u64::from_str_radix(&id, 16).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut node = state.node.lock().await;
+    let our_addr = *node.identity.address.as_bytes();
+
+    if let Some(existing) = node.find_network_mut(network_id) {
+        existing.our_com = None;
+        existing.peer_coms.clear();
+        existing.members.clear();
+        existing.pending_config_request = true;
+        existing.last_config_request = 0;
+        return Ok(Json(membership_to_response(existing, &our_addr)));
+    }
 
     // Create empty membership -- config will come from controller
     let membership = zerotier_node::network::NetworkMembership::new(network_id, 2800);
     node.join_network(membership);
 
-    let our_addr = node.identity.address.as_bytes();
-    let mac = zerotier_node::ethernet::derive_mac(our_addr, network_id);
+    let mac = zerotier_node::ethernet::derive_mac(&our_addr, network_id);
 
     Ok(Json(NetworkResponse {
         id: format!("{:016x}", network_id),

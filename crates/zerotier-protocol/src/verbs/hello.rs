@@ -1,14 +1,16 @@
 // HELLO verb payload codec.
 
-use alloc::vec::Vec;
 use crate::error::ProtocolError;
 use crate::identity_wire;
 use crate::inet_address::InetAddress;
+use alloc::vec::Vec;
 use zerotier_crypto::identity::Identity;
 
-const MANYTIER_MAJOR: u8 = 0;
-const MANYTIER_MINOR: u8 = 1;
-const MANYTIER_REVISION: u16 = 0;
+pub const MANYTIER_ADVERTISED_PROTOCOL_VERSION: u8 = 11;
+
+const MANYTIER_MAJOR: u8 = 1;
+const MANYTIER_MINOR: u8 = 14;
+const MANYTIER_REVISION: u16 = 2;
 
 #[derive(Debug)]
 pub struct HelloPayload {
@@ -28,7 +30,11 @@ impl HelloPayload {
     /// Create a new HELLO payload with ManyTier defaults.
     pub fn new(identity: Identity, timestamp: u64, dest_address: InetAddress) -> Self {
         Self {
-            protocol_version: crate::constants::ZT_PROTO_VERSION,
+            // See ZeroTierOne 1.14.2 node/Peer.hpp:618-619.
+            // Upstream enables AES_GMAC_SIV at remote protocol version >= 12.
+            // ManyTier does not implement cipher suite 3 yet, so it must not
+            // advertise protocol 12 capability on the wire.
+            protocol_version: MANYTIER_ADVERTISED_PROTOCOL_VERSION,
             major_version: MANYTIER_MAJOR,
             minor_version: MANYTIER_MINOR,
             revision: MANYTIER_REVISION,
@@ -244,7 +250,10 @@ mod tests {
         assert_eq!(parsed.identity.public_key, payload.identity.public_key);
         assert_eq!(parsed.dest_address, payload.dest_address);
         assert_eq!(parsed.planet_world_id, payload.planet_world_id);
-        assert_eq!(parsed.planet_world_timestamp, payload.planet_world_timestamp);
+        assert_eq!(
+            parsed.planet_world_timestamp,
+            payload.planet_world_timestamp
+        );
         assert_eq!(parsed.moon_records.len(), 0);
     }
 
@@ -266,7 +275,7 @@ mod tests {
         assert_eq!(buf[2], 2); // minor_version at byte 2
         assert_eq!(buf[3], 0x00); // revision high byte at byte 3
         assert_eq!(buf[4], 0x03); // revision low byte at byte 4
-        // timestamp at bytes 5..13
+                                  // timestamp at bytes 5..13
         assert_eq!(
             u64::from_be_bytes([buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12]]),
             0x0000_0123_4567_89AB
@@ -302,6 +311,21 @@ mod tests {
         let (parsed, _) = HelloPayload::deserialize(&buf[..n]).unwrap();
         assert_eq!(parsed.planet_world_id, 149604618);
         assert_eq!(parsed.planet_world_timestamp, 1567191349589);
+    }
+
+    #[test]
+    fn hello_new_does_not_advertise_aes_gmac_siv_capability() {
+        let id = build_test_identity();
+        let payload = HelloPayload::new(id, 5000, InetAddress::Null);
+
+        assert_eq!(
+            payload.protocol_version,
+            MANYTIER_ADVERTISED_PROTOCOL_VERSION
+        );
+        assert!(
+            payload.protocol_version < crate::constants::ZT_PROTO_VERSION,
+            "wire-advertised protocol version must stay below the AES_GMAC_SIV gate"
+        );
     }
 
     #[test]

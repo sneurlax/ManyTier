@@ -17,7 +17,8 @@ use zerotier_protocol::constants::ZT_PING_CHECK_INTERVAL;
 use zerotier_protocol::header::PacketHeader;
 use zerotier_protocol::inet_address::InetAddress;
 use zerotier_protocol::verb::Verb;
-use zerotier_protocol::verbs::ok::OkPayload;
+use zerotier_protocol::verbs::network_config::NetworkConfigPayload;
+use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
 use zerotier_protocol::world::DEFAULT_PLANET;
 
 /// Write a single UDP datagram to `dump_dir` iff it is a HELLO verb, using the
@@ -450,6 +451,109 @@ fn drain_whois_actions_from_sets<const N: usize>(
     }
 }
 
+const NETWORK_CONFIG_CHUNK_BYTES: usize = 1024;
+
+fn build_encrypted_verb_packet(
+    packet_id: u64,
+    source_address: &[u8; 5],
+    dest_address: &[u8; 5],
+    verb: Verb,
+    payload: &[u8],
+    shared_secret: &[u8; 32],
+    compress: bool,
+) -> Option<Vec<u8>> {
+    use zerotier_protocol::constants::{
+        CIPHER_SUITE_C25519_POLY1305_SALSA2012, VERB_FLAG_COMPRESSED, ZT_PACKET_IDX_PAYLOAD,
+    };
+
+    let payload = if compress {
+        lz4_flex::block::compress(payload)
+    } else {
+        payload.to_vec()
+    };
+
+    let mut packet = vec![0u8; ZT_PACKET_IDX_PAYLOAD + payload.len()];
+    packet[0..8].copy_from_slice(&packet_id.to_be_bytes());
+    packet[8..13].copy_from_slice(dest_address);
+    packet[13..18].copy_from_slice(source_address);
+    packet[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+    packet[19..27].copy_from_slice(&[0u8; 8]);
+    packet[27] = verb.to_byte() | if compress { VERB_FLAG_COMPRESSED } else { 0 };
+    packet[ZT_PACKET_IDX_PAYLOAD..].copy_from_slice(&payload);
+
+    zerotier_crypto::salsa::armor_packet(shared_secret, &mut packet, true).ok()?;
+    Some(packet)
+}
+
+fn build_network_config_response_packets(
+    node: &mut Node,
+    requester_address: &[u8; 5],
+    request_packet_id: u64,
+    network_id: u64,
+    dict_data: &[u8],
+    shared_secret: &[u8; 32],
+) -> Option<Vec<Vec<u8>>> {
+    let our_address = *node.identity.address.as_bytes();
+    let total_length = u32::try_from(dict_data.len()).ok()?;
+    let config_update_id = node.allocate_packet_id();
+    let mut packets = Vec::new();
+
+    for (chunk_index, chunk) in dict_data.chunks(NETWORK_CONFIG_CHUNK_BYTES).enumerate() {
+        let chunk_offset = u32::try_from(chunk_index * NETWORK_CONFIG_CHUNK_BYTES).ok()?;
+        let mut signed_data = Vec::with_capacity(10 + chunk.len() + 17);
+        signed_data.extend_from_slice(&network_id.to_be_bytes());
+        signed_data.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+        signed_data.extend_from_slice(chunk);
+        signed_data.push(0);
+        signed_data.extend_from_slice(&config_update_id.to_be_bytes());
+        signed_data.extend_from_slice(&total_length.to_be_bytes());
+        signed_data.extend_from_slice(&chunk_offset.to_be_bytes());
+        let mut config = NetworkConfigPayload {
+            network_id,
+            dict_data: chunk.to_vec(),
+            flags: Some(0),
+            config_update_id: Some(config_update_id),
+            total_length: Some(total_length),
+            chunk_index: Some(chunk_offset),
+            signature_type: None,
+            signature: None,
+        };
+
+        let signature = {
+            let identity_secret = node.identity.secret.as_ref()?;
+            zerotier_crypto::signing::sign(&identity_secret.signing, &signed_data).to_vec()
+        };
+        config.signature_type = Some(1);
+        config.signature = Some(signature);
+
+        let mut config_buf = vec![0u8; signed_data.len() + 99];
+        let config_len = config.serialize(&mut config_buf);
+        config_buf.truncate(config_len);
+
+        let ok = OkPayload {
+            in_re_verb: Verb::NetworkConfigRequest,
+            in_re_packet_id: request_packet_id,
+            sub_payload: OkSubPayload::Generic { data: config_buf },
+        };
+        let mut ok_buf = vec![0u8; 9 + config_len];
+        let ok_len = ok.serialize(&mut ok_buf).ok()?;
+        ok_buf.truncate(ok_len);
+
+        let packet = build_encrypted_verb_packet(
+            node.allocate_packet_id(),
+            &our_address,
+            requester_address,
+            Verb::Ok,
+            &ok_buf,
+            shared_secret,
+            true,
+        )?;
+        packets.push(packet);
+    }
+
+    Some(packets)
+}
+
 /// Handle controller-related actions (NetworkConfigRequested).
 /// Follows shadow-node pattern: inline in main loop, build response packets.
 async fn handle_controller_actions(
@@ -458,13 +562,12 @@ async fn handle_controller_actions(
     node: &mut zerotier_node::node::Node,
     now_ms: u64,
 ) {
-    use zerotier_protocol::constants::CIPHER_SUITE_C25519_POLY1305_SALSA2012;
-
     for action in actions {
         if let NodeAction::NetworkConfigRequested {
             requester_address,
             network_id,
             from,
+            packet_id,
             ..
         } = action
         {
@@ -498,10 +601,39 @@ async fn handle_controller_actions(
                 }
             };
 
-            // Get shared secret for this peer
-            let shared_secret = node
-                .shared_secret_for_peer(requester_address)
-                .unwrap_or([0u8; 32]);
+            // Record the issued COM in the node's own membership state so it can verify
+            // incoming data-plane frames from this peer.
+            if let Some(ref com) = response.credentials.com {
+                if let Some(net) = node.find_network_mut(*network_id) {
+                    net.peer_coms.retain(|(addr, _)| addr != requester_address);
+                    net.peer_coms.push((*requester_address, com.clone()));
+                    tracing::debug!(
+                        target: "manytier",
+                        event = "controller_recorded_peer_com",
+                        peer = %format_args!(
+                            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            requester_address[0], requester_address[1], requester_address[2], requester_address[3], requester_address[4]
+                        ),
+                        "recorded issued COM in node membership state"
+                    );
+                }
+            }
+
+            let Some(shared_secret) = node.shared_secret_for_peer(requester_address) else {
+                tracing::warn!(
+                    event = "controller_network_config_missing_shared_secret",
+                    requester = %format_args!(
+                        "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        requester_address[0],
+                        requester_address[1],
+                        requester_address[2],
+                        requester_address[3],
+                        requester_address[4]
+                    ),
+                    "controller had no shared secret for NETWORK_CONFIG_REQUEST sender"
+                );
+                continue;
+            };
 
             tracing::info!(
                 event = "controller_network_config_response_ready",
@@ -519,60 +651,65 @@ async fn handle_controller_actions(
                 "controller built NETWORK_CONFIG response"
             );
 
-            let our_addr = *node.identity.address.as_bytes();
+            let config_packets = match build_network_config_response_packets(
+                node,
+                requester_address,
+                *packet_id,
+                *network_id,
+                &response.config.dict_data,
+                &shared_secret,
+            ) {
+                Some(packets) if !packets.is_empty() => packets,
+                _ => {
+                    tracing::error!(
+                        event = "controller_config_build_failed",
+                        network_id = %format_args!("{:016x}", network_id),
+                        "failed to build NETWORK_CONFIG response packets"
+                    );
+                    continue;
+                }
+            };
 
-            // Build NETWORK_CONFIG packet (standalone verb 0x0c)
-            let mut pkt_buf = [0u8; 2048];
-            let packet_id = now_ms;
-            pkt_buf[0..8].copy_from_slice(&packet_id.to_be_bytes());
-            pkt_buf[8..13].copy_from_slice(requester_address);
-            pkt_buf[13..18].copy_from_slice(&our_addr);
-            pkt_buf[18] = (CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3) | 0x01;
-            pkt_buf[19..27].copy_from_slice(&[0u8; 8]);
-            pkt_buf[27] = Verb::NetworkConfig.to_byte();
-
-            let payload_len = response.config.serialize(&mut pkt_buf[28..]);
-            let total = 28 + payload_len;
-            if zerotier_crypto::salsa::armor_packet(&shared_secret, &mut pkt_buf[..total], true)
-                .is_ok()
-            {
+            for packet in config_packets {
                 node.push_action(NodeAction::SendTo {
-                    data: pkt_buf[..total].to_vec(),
+                    data: packet,
                     address: *from,
                 });
-                tracing::info!(
-                    target: "manytier",
-                    event = "controller_config_sent",
-                    "sent NETWORK_CONFIG response"
-                );
             }
+            tracing::info!(
+                target: "manytier",
+                event = "controller_config_sent",
+                response_verb = "ok(network_config_request)",
+                "sent NETWORK_CONFIG response"
+            );
 
-            // Build NETWORK_CREDENTIALS packet (not an OK response, but usually follows)
-            let mut creds_buf = [0u8; 2048];
-            let creds_now = now_ms + 1;
-            creds_buf[0..8].copy_from_slice(&creds_now.to_be_bytes());
-            creds_buf[8..13].copy_from_slice(requester_address);
-            creds_buf[13..18].copy_from_slice(&our_addr);
-            creds_buf[18] = (CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3) | 0x01;
-            creds_buf[19..27].copy_from_slice(&[0u8; 8]);
-            creds_buf[27] = Verb::NetworkCredentials.to_byte();
-            let creds_payload_len = response.credentials.serialize(&mut creds_buf[28..]);
-            let creds_total = 28 + creds_payload_len;
-            if zerotier_crypto::salsa::armor_packet(
+            let our_addr = *node.identity.address.as_bytes();
+            let mut creds_payload = vec![0u8; 512];
+            let creds_len = response.credentials.serialize(&mut creds_payload);
+            creds_payload.truncate(creds_len);
+            if let Some(packet) = build_encrypted_verb_packet(
+                node.allocate_packet_id(),
+                &our_addr,
+                requester_address,
+                Verb::NetworkCredentials,
+                &creds_payload,
                 &shared_secret,
-                &mut creds_buf[..creds_total],
-                true,
-            )
-            .is_ok()
-            {
+                false,
+            ) {
                 node.push_action(NodeAction::SendTo {
-                    data: creds_buf[..creds_total].to_vec(),
+                    data: packet,
                     address: *from,
                 });
                 tracing::info!(
                     target: "manytier",
                     event = "network_credentials_sent",
                     "sent NETWORK_CREDENTIALS"
+                );
+            } else {
+                tracing::error!(
+                    event = "network_credentials_build_failed",
+                    network_id = %format_args!("{:016x}", network_id),
+                    "failed to build NETWORK_CREDENTIALS response packet"
                 );
             }
         }
@@ -688,7 +825,7 @@ async fn handle_tun_actions(
 
 fn network_mtu_from_dict_data(dict_data: &[u8]) -> Option<usize> {
     let dict = Dictionary::deserialize(dict_data).ok()?;
-    dict.get_text("mtu")?.parse().ok()
+    dict.get_hex_u64("mtu")?.try_into().ok()
 }
 
 async fn configure_tun_from_dict_data(tun: &NativeTun, network_id: u64, dict_data: &[u8]) {

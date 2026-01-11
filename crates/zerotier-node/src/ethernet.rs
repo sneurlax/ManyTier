@@ -4,7 +4,6 @@
 /// MAC::fromAddress() from MAC.hpp. It uses XOR (not hashing) to produce
 /// deterministic, locally-administered unicast MACs from a ZeroTier address
 /// and network ID.
-
 extern crate alloc;
 
 /// Ethertype: IPv4
@@ -25,13 +24,23 @@ pub fn derive_mac(zt_address: &[u8; 5], network_id: u64) -> [u8; 6] {
     // First octet: locally-administered unicast
     let first = {
         let a = ((network_id as u8) & 0xfe) | 0x02;
-        if a == 0x52 { 0x32 } else { a }
+        if a == 0x52 {
+            0x32
+        } else {
+            a
+        }
     };
 
     // ZT address as u64 in lower 5 bytes
     let zt_val = u64::from_be_bytes([
-        0, 0, 0, zt_address[0], zt_address[1],
-        zt_address[2], zt_address[3], zt_address[4],
+        0,
+        0,
+        0,
+        zt_address[0],
+        zt_address[1],
+        zt_address[2],
+        zt_address[3],
+        zt_address[4],
     ]);
 
     // XOR network_id bytes into address bytes
@@ -168,7 +177,10 @@ mod tests {
     fn derive_mac_different_address_different_mac() {
         let mac1 = derive_mac(&[0x01, 0x02, 0x03, 0x04, 0x05], 0xff00000000abcdef);
         let mac2 = derive_mac(&[0x05, 0x04, 0x03, 0x02, 0x01], 0xff00000000abcdef);
-        assert_ne!(mac1, mac2, "different addresses must produce different MACs");
+        assert_ne!(
+            mac1, mac2,
+            "different addresses must produce different MACs"
+        );
     }
 
     // === EthernetFrame::parse tests ===

@@ -247,10 +247,7 @@ mod tests {
 
     #[test]
     fn serialize_tags_format() {
-        let tags = vec![
-            Tag { id: 1, value: 100 },
-            Tag { id: 2, value: 200 },
-        ];
+        let tags = vec![Tag { id: 1, value: 100 }, Tag { id: 2, value: 200 }];
         let network_id = 0xff00001234560001u64;
         let issued_to = [0xa0, 0xb1, 0xc2, 0xd3, 0xe4];
         let timestamp = 1000000u64;
@@ -271,15 +268,9 @@ mod tests {
             timestamp
         );
         // First tag: check id
-        assert_eq!(
-            u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
-            1
-        );
+        assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 1);
         // First tag: check value
-        assert_eq!(
-            u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
-            100
-        );
+        assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 100);
         // First tag: check issued_to
         assert_eq!(&bytes[24..29], &issued_to);
         // First tag: signature is stub zeros
@@ -310,15 +301,9 @@ mod tests {
         assert_eq!(bytes.len(), 125);
 
         // Check cap_id
-        assert_eq!(
-            u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
-            42
-        );
+        assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 42);
         // Check rule_count
-        assert_eq!(
-            u16::from_be_bytes(bytes[20..22].try_into().unwrap()),
-            1
-        );
+        assert_eq!(u16::from_be_bytes(bytes[20..22].try_into().unwrap()), 1);
         // Check rules
         assert_eq!(&bytes[22..24], &[0x01, 0x00]);
     }

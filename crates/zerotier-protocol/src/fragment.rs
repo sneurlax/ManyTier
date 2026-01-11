@@ -6,10 +6,11 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
 
-use crate::constants::ZT_MAX_PACKET_FRAGMENTS;
+use crate::constants::{FRAGMENT_INDICATOR, ZT_MAX_PACKET_FRAGMENTS, ZT_PROTO_MIN_FRAGMENT_LENGTH};
+use crate::header::PacketHeader;
 
 struct FragmentSlot {
     fragments: [Option<Vec<u8>>; ZT_MAX_PACKET_FRAGMENTS],
@@ -20,7 +21,7 @@ struct FragmentSlot {
 
 /// Reassembly buffer that collects packet fragments and returns complete packets.
 pub struct ReassemblyBuffer {
-    pending: HashMap<u64, FragmentSlot>,
+    pending: BTreeMap<u64, FragmentSlot>,
     max_pending: usize,
 }
 
@@ -28,7 +29,7 @@ impl ReassemblyBuffer {
     /// Create a new reassembly buffer with the given maximum pending entries.
     pub fn new(max_pending: usize) -> Self {
         ReassemblyBuffer {
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             max_pending,
         }
     }
@@ -102,6 +103,52 @@ impl ReassemblyBuffer {
         self.pending
             .retain(|_, slot| now_ms.saturating_sub(slot.created_at) < timeout_ms);
     }
+}
+
+/// Split a full ZeroTier packet into fragment packets that fit within `mtu`.
+///
+/// The fragment payloads are contiguous slices of the original packet bytes, so
+/// successful reassembly reconstructs the original packet verbatim.
+pub fn fragment_packet(packet: &[u8], mtu: usize) -> Option<Vec<Vec<u8>>> {
+    if packet.len() <= mtu {
+        return Some(alloc::vec![packet.to_vec()]);
+    }
+    if mtu <= ZT_PROTO_MIN_FRAGMENT_LENGTH {
+        return None;
+    }
+
+    let header = PacketHeader::from_bytes(packet)?;
+    let max_payload = mtu - ZT_PROTO_MIN_FRAGMENT_LENGTH;
+    if max_payload == 0 {
+        return None;
+    }
+
+    let total_fragments = (packet.len() + max_payload - 1) / max_payload;
+    if total_fragments == 0 || total_fragments > ZT_MAX_PACKET_FRAGMENTS {
+        return None;
+    }
+
+    let packet_id = header.packet_id();
+    let dest = header.dest_address();
+    let hops = header.hops();
+
+    let mut fragments = Vec::with_capacity(total_fragments);
+    for fragment_number in 0..total_fragments {
+        let start = fragment_number * max_payload;
+        let end = core::cmp::min(start + max_payload, packet.len());
+        let payload = &packet[start..end];
+
+        let mut fragment = Vec::with_capacity(ZT_PROTO_MIN_FRAGMENT_LENGTH + payload.len());
+        fragment.extend_from_slice(&packet_id.to_be_bytes());
+        fragment.extend_from_slice(&dest);
+        fragment.push(FRAGMENT_INDICATOR);
+        fragment.push(((total_fragments as u8) << 4) | fragment_number as u8);
+        fragment.push(hops);
+        fragment.extend_from_slice(payload);
+        fragments.push(fragment);
+    }
+
+    Some(fragments)
 }
 
 #[cfg(test)]
@@ -215,5 +262,63 @@ mod tests {
         let r2 = buf.insert(2, 1, 2, vec![0x0B], 100);
         assert_eq!(r1.unwrap(), vec![0x01, 0x02]);
         assert_eq!(r2.unwrap(), vec![0x0A, 0x0B]);
+    }
+
+    fn make_packet(payload_len: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; 28 + payload_len];
+        packet[0..8].copy_from_slice(&0x1122334455667788u64.to_be_bytes());
+        packet[8..13].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+        packet[13..18].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]);
+        packet[18] = 0b0000_0011; // hops=3
+        packet[27] = 0x07; // EXT_FRAME
+        for (i, byte) in packet[28..].iter_mut().enumerate() {
+            *byte = (i & 0xff) as u8;
+        }
+        packet
+    }
+
+    #[test]
+    fn fragment_packet_returns_original_when_under_mtu() {
+        let packet = make_packet(32);
+        let fragments = fragment_packet(&packet, 128).unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0], packet);
+    }
+
+    #[test]
+    fn fragment_packet_splits_and_sets_headers() {
+        let packet = make_packet(64);
+        let fragments = fragment_packet(&packet, 40).unwrap();
+        assert_eq!(fragments.len(), 4);
+
+        for (idx, fragment) in fragments.iter().enumerate() {
+            assert_eq!(&fragment[0..8], &0x1122334455667788u64.to_be_bytes());
+            assert_eq!(&fragment[8..13], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+            assert_eq!(fragment[13], FRAGMENT_INDICATOR);
+            assert_eq!(fragment[14] >> 4, 4);
+            assert_eq!(fragment[14] & 0x0f, idx as u8);
+            assert_eq!(fragment[15], 3);
+            assert!(fragment.len() <= 40);
+        }
+    }
+
+    #[test]
+    fn fragment_packet_roundtrips_through_reassembly() {
+        let packet = make_packet(96);
+        let fragments = fragment_packet(&packet, 48).unwrap();
+        let mut reassembly = ReassemblyBuffer::new(8);
+        let mut reassembled = None;
+
+        for fragment in fragments.into_iter().rev() {
+            reassembled = reassembly.insert(
+                0x1122334455667788,
+                fragment[14] & 0x0f,
+                fragment[14] >> 4,
+                fragment[16..].to_vec(),
+                100,
+            );
+        }
+
+        assert_eq!(reassembled.unwrap(), packet);
     }
 }

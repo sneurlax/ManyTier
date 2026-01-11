@@ -21,7 +21,8 @@ use crate::storage::SqliteStorage;
 pub struct AppState {
     pub node: Arc<Mutex<zerotier_node::node::Node>>,
     pub auth_token: String,
-    pub controller: Option<Arc<Mutex<zerotier_node::controller::engine::Controller<SqliteStorage>>>>,
+    pub controller:
+        Option<Arc<Mutex<zerotier_node::controller::engine::Controller<SqliteStorage>>>>,
 }
 
 /// Build the axum router with all service API routes and auth middleware.
@@ -30,8 +31,8 @@ pub struct AppState {
 /// - GET /status     -> node status
 /// - GET /peer       -> list peers
 /// - GET /network    -> list joined networks
-/// - POST /network/{id}   -> join network
-/// - DELETE /network/{id} -> leave network
+/// - POST /network/:id   -> join network
+/// - DELETE /network/:id -> leave network
 /// - /controller/*   -> controller network/member CRUD
 ///
 /// All routes are gated by the auth middleware.
@@ -41,7 +42,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/peer", axum::routing::get(peer::list_peers))
         .route("/network", axum::routing::get(network::list_networks))
         .route(
-            "/network/{id}",
+            "/network/:id",
             axum::routing::post(network::join_network).delete(network::leave_network),
         )
         .nest("/controller", controller::controller_routes())

@@ -1,9 +1,9 @@
 // OK verb payload codec.
 
-use alloc::vec::Vec;
 use crate::error::ProtocolError;
 use crate::identity_wire;
 use crate::verb::Verb;
+use alloc::vec::Vec;
 use zerotier_crypto::identity::Identity;
 
 #[derive(Debug)]
@@ -25,13 +25,9 @@ pub enum OkSubPayload {
         world_update: Option<Vec<u8>>,
     },
     /// OK response to WHOIS.
-    Whois {
-        identities: Vec<Identity>,
-    },
+    Whois { identities: Vec<Identity> },
     /// Generic OK for verbs where we don't parse the sub-payload.
-    Generic {
-        data: Vec<u8>,
-    },
+    Generic { data: Vec<u8> },
 }
 
 impl OkPayload {
@@ -93,11 +89,9 @@ impl OkPayload {
             });
         }
 
-        let in_re_verb = Verb::from_byte(data[0])
-            .ok_or(ProtocolError::InvalidVerb(data[0]))?;
+        let in_re_verb = Verb::from_byte(data[0]).ok_or(ProtocolError::InvalidVerb(data[0]))?;
         let in_re_packet_id = u64::from_be_bytes([
-            data[1], data[2], data[3], data[4],
-            data[5], data[6], data[7], data[8],
+            data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
         ]);
 
         let sub_data = &data[9..];
@@ -111,8 +105,14 @@ impl OkPayload {
                     });
                 }
                 let timestamp_echo = u64::from_be_bytes([
-                    sub_data[0], sub_data[1], sub_data[2], sub_data[3],
-                    sub_data[4], sub_data[5], sub_data[6], sub_data[7],
+                    sub_data[0],
+                    sub_data[1],
+                    sub_data[2],
+                    sub_data[3],
+                    sub_data[4],
+                    sub_data[5],
+                    sub_data[6],
+                    sub_data[7],
                 ]);
                 let protocol_version = sub_data[8];
                 let major_version = sub_data[9];
@@ -142,11 +142,9 @@ impl OkPayload {
                 }
                 OkSubPayload::Whois { identities }
             }
-            _ => {
-                OkSubPayload::Generic {
-                    data: sub_data.to_vec(),
-                }
-            }
+            _ => OkSubPayload::Generic {
+                data: sub_data.to_vec(),
+            },
         };
 
         Ok(Self {
@@ -266,10 +264,15 @@ mod tests {
         // Header: verb (1) + packet_id (8) + sub-payload (13) = 22
         assert_eq!(n, 22);
         assert_eq!(buf[0], Verb::Hello.to_byte()); // in_re_verb
-        assert_eq!(&buf[1..9], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(
+            &buf[1..9],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
         // timestamp echo at 9..17
         assert_eq!(
-            u64::from_be_bytes([buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15], buf[16]]),
+            u64::from_be_bytes([
+                buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15], buf[16]
+            ]),
             0x1112131415161718
         );
         assert_eq!(buf[17], 13); // protocol version

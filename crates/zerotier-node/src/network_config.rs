@@ -1,3 +1,4 @@
+extern crate alloc;
 /// Static network configuration deserialization from JSON.
 ///
 /// This module is gated behind `#[cfg(feature = "native")]` since it uses
@@ -6,9 +7,7 @@
 ///
 /// Used for test setups and static network configurations where no controller
 /// is available (e.g., Shadow VL2 tests with pre-generated configs).
-
 extern crate std;
-extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -132,8 +131,12 @@ fn parse_ipv4_cidr(s: &str) -> Result<(Ipv4Addr, u8), ConfigError> {
     if parts.len() != 2 {
         return Err(ConfigError::InvalidIp(s.into()));
     }
-    let ip: Ipv4Addr = parts[0].parse().map_err(|_| ConfigError::InvalidIp(s.into()))?;
-    let prefix: u8 = parts[1].parse().map_err(|_| ConfigError::InvalidIp(s.into()))?;
+    let ip: Ipv4Addr = parts[0]
+        .parse()
+        .map_err(|_| ConfigError::InvalidIp(s.into()))?;
+    let prefix: u8 = parts[1]
+        .parse()
+        .map_err(|_| ConfigError::InvalidIp(s.into()))?;
     Ok((ip, prefix))
 }
 
@@ -142,8 +145,12 @@ fn parse_ipv6_cidr(s: &str) -> Result<(Ipv6Addr, u8), ConfigError> {
     if parts.len() != 2 {
         return Err(ConfigError::InvalidIp(s.into()));
     }
-    let ip: Ipv6Addr = parts[0].parse().map_err(|_| ConfigError::InvalidIp(s.into()))?;
-    let prefix: u8 = parts[1].parse().map_err(|_| ConfigError::InvalidIp(s.into()))?;
+    let ip: Ipv6Addr = parts[0]
+        .parse()
+        .map_err(|_| ConfigError::InvalidIp(s.into()))?;
+    let prefix: u8 = parts[1]
+        .parse()
+        .map_err(|_| ConfigError::InvalidIp(s.into()))?;
     Ok((ip, prefix))
 }
 
@@ -174,7 +181,7 @@ impl NetworkMembership {
             });
 
             if let Some(member_com_cfg) = &mc.com {
-                let member_com = parse_static_com(member_com_cfg)?;
+                let member_com = parse_static_com(member_com_cfg, &zt_address)?;
                 if &zt_address == our_zt_address {
                     our_com = Some(member_com);
                 } else {
@@ -184,7 +191,7 @@ impl NetworkMembership {
         }
 
         if our_com.is_none() {
-            our_com = Some(parse_static_com(&config.com)?);
+            our_com = Some(parse_static_com(&config.com, our_zt_address)?);
         }
 
         let routes = config
@@ -201,21 +208,27 @@ impl NetworkMembership {
             our_com,
             peer_coms,
             mtu: config.mtu,
+            assigned_ipv4: None, // Will be filled by apply_network_config if needed
+            assigned_ipv6: None,
             routes,
+            pending_config_request: false,
             last_config_request: 0,
+            last_multicast_like: 0,
+            last_multicast_gather: 0,
         })
     }
 }
 
-fn parse_static_com(config: &StaticComConfig) -> Result<CertificateOfMembership, ConfigError> {
+fn parse_static_com(
+    config: &StaticComConfig,
+    issued_to: &[u8; 5],
+) -> Result<CertificateOfMembership, ConfigError> {
     let mut qualifiers = Vec::new();
     for qc in &config.qualifiers {
         let value = match &qc.value {
             serde_json::Value::Number(n) => n.as_u64().unwrap_or(0),
-            serde_json::Value::String(s) => {
-                u64::from_str_radix(s.as_str(), 16)
-                    .map_err(|_| ConfigError::InvalidHex(s.clone()))?
-            }
+            serde_json::Value::String(s) => u64::from_str_radix(s.as_str(), 16)
+                .map_err(|_| ConfigError::InvalidHex(s.clone()))?,
             _ => 0,
         };
         qualifiers.push(ComQualifier {
@@ -232,6 +245,7 @@ fn parse_static_com(config: &StaticComConfig) -> Result<CertificateOfMembership,
     signature[..copy_len].copy_from_slice(&sig_bytes[..copy_len]);
 
     Ok(CertificateOfMembership {
+        issued_to: *issued_to,
         qualifiers,
         signer_address,
         signature,
@@ -308,7 +322,8 @@ mod tests {
         assert!(m1.authorized);
 
         // Verify MAC was derived
-        let expected_mac = ethernet::derive_mac(&[0xa0, 0xb1, 0xc2, 0xd3, 0xe4], 0xff00000000abcdef);
+        let expected_mac =
+            ethernet::derive_mac(&[0xa0, 0xb1, 0xc2, 0xd3, 0xe4], 0xff00000000abcdef);
         assert_eq!(m1.mac, expected_mac);
     }
 
@@ -324,7 +339,9 @@ mod tests {
         assert_eq!(found.unwrap().zt_address, [0xa0, 0xb1, 0xc2, 0xd3, 0xe4]);
 
         // IPv4 not found
-        assert!(membership.lookup_ipv4(Ipv4Addr::new(10, 0, 0, 99)).is_none());
+        assert!(membership
+            .lookup_ipv4(Ipv4Addr::new(10, 0, 0, 99))
+            .is_none());
 
         // MAC lookup
         let mac = ethernet::derive_mac(&[0xf0, 0xe1, 0xd2, 0xc3, 0xb4], 0xff00000000abcdef);
@@ -399,7 +416,9 @@ mod tests {
         let config = load_from_json(config_json).unwrap();
         let our_addr = [0xf0, 0xe1, 0xd2, 0xc3, 0xb4];
         let membership = NetworkMembership::from_static_config(&config, &our_addr).unwrap();
-        let our_com = membership.our_com.expect("expected our member-specific COM");
+        let our_com = membership
+            .our_com
+            .expect("expected our member-specific COM");
 
         let issued_to = our_com
             .qualifiers

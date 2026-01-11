@@ -34,9 +34,7 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> Json<Vec<PeerResp
                 .collect();
 
             let latency = match &peer.state {
-                zerotier_node::peer::PeerState::Active { latency_ms, .. } => {
-                    *latency_ms as i64
-                }
+                zerotier_node::peer::PeerState::Active { latency_ms, .. } => *latency_ms as i64,
                 _ => -1,
             };
 

@@ -1,7 +1,7 @@
 use std::net::IpAddr;
+use std::sync::{Mutex as StdMutex, OnceLock};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tun2::AbstractDevice;
 use zerotier_node::traits::TunDevice;
 
@@ -11,7 +11,9 @@ use zerotier_node::traits::TunDevice;
 
 #[cfg(target_os = "linux")]
 pub struct NativeTun {
-    device: Mutex<tun2::AsyncDevice>,
+    control: StdMutex<Option<tun2::AsyncDevice>>,
+    reader: OnceLock<tokio::sync::Mutex<ReadHalf<tun2::AsyncDevice>>>,
+    writer: OnceLock<tokio::sync::Mutex<WriteHalf<tun2::AsyncDevice>>>,
     name: String,
     mtu: usize,
 }
@@ -32,20 +34,30 @@ impl TunDevice for NativeTun {
             .unwrap_or_else(|_| name.to_string());
 
         Ok(NativeTun {
-            device: Mutex::new(device),
+            control: StdMutex::new(Some(device)),
+            reader: OnceLock::new(),
+            writer: OnceLock::new(),
             name: actual_name,
             mtu,
         })
     }
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let mut device = self.device.lock().await;
-        device.read(buf).await
+        self.ensure_halves()?;
+        let reader = self.reader.get().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "TUN reader unavailable")
+        })?;
+        let mut reader = reader.lock().await;
+        reader.read(buf).await
     }
 
     async fn write(&self, data: &[u8]) -> Result<usize, Self::Error> {
-        let mut device = self.device.lock().await;
-        device.write(data).await
+        self.ensure_halves()?;
+        let writer = self.writer.get().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "TUN writer unavailable")
+        })?;
+        let mut writer = writer.lock().await;
+        writer.write(data).await
     }
 
     fn mtu(&self) -> usize {
@@ -57,7 +69,15 @@ impl TunDevice for NativeTun {
     }
 
     async fn set_ip(&self, addr: IpAddr, prefix_len: u8) -> Result<(), Self::Error> {
-        let mut device = self.device.lock().await;
+        let mut control = self.control.lock().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "TUN control lock poisoned")
+        })?;
+        let device = control.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "cannot configure TUN after I/O has started",
+            )
+        })?;
         device.as_mut().set_address(addr)?;
 
         if let IpAddr::V4(_) = addr {
@@ -74,11 +94,7 @@ impl TunDevice for NativeTun {
         Ok(())
     }
 
-    async fn add_route(
-        &self,
-        target: &str,
-        gateway: Option<IpAddr>,
-    ) -> Result<(), Self::Error> {
+    async fn add_route(&self, target: &str, gateway: Option<IpAddr>) -> Result<(), Self::Error> {
         // Validate CIDR notation
         let parts: Vec<&str> = target.split('/').collect();
         if parts.len() != 2 {
@@ -116,6 +132,30 @@ impl TunDevice for NativeTun {
         })
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl NativeTun {
+    fn ensure_halves(&self) -> Result<(), std::io::Error> {
+        if self.reader.get().is_some() && self.writer.get().is_some() {
+            return Ok(());
+        }
+
+        let mut control = self.control.lock().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "TUN control lock poisoned")
+        })?;
+
+        if self.reader.get().is_none() || self.writer.get().is_none() {
+            let device = control.take().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "TUN runtime already taken")
+            })?;
+            let (reader, writer) = tokio::io::split(device);
+            let _ = self.reader.set(tokio::sync::Mutex::new(reader));
+            let _ = self.writer.set(tokio::sync::Mutex::new(writer));
+        }
+
+        Ok(())
     }
 }
 
@@ -168,11 +208,7 @@ impl TunDevice for NativeTun {
         ))
     }
 
-    async fn add_route(
-        &self,
-        _target: &str,
-        _gateway: Option<IpAddr>,
-    ) -> Result<(), Self::Error> {
+    async fn add_route(&self, _target: &str, _gateway: Option<IpAddr>) -> Result<(), Self::Error> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "macOS TUN not supported",

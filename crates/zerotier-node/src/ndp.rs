@@ -5,7 +5,6 @@
 /// - RS (133) -> RA (134) with prefix information option
 /// - DAD (NS from ::) -> NA with override flag
 /// - RA (134), NA (136), Redirect (137) -> Ignore (informational)
-
 extern crate alloc;
 
 use alloc::vec::Vec;
@@ -176,7 +175,7 @@ pub fn build_ra(
     buf.push(4); // Length = 4 (in units of 8 bytes = 32 bytes)
     buf.push(prefix_len); // Prefix length
     buf.push(0xC0); // Flags: L(0x80) + A(0x40)
-    // Valid Lifetime = 86400 seconds (1 day)
+                    // Valid Lifetime = 86400 seconds (1 day)
     buf.extend_from_slice(&86400u32.to_be_bytes());
     // Preferred Lifetime = 14400 seconds (4 hours)
     buf.extend_from_slice(&14400u32.to_be_bytes());
@@ -269,7 +268,14 @@ fn handle_ns(
         *src_ip
     };
 
-    let na = build_na(&target_bytes, &member.mac, solicited, override_flag, &reply_src, &reply_dst);
+    let na = build_na(
+        &target_bytes,
+        &member.mac,
+        solicited,
+        override_flag,
+        &reply_src,
+        &reply_dst,
+    );
     NdpAction::Reply(na)
 }
 
@@ -278,7 +284,6 @@ fn handle_rs(
     _dst_ip: &[u8; 16],
     _our_mac: &[u8; 6],
     our_ipv6_prefix: Option<(Ipv6Addr, u8)>,
-
 ) -> NdpAction {
     let (prefix_addr, prefix_len) = match our_ipv6_prefix {
         Some((addr, len)) => (addr, len),
@@ -336,19 +341,19 @@ mod tests {
     fn make_ns(target_ip: &[u8; 16]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(24);
         buf.push(ICMPV6_NS); // Type
-        buf.push(0);          // Code
-        buf.push(0);          // Checksum (placeholder)
+        buf.push(0); // Code
+        buf.push(0); // Checksum (placeholder)
         buf.push(0);
         buf.extend_from_slice(&[0u8; 4]); // Reserved
-        buf.extend_from_slice(target_ip);  // Target address
+        buf.extend_from_slice(target_ip); // Target address
         buf
     }
 
     fn make_rs() -> Vec<u8> {
         let mut buf = Vec::with_capacity(8);
         buf.push(ICMPV6_RS); // Type
-        buf.push(0);          // Code
-        buf.push(0);          // Checksum
+        buf.push(0); // Code
+        buf.push(0); // Checksum
         buf.push(0);
         buf.extend_from_slice(&[0u8; 4]); // Reserved
         buf
@@ -381,7 +386,11 @@ mod tests {
         // Verify: checksum over the complete message (with checksum field included)
         // should produce 0 (or 0xFFFF which folds to 0).
         let verify = icmpv6_checksum(&src, &dst, &na);
-        assert!(verify == 0 || verify == 0xFFFF, "checksum verification failed: {:#06x}", verify);
+        assert!(
+            verify == 0 || verify == 0xFFFF,
+            "checksum verification failed: {:#06x}",
+            verify
+        );
     }
 
     #[test]
@@ -393,7 +402,11 @@ mod tests {
         let ra = build_ra(&src, &dst, &prefix, 64);
 
         let verify = icmpv6_checksum(&src, &dst, &ra);
-        assert!(verify == 0 || verify == 0xFFFF, "RA checksum verification failed: {:#06x}", verify);
+        assert!(
+            verify == 0 || verify == 0xFFFF,
+            "RA checksum verification failed: {:#06x}",
+            verify
+        );
     }
 
     // === Neighbor Solicitation -> Neighbor Advertisement tests ===
@@ -484,7 +497,14 @@ mod tests {
         let src_ip = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
         let dst_ip = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
 
-        let result = handle_ndp(&rs, &src_ip, &dst_ip, &membership, &our_mac, Some((prefix, 64)));
+        let result = handle_ndp(
+            &rs,
+            &src_ip,
+            &dst_ip,
+            &membership,
+            &our_mac,
+            Some((prefix, 64)),
+        );
 
         match result {
             NdpAction::Reply(ra) => {
@@ -608,8 +628,11 @@ mod tests {
         if let NdpAction::Reply(na) = result {
             // The NA reply uses target_bytes as src and src_ip as dst for checksum
             let verify = icmpv6_checksum(&target_bytes, &src_ip, &na);
-            assert!(verify == 0 || verify == 0xFFFF,
-                "NA checksum should validate: {:#06x}", verify);
+            assert!(
+                verify == 0 || verify == 0xFFFF,
+                "NA checksum should validate: {:#06x}",
+                verify
+            );
         }
     }
 
@@ -622,15 +645,25 @@ mod tests {
         let src_ip = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
         let dst_ip = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
 
-        let result = handle_ndp(&rs, &src_ip, &dst_ip, &membership, &[0; 6], Some((prefix, 64)));
+        let result = handle_ndp(
+            &rs,
+            &src_ip,
+            &dst_ip,
+            &membership,
+            &[0; 6],
+            Some((prefix, 64)),
+        );
 
         if let NdpAction::Reply(ra) = result {
             // RA uses fe80::1 as src and ff02::1 as dst
             let ra_src = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
             let ra_dst = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
             let verify = icmpv6_checksum(&ra_src, &ra_dst, &ra);
-            assert!(verify == 0 || verify == 0xFFFF,
-                "RA checksum should validate: {:#06x}", verify);
+            assert!(
+                verify == 0 || verify == 0xFFFF,
+                "RA checksum should validate: {:#06x}",
+                verify
+            );
         }
     }
 }

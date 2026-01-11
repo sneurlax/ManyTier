@@ -59,14 +59,18 @@ impl rand_core::RngCore for TestRng {
             i += to_copy;
         }
     }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dest);
+        Ok(())
+    }
 }
 
 #[test]
 #[ignore] // Requires network access to official ZeroTier root servers
 fn test_default_planet_parses_with_real_roots() {
     // Parse the embedded official planet binary
-    let world =
-        World::deserialize(DEFAULT_PLANET).expect("DEFAULT_PLANET must parse");
+    let world = World::deserialize(DEFAULT_PLANET).expect("DEFAULT_PLANET must parse");
 
     assert_eq!(world.world_type, WorldType::Planet);
     assert_eq!(world.id, WORLD_ID_EARTH);
@@ -74,10 +78,7 @@ fn test_default_planet_parses_with_real_roots() {
 
     // Verify each root has a valid identity and reachable endpoints
     for root in &world.roots {
-        assert!(
-            !root.endpoints.is_empty(),
-            "root must have endpoints"
-        );
+        assert!(!root.endpoints.is_empty(), "root must have endpoints");
     }
 }
 
@@ -86,15 +87,13 @@ fn test_default_planet_parses_with_real_roots() {
 fn test_official_root_hello_exchange() {
     // 1. Generate a fresh identity for this test
     let mut rng = TestRng::from_time();
-    let identity =
-        Identity::generate(&mut rng).expect("identity generation must succeed");
+    let identity = Identity::generate(&mut rng).expect("identity generation must succeed");
 
     // Save our address before moving identity into Node (Identity is not Clone)
     let our_address = *identity.address.as_bytes();
 
     // 2. Create a Node from the planet data
-    let mut node = Node::new(identity, DEFAULT_PLANET)
-        .expect("Node creation must succeed");
+    let mut node = Node::new(identity, DEFAULT_PLANET, 1).expect("Node creation must succeed");
 
     // 3. Bootstrap -- get HELLO packets for all roots
     let now_ms = SystemTime::now()
@@ -109,8 +108,7 @@ fn test_official_root_hello_exchange() {
     );
 
     // 4. Bind a UDP socket and send HELLO to each root
-    let socket =
-        UdpSocket::bind("0.0.0.0:0").expect("must bind UDP socket");
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("must bind UDP socket");
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("must set read timeout");
@@ -120,16 +118,10 @@ fn test_official_root_hello_exchange() {
     for action in &actions {
         match action {
             NodeAction::SendTo { data, address } => {
-                eprintln!(
-                    "Sending HELLO ({} bytes) to {}",
-                    data.len(),
-                    address
-                );
+                eprintln!("Sending HELLO ({} bytes) to {}", data.len(), address);
 
                 // Send the HELLO packet
-                socket
-                    .send_to(data, address)
-                    .expect("must send HELLO");
+                socket.send_to(data, address).expect("must send HELLO");
 
                 // Wait for response
                 let mut buf = [0u8; 4096];
@@ -138,21 +130,15 @@ fn test_official_root_hello_exchange() {
                         eprintln!("Received {} bytes from {}", n, from);
 
                         // Validate response is a valid packet
-                        assert!(
-                            n >= 28,
-                            "response must be at least 28 bytes (got {})",
-                            n
-                        );
+                        assert!(n >= 28, "response must be at least 28 bytes (got {})", n);
 
                         // Check it's not a fragment
-                        assert!(
-                            !is_fragment(&buf[..n]),
-                            "response should not be a fragment"
-                        );
+                        assert!(!is_fragment(&buf[..n]), "response should not be a fragment");
 
                         // Parse the header
                         let header = PacketHeader::from_bytes(&buf[..n])
                             .expect("response must parse as PacketHeader");
+                        let source = header.source_address();
 
                         // Verify it's addressed to us
                         assert_eq!(
@@ -166,24 +152,28 @@ fn test_official_root_hello_exchange() {
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
                             .as_millis() as u64;
-                        let response_actions = node.receive_packet(
-                            &mut buf[..n],
-                            from,
-                            response_now,
-                        );
+                        let response_actions =
+                            node.receive_packet(&mut buf[..n], from, response_now);
+                        let session_established = node
+                            .topology
+                            .get_peer(&source)
+                            .and_then(|peer| peer.shared_secret())
+                            .is_some();
 
                         eprintln!(
-                            "Response processed, {} follow-up actions",
-                            response_actions.len()
+                            "Response processed, {} follow-up actions, session_established={}",
+                            response_actions.len(),
+                            session_established
+                        );
+                        assert!(
+                            session_established,
+                            "official root response must establish a usable peer session"
                         );
                         got_response = true;
                         break; // One successful exchange is enough
                     }
                     Err(e) => {
-                        eprintln!(
-                            "No response from {}: {} (trying next root)",
-                            address, e
-                        );
+                        eprintln!("No response from {}: {} (trying next root)", address, e);
                         continue;
                     }
                 }
@@ -211,14 +201,11 @@ fn test_official_root_whois() {
     // If this test fails, check network connectivity first.
 
     let mut rng = TestRng::from_time();
-    let identity =
-        Identity::generate(&mut rng).expect("identity generation must succeed");
+    let identity = Identity::generate(&mut rng).expect("identity generation must succeed");
 
-    let mut node = Node::new(identity, DEFAULT_PLANET)
-        .expect("Node creation must succeed");
+    let mut node = Node::new(identity, DEFAULT_PLANET, 1).expect("Node creation must succeed");
 
-    let socket =
-        UdpSocket::bind("0.0.0.0:0").expect("must bind UDP socket");
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("must bind UDP socket");
     socket
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("must set read timeout");
@@ -244,15 +231,24 @@ fn test_official_root_whois() {
     for _ in 0..5 {
         match socket.recv_from(&mut buf) {
             Ok((n, from)) => {
-                let actions =
-                    node.receive_packet(&mut buf[..n], from, now_ms());
+                let source = PacketHeader::from_bytes(&buf[..n])
+                    .expect("root reply must parse as a packet")
+                    .source_address();
+                let actions = node.receive_packet(&mut buf[..n], from, now_ms());
                 // Process any follow-up actions
                 for action in &actions {
                     if let NodeAction::SendTo { data, address } = action {
                         let _ = socket.send_to(data, address);
                     }
                 }
-                session_established = true;
+                session_established = node
+                    .topology
+                    .get_peer(&source)
+                    .and_then(|peer| peer.shared_secret())
+                    .is_some();
+                if session_established {
+                    break;
+                }
             }
             Err(_) => continue,
         }
@@ -267,7 +263,5 @@ fn test_official_root_whois() {
     // Session establishment validates the HELLO wire format is accepted
     // by official roots. Full WHOIS query depends on the node's WHOIS
     // building being wired up. This validates up to session establishment.
-    eprintln!(
-        "WHOIS test: session established, wire format validated by root accepting our HELLO"
-    );
+    eprintln!("WHOIS test: session established, wire format validated by root accepting our HELLO");
 }

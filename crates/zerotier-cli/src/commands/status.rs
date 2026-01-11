@@ -15,9 +15,6 @@ pub async fn run(auth_token: &str, port: u16) -> anyhow::Result<()> {
         "  version: {}",
         status["version"].as_str().unwrap_or("unknown")
     );
-    println!(
-        "  online: {}",
-        status["online"].as_bool().unwrap_or(false)
-    );
+    println!("  online: {}", status["online"].as_bool().unwrap_or(false));
     Ok(())
 }

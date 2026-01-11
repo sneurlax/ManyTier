@@ -2,19 +2,21 @@
 ///
 /// This module connects the VL2 components (network membership, COM verification,
 /// ARP/NDP interception, multicast) into the Node's receive/dispatch path.
-
 extern crate alloc;
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
 use zerotier_crypto::salsa;
 use zerotier_protocol::constants::CIPHER_SUITE_C25519_POLY1305_SALSA2012;
+use zerotier_protocol::fragment::fragment_packet;
 use zerotier_protocol::verb::Verb;
 use zerotier_protocol::verbs::frame::{ExtFramePayload, FramePayload};
 use zerotier_protocol::verbs::multicast::{
     MulticastFramePayload, MulticastGatherPayload, MulticastLikePayload,
 };
+use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
 
 use crate::arp;
 use crate::ethernet;
@@ -23,36 +25,73 @@ use crate::node::{Node, NodeAction};
 /// Build a complete ZT packet containing an EXT_FRAME verb payload.
 ///
 /// Returns the armored packet bytes ready to send, or None on error.
+pub(crate) fn build_encrypted_verb_packet(
+    packet_id: u64,
+    our_address: &[u8; 5],
+    dest_address: &[u8; 5],
+    verb: Verb,
+    payload: &[u8],
+    shared_secret: &[u8; 32],
+) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 28 + payload.len()];
+
+    buf[0..8].copy_from_slice(&packet_id.to_be_bytes());
+    buf[8..13].copy_from_slice(dest_address);
+    buf[13..18].copy_from_slice(our_address);
+    buf[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+    buf[19..27].copy_from_slice(&[0u8; 8]);
+    buf[27] = verb.to_byte();
+    buf[28..28 + payload.len()].copy_from_slice(payload);
+    let total_len = 28 + payload.len();
+
+    salsa::armor_packet(shared_secret, &mut buf[..total_len], true).ok()?;
+
+    buf.truncate(total_len);
+    Some(buf)
+}
+
 fn build_ext_frame_packet(
+    packet_id: u64,
     our_address: &[u8; 5],
     dest_address: &[u8; 5],
     ext: &ExtFramePayload<'_>,
     shared_secret: &[u8; 32],
 ) -> Option<Vec<u8>> {
-    let mut buf = [0u8; 2048];
+    let mut payload = vec![0u8; 23 + ext.payload.len()];
+    let payload_len = ext.serialize(&mut payload);
+    payload.truncate(payload_len);
+    build_encrypted_verb_packet(
+        packet_id,
+        our_address,
+        dest_address,
+        Verb::ExtFrame,
+        &payload,
+        shared_secret,
+    )
+}
 
-    // Packet ID (use a simple counter based on network_id + timestamp-ish)
-    let packet_id = ext.network_id;
-    buf[0..8].copy_from_slice(&packet_id.to_be_bytes());
-    // Destination ZT address
-    buf[8..13].copy_from_slice(dest_address);
-    // Source ZT address
-    buf[13..18].copy_from_slice(our_address);
-    // Cipher suite 1 (encrypted)
-    buf[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
-    // MAC placeholder
-    buf[19..27].copy_from_slice(&[0u8; 8]);
-    // Verb: EXT_FRAME
-    buf[27] = Verb::ExtFrame.to_byte();
-
-    // Serialize payload
-    let payload_len = ext.serialize(&mut buf[28..]);
-    let total_len = 28 + payload_len;
-
-    // Armor (encrypt + MAC)
-    salsa::armor_packet(shared_secret, &mut buf[..total_len], true).ok()?;
-
-    Some(buf[..total_len].to_vec())
+fn push_fragmented_send(
+    actions: &mut Vec<NodeAction>,
+    packet: Vec<u8>,
+    address: SocketAddr,
+    mtu: usize,
+) {
+    match fragment_packet(&packet, mtu) {
+        Some(fragments) => {
+            for data in fragments {
+                actions.push(NodeAction::SendTo { data, address });
+            }
+        }
+        None => {
+            tracing::warn!(
+                target: "manytier",
+                event = "fragmentation_failed",
+                pkt_len = packet.len(),
+                mtu,
+                "failed to fragment outbound packet"
+            );
+        }
+    }
 }
 
 /// Handle an inbound FRAME verb (0x06).
@@ -140,7 +179,7 @@ pub fn handle_ext_frame(
 /// Records multicast group subscriptions from the sender.
 pub fn handle_multicast_like(
     node: &mut Node,
-    _sender_address: &[u8; 5],
+    sender_address: &[u8; 5],
     payload_data: &[u8],
     now_ms: u64,
 ) {
@@ -149,17 +188,22 @@ pub fn handle_multicast_like(
         Err(_) => return,
     };
 
+    let mut network_ids = Vec::new();
     for group in &like.groups {
-        // The sender_address subscribes to this group
-        // Note: In ZeroTier, the address in each group tuple is the subscriber.
-        // MULTICAST_LIKE announces the sender's own subscriptions.
-        node.multicast_manager.subscribe(
-            group.network_id,
-            group.mac,
-            group.adi,
-            *_sender_address,
-            now_ms,
-        );
+        if !network_ids.contains(&group.network_id) {
+            network_ids.push(group.network_id);
+        }
+    }
+
+    for network_id in network_ids {
+        let groups: Vec<_> = like
+            .groups
+            .iter()
+            .filter(|group| group.network_id == network_id)
+            .cloned()
+            .collect();
+        node.multicast_manager
+            .replace_subscriptions(network_id, *sender_address, &groups, now_ms);
     }
 }
 
@@ -168,10 +212,11 @@ pub fn handle_multicast_like(
 /// Responds with known subscribers for the requested multicast group.
 pub fn handle_multicast_gather(
     node: &mut Node,
-    _sender_address: &[u8; 5],
+    sender_address: &[u8; 5],
     payload_data: &[u8],
     from: SocketAddr,
     _now_ms: u64,
+    in_re_packet_id: u64,
 ) {
     let gather = match MulticastGatherPayload::deserialize(payload_data) {
         Ok(g) => g,
@@ -179,12 +224,9 @@ pub fn handle_multicast_gather(
     };
 
     let limit = gather.gather_limit as usize;
-    let subscribers = node.multicast_manager.get_subscribers(
-        gather.network_id,
-        &gather.mac,
-        gather.adi,
-        limit,
-    );
+    let subscribers =
+        node.multicast_manager
+            .get_subscribers(gather.network_id, &gather.mac, gather.adi, limit);
 
     // Build OK(MULTICAST_GATHER) response with subscriber list.
     // Wire format: count(u32 BE) + repeated 5-byte ZT addresses.
@@ -196,8 +238,44 @@ pub fn handle_multicast_gather(
         response.extend_from_slice(addr);
     }
 
+    let ok = OkPayload {
+        in_re_verb: Verb::MulticastGather,
+        in_re_packet_id: in_re_packet_id,
+        sub_payload: OkSubPayload::Generic { data: response },
+    };
+    let mut payload = vec![0u8; 9 + response_len];
+    let payload_len = match ok.serialize(&mut payload) {
+        Ok(payload_len) => payload_len,
+        Err(_) => return,
+    };
+    payload.truncate(payload_len);
+
+    let shared_secret = match node.shared_secret_for_peer(sender_address) {
+        Some(secret) => secret,
+        None => return,
+    };
+    let packet_id = node.allocate_packet_id();
+    let our_address = *node.identity.address.as_bytes();
+    let packet = match build_encrypted_verb_packet(
+        packet_id,
+        &our_address,
+        sender_address,
+        Verb::Ok,
+        &payload,
+        &shared_secret,
+    ) {
+        Some(packet) => packet,
+        None => return,
+    };
+
+    tracing::debug!(
+        target: "manytier",
+        event = "multicast_gather_response_sent",
+        response_count = subscribers.len(),
+        "sent OK(MULTICAST_GATHER)"
+    );
     node.push_action(NodeAction::SendTo {
-        data: response,
+        data: packet,
         address: from,
     });
 }
@@ -258,6 +336,7 @@ pub fn process_outbound_frame(
     ethertype: u16,
     payload: &[u8],
     our_zt_address: &[u8; 5],
+    now_ms: u64,
 ) -> Vec<NodeAction> {
     let mut actions = Vec::new();
 
@@ -311,7 +390,7 @@ pub fn process_outbound_frame(
                 // We'd need to look up the target's physical address from topology.
                 // For now, push the frame data -- the caller resolves physical addresses.
                 if let Some(peer) = node.topology.get_peer(target_addr) {
-                    if let Some(path) = peer.best_path(0) {
+                    if let Some(path) = peer.best_path(now_ms) {
                         actions.push(NodeAction::SendTo {
                             data: buf[..n].to_vec(),
                             address: path.address,
@@ -323,48 +402,49 @@ pub fn process_outbound_frame(
         ethernet::ETHERTYPE_IPV4 => {
             // Look up destination IP -> member -> ZT address -> physical path
             if payload.len() >= 20 {
-                let dest_ip = core::net::Ipv4Addr::new(
-                    payload[16],
-                    payload[17],
-                    payload[18],
-                    payload[19],
-                );
+                let dest_ip =
+                    core::net::Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
                 if let Some(member) = network.lookup_ipv4(dest_ip) {
+                    let member_address = member.zt_address;
+                    let member_mac = member.mac;
+                    let mtu = network.mtu as usize;
                     let ext = ExtFramePayload {
                         network_id,
                         flags: 0,
-                        dest_mac: member.mac,
+                        dest_mac: member_mac,
                         src_mac: our_mac,
                         ethertype,
                         payload,
                     };
 
-                    if let Some(peer) = node.topology.get_peer(&member.zt_address) {
-                        if let Some(path) = peer.best_path(0) {
-                            if let Some(secret) = peer.shared_secret() {
-                                if let Some(pkt) = build_ext_frame_packet(
-                                    our_zt_address,
-                                    &member.zt_address,
-                                    &ext,
-                                    secret,
-                                ) {
-                                    tracing::info!(
-                                        target: "manytier",
-                                        event = "vl2_ext_frame_out",
-                                        dest_addr = %path.address,
-                                        pkt_len = pkt.len(),
-                                        "sending EXT_FRAME"
-                                    );
-                                    actions.push(NodeAction::SendTo {
-                                        data: pkt,
-                                        address: path.address,
-                                    });
-                                }
-                            }
+                    let path_and_secret =
+                        node.topology.get_peer(&member_address).and_then(|peer| {
+                            peer.best_path(now_ms).and_then(|path| {
+                                peer.shared_secret().map(|secret| (path.address, *secret))
+                            })
+                        });
+
+                    if let Some((path_address, shared_secret)) = path_and_secret {
+                        let packet_id = node.allocate_packet_id();
+                        if let Some(pkt) = build_ext_frame_packet(
+                            packet_id,
+                            our_zt_address,
+                            &member_address,
+                            &ext,
+                            &shared_secret,
+                        ) {
+                            tracing::info!(
+                                target: "manytier",
+                                event = "vl2_ext_frame_out",
+                                dest_addr = %path_address,
+                                pkt_len = pkt.len(),
+                                "sending EXT_FRAME"
+                            );
+                            push_fragmented_send(&mut actions, pkt, path_address, mtu);
                         }
                     } else {
                         actions.push(NodeAction::WhoisNeeded {
-                            addresses: alloc::vec![member.zt_address],
+                            addresses: alloc::vec![member_address],
                         });
                     }
                 }
@@ -377,34 +457,39 @@ pub fn process_outbound_frame(
                 dst_bytes.copy_from_slice(&payload[24..40]);
                 let dest_ip = core::net::Ipv6Addr::from(dst_bytes);
                 if let Some(member) = network.lookup_ipv6(dest_ip) {
+                    let member_address = member.zt_address;
+                    let member_mac = member.mac;
+                    let mtu = network.mtu as usize;
                     let ext = ExtFramePayload {
                         network_id,
                         flags: 0,
-                        dest_mac: member.mac,
+                        dest_mac: member_mac,
                         src_mac: our_mac,
                         ethertype,
                         payload,
                     };
 
-                    if let Some(peer) = node.topology.get_peer(&member.zt_address) {
-                        if let Some(path) = peer.best_path(0) {
-                            if let Some(secret) = peer.shared_secret() {
-                                if let Some(pkt) = build_ext_frame_packet(
-                                    our_zt_address,
-                                    &member.zt_address,
-                                    &ext,
-                                    secret,
-                                ) {
-                                    actions.push(NodeAction::SendTo {
-                                        data: pkt,
-                                        address: path.address,
-                                    });
-                                }
-                            }
+                    let path_and_secret =
+                        node.topology.get_peer(&member_address).and_then(|peer| {
+                            peer.best_path(now_ms).and_then(|path| {
+                                peer.shared_secret().map(|secret| (path.address, *secret))
+                            })
+                        });
+
+                    if let Some((path_address, shared_secret)) = path_and_secret {
+                        let packet_id = node.allocate_packet_id();
+                        if let Some(pkt) = build_ext_frame_packet(
+                            packet_id,
+                            our_zt_address,
+                            &member_address,
+                            &ext,
+                            &shared_secret,
+                        ) {
+                            push_fragmented_send(&mut actions, pkt, path_address, mtu);
                         }
                     } else {
                         actions.push(NodeAction::WhoisNeeded {
-                            addresses: alloc::vec![member.zt_address],
+                            addresses: alloc::vec![member_address],
                         });
                     }
                 }
@@ -422,7 +507,11 @@ pub fn process_outbound_frame(
 /// and if so verify it against our own COM.
 fn has_peer_com(network: &crate::network::NetworkMembership, peer_address: &[u8; 5]) -> bool {
     // Find the peer's COM in the network's stored COMs
-    if let Some((_, peer_com)) = network.peer_coms.iter().find(|(addr, _)| addr == peer_address) {
+    if let Some((_, peer_com)) = network
+        .peer_coms
+        .iter()
+        .find(|(addr, _)| addr == peer_address)
+    {
         network.verify_peer_com(peer_address, peer_com)
     } else {
         false
@@ -435,14 +524,20 @@ mod tests {
     use crate::ethernet;
     use crate::multicast::MulticastManager;
     use crate::network::{NetworkMember, NetworkMembership};
+    use crate::node::Node;
+    use crate::peer::PeerState;
     use alloc::vec;
-    use core::net::Ipv4Addr;
+    use core::net::{Ipv4Addr, SocketAddr};
+    use zerotier_crypto::identity::{Address, Identity, PublicKey};
+    use zerotier_protocol::inet_address::InetAddress;
     use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
+    use zerotier_protocol::world::{World, WorldRoot, WorldType};
 
     fn make_network_with_com(network_id: u64) -> NetworkMembership {
         let mut net = NetworkMembership::new(network_id, 2800);
         // Set up a COM for our node
         net.our_com = Some(CertificateOfMembership {
+            issued_to: [0; 5],
             qualifiers: vec![
                 ComQualifier {
                     id: 0,
@@ -463,6 +558,7 @@ mod tests {
 
     fn add_peer_com(net: &mut NetworkMembership, peer_addr: &[u8; 5]) {
         let com = CertificateOfMembership {
+            issued_to: [0; 5],
             qualifiers: vec![
                 ComQualifier {
                     id: 0,
@@ -479,6 +575,42 @@ mod tests {
             signature: [0; 96],
         };
         net.peer_coms.push((*peer_addr, com));
+    }
+
+    fn test_identity(addr_byte: u8) -> Identity {
+        let address = Address::new([0xa0, 0xb1, 0xc2, 0xd3, addr_byte]).unwrap();
+        let mut pk_bytes = [0u8; 64];
+        for (i, b) in pk_bytes.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_add(addr_byte);
+        }
+        let public_key = PublicKey::from_bytes(&pk_bytes).unwrap();
+        Identity {
+            address,
+            public_key,
+            secret: None,
+        }
+    }
+
+    fn make_synthetic_planet() -> Vec<u8> {
+        let root_id = test_identity(0xe0);
+        let world = World {
+            world_type: WorldType::Planet,
+            id: 149604618,
+            timestamp: 1000000,
+            signing_key: [0xAA; 64],
+            signature: [0xBB; 96],
+            roots: alloc::vec![WorldRoot {
+                identity: root_id,
+                endpoints: alloc::vec![InetAddress::V4 {
+                    ip: [192, 168, 1, 1],
+                    port: 9993,
+                }],
+            }],
+            dict_data: None,
+        };
+        let mut buf = [0u8; 2048];
+        let n = world.serialize(&mut buf).unwrap();
+        buf[..n].to_vec()
     }
 
     #[test]
@@ -533,13 +665,11 @@ mod tests {
 
         // Build MULTICAST_LIKE payload
         let like = MulticastLikePayload {
-            groups: vec![
-                zerotier_protocol::verbs::multicast::MulticastGroup {
-                    network_id,
-                    mac: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
-                    adi: 0x0806,
-                },
-            ],
+            groups: vec![zerotier_protocol::verbs::multicast::MulticastGroup {
+                network_id,
+                mac: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                adi: 0x0806,
+            }],
         };
         let mut buf = [0u8; 64];
         let n = like.serialize(&mut buf);
@@ -603,5 +733,58 @@ mod tests {
         let reply = reply.unwrap();
         assert_eq!(reply.operation, arp::ARP_OP_REPLY);
         assert_eq!(reply.sender_hw, peer_mac);
+    }
+
+    #[test]
+    fn outbound_frame_uses_live_backup_path_when_primary_expired() {
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(test_identity(0x01), &planet, 1).unwrap();
+        let peer_id = test_identity(0x42);
+        let peer_address = *peer_id.address.as_bytes();
+        let our_address = *node.identity.address.as_bytes();
+        let network_id = 0xff00000000abcdef_u64;
+
+        node.topology.add_peer(peer_id);
+        let peer = node.topology.get_peer_mut(&peer_address).unwrap();
+        let stale_primary: SocketAddr = "10.0.0.10:9993".parse().unwrap();
+        let live_backup: SocketAddr = "10.0.0.11:9993".parse().unwrap();
+        peer.add_path(stale_primary, true, 1000);
+        peer.add_path(live_backup, false, 999_900);
+        peer.state = PeerState::Active {
+            shared_secret: [0x55; 32],
+            latency_ms: 10,
+            last_receive: 999_900,
+            last_send: 999_900,
+        };
+
+        let mut membership = NetworkMembership::new(network_id, 2800);
+        membership.members.push(NetworkMember {
+            zt_address: peer_address,
+            mac: ethernet::derive_mac(&peer_address, network_id),
+            ipv4: Some((Ipv4Addr::new(10, 147, 20, 2), 24)),
+            ipv6: None,
+            authorized: true,
+        });
+        node.join_network(membership);
+
+        let mut ipv4_packet = [0u8; 20];
+        ipv4_packet[0] = 0x45;
+        ipv4_packet[16..20].copy_from_slice(&[10, 147, 20, 2]);
+
+        let actions = process_outbound_frame(
+            &mut node,
+            network_id,
+            ethernet::ETHERTYPE_IPV4,
+            &ipv4_packet,
+            &our_address,
+            1_000_000,
+        );
+
+        assert!(
+            actions.iter().any(
+                |action| matches!(action, NodeAction::SendTo { address, .. } if *address == live_backup)
+            ),
+            "outbound traffic should fail over to the live backup path"
+        );
     }
 }

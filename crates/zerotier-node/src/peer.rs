@@ -3,7 +3,6 @@
 /// A Peer tracks the identity, session state, and network paths for a remote
 /// ZeroTier node. Session establishment uses X25519 key agreement to derive
 /// a shared secret for packet encryption.
-
 extern crate alloc;
 
 use alloc::vec::Vec;
@@ -13,13 +12,19 @@ use zerotier_protocol::{ZT_PATH_HELLO_RATE_LIMIT, ZT_PEER_ACTIVITY_TIMEOUT, ZT_P
 
 use crate::path::Path;
 
+pub const HELLO_RETRY_BACKOFF_MAX_MS: u64 = 30_000;
+
 /// State machine for a peer's session lifecycle.
 #[derive(Debug)]
 pub enum PeerState {
     /// Known identity but no session yet.
     Unknown,
     /// HELLO sent, awaiting OK(HELLO).
-    HelloSent { sent_at: u64, packet_id: u64 },
+    HelloSent {
+        sent_at: u64,
+        packet_id: u64,
+        retry_backoff_ms: u64,
+    },
     /// Active session with shared secret.
     Active {
         shared_secret: [u8; 32],
@@ -28,7 +33,11 @@ pub enum PeerState {
         last_send: u64,
     },
     /// Timed out (no packets for ZT_PEER_ACTIVITY_TIMEOUT).
-    Stale { last_active: u64 },
+    Stale {
+        last_active: u64,
+        retry_backoff_ms: u64,
+        next_retry_at: u64,
+    },
 }
 
 /// A remote ZeroTier peer.
@@ -59,8 +68,7 @@ impl Peer {
         now_ms: u64,
     ) {
         let their_dh_pubkey = x25519_dalek::PublicKey::from(self.identity.public_key.dh);
-        let shared_secret =
-            zerotier_crypto::key_agreement::key_agree(our_secret, &their_dh_pubkey);
+        let shared_secret = zerotier_crypto::key_agreement::key_agree(our_secret, &their_dh_pubkey);
         self.state = PeerState::Active {
             shared_secret,
             latency_ms,
@@ -97,10 +105,58 @@ impl Peer {
                 now_ms.saturating_sub(*last_send) >= ZT_PEER_PING_PERIOD
             }
             PeerState::HelloSent { sent_at, .. } => {
-                // Retry HELLO every ZT_PATH_HELLO_RATE_LIMIT (1s)
-                now_ms.saturating_sub(*sent_at) >= ZT_PATH_HELLO_RATE_LIMIT
+                let retry_backoff_ms = match &self.state {
+                    PeerState::HelloSent {
+                        retry_backoff_ms, ..
+                    } => *retry_backoff_ms,
+                    _ => ZT_PATH_HELLO_RATE_LIMIT,
+                };
+                now_ms.saturating_sub(*sent_at) >= retry_backoff_ms
             }
             _ => false,
+        }
+    }
+
+    pub fn needs_reconnect(&self, now_ms: u64) -> bool {
+        match &self.state {
+            PeerState::Stale { next_retry_at, .. } => now_ms >= *next_retry_at,
+            _ => false,
+        }
+    }
+
+    pub fn on_hello_sent(&mut self, packet_id: u64, now_ms: u64) {
+        match &mut self.state {
+            PeerState::Active { last_send, .. } => {
+                *last_send = now_ms;
+            }
+            PeerState::HelloSent {
+                sent_at,
+                packet_id: stored_packet_id,
+                retry_backoff_ms,
+            } => {
+                *sent_at = now_ms;
+                *stored_packet_id = packet_id;
+                *retry_backoff_ms = retry_backoff_ms
+                    .saturating_mul(2)
+                    .clamp(ZT_PATH_HELLO_RATE_LIMIT, HELLO_RETRY_BACKOFF_MAX_MS);
+            }
+            PeerState::Stale {
+                retry_backoff_ms, ..
+            } => {
+                self.state = PeerState::HelloSent {
+                    sent_at: now_ms,
+                    packet_id,
+                    retry_backoff_ms: (*retry_backoff_ms)
+                        .clamp(ZT_PATH_HELLO_RATE_LIMIT, HELLO_RETRY_BACKOFF_MAX_MS),
+                };
+            }
+            PeerState::Unknown => {
+                self.state = PeerState::HelloSent {
+                    sent_at: now_ms,
+                    packet_id,
+                    retry_backoff_ms: ZT_PATH_HELLO_RATE_LIMIT,
+                };
+            }
         }
     }
 
@@ -143,6 +199,8 @@ impl Peer {
         if let PeerState::Active { last_receive, .. } = &self.state {
             self.state = PeerState::Stale {
                 last_active: *last_receive,
+                retry_backoff_ms: ZT_PATH_HELLO_RATE_LIMIT,
+                next_retry_at: _now_ms,
             };
         }
     }
@@ -233,6 +291,18 @@ mod tests {
     }
 
     #[test]
+    fn needs_ping_for_hello_sent_uses_backoff() {
+        let mut peer = stub_peer();
+        peer.state = PeerState::HelloSent {
+            sent_at: 1000,
+            packet_id: 1,
+            retry_backoff_ms: 4000,
+        };
+        assert!(!peer.needs_ping(4999));
+        assert!(peer.needs_ping(5000));
+    }
+
+    #[test]
     fn is_stale_when_no_recent_activity() {
         let mut peer = stub_peer();
         peer.state = PeerState::Active {
@@ -277,8 +347,41 @@ mod tests {
         };
         peer.mark_stale(600_000);
         match peer.state {
-            PeerState::Stale { last_active } => assert_eq!(last_active, 5000),
+            PeerState::Stale {
+                last_active,
+                retry_backoff_ms,
+                next_retry_at,
+            } => {
+                assert_eq!(last_active, 5000);
+                assert_eq!(retry_backoff_ms, ZT_PATH_HELLO_RATE_LIMIT);
+                assert_eq!(next_retry_at, 600_000);
+            }
             _ => panic!("expected Stale state"),
+        }
+    }
+
+    #[test]
+    fn on_hello_sent_doubles_backoff_for_retries() {
+        let mut peer = stub_peer();
+        peer.state = PeerState::HelloSent {
+            sent_at: 1000,
+            packet_id: 1,
+            retry_backoff_ms: ZT_PATH_HELLO_RATE_LIMIT,
+        };
+
+        peer.on_hello_sent(2, 2000);
+
+        match peer.state {
+            PeerState::HelloSent {
+                sent_at,
+                packet_id,
+                retry_backoff_ms,
+            } => {
+                assert_eq!(sent_at, 2000);
+                assert_eq!(packet_id, 2);
+                assert_eq!(retry_backoff_ms, ZT_PATH_HELLO_RATE_LIMIT * 2);
+            }
+            _ => panic!("expected HelloSent state"),
         }
     }
 

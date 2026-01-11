@@ -10,9 +10,6 @@ pub async fn run(auth_token: &str, port: u16, network_id: &str) -> anyhow::Resul
         .await?;
     let net: serde_json::Value = serde_json::from_str(&body)?;
     println!("200 join OK");
-    println!(
-        "  network: {}",
-        net["id"].as_str().unwrap_or(network_id)
-    );
+    println!("  network: {}", net["id"].as_str().unwrap_or(network_id));
     Ok(())
 }

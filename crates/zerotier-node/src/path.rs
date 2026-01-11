@@ -3,9 +3,9 @@
 /// Tracks liveness, latency, and whether traffic flows directly or via relay.
 use core::net::SocketAddr;
 
+use zerotier_protocol::ZT_PATH_HEARTBEAT_PERIOD;
 /// Path expiration constant from protocol constants.
 use zerotier_protocol::ZT_PEER_PATH_EXPIRATION;
-use zerotier_protocol::ZT_PATH_HEARTBEAT_PERIOD;
 
 /// A network path to a peer (one physical address/port).
 #[derive(Debug, Clone)]
@@ -128,7 +128,10 @@ mod tests {
     fn quality_score_dead_path_is_max() {
         let p = Path::new(test_addr(), 1000);
         // Path expired (now > last_receive + 243s)
-        assert_eq!(p.quality_score(1000 + ZT_PEER_PATH_EXPIRATION + 1), u32::MAX);
+        assert_eq!(
+            p.quality_score(1000 + ZT_PEER_PATH_EXPIRATION + 1),
+            u32::MAX
+        );
     }
 
     #[test]

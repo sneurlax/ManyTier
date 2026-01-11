@@ -152,9 +152,7 @@ fn compute_mac_full(
             mac.update_padded(&data);
             mac.finalize()
         }
-        PolyMode::ComputeUnpadded => {
-            Poly1305::new((&poly_key).into()).compute_unpadded(&data)
-        }
+        PolyMode::ComputeUnpadded => Poly1305::new((&poly_key).into()).compute_unpadded(&data),
     };
     let mut out = [0u8; 16];
     out.copy_from_slice(tag.as_slice());
@@ -179,7 +177,10 @@ fn debug_mangle_variants_against_official_hello() {
 
     let our_id_s = fs::read_to_string(our_identity_secret_path).expect("read identity.secret");
     let our_id = Identity::parse(our_id_s.trim()).expect("parse identity.secret");
-    let our_secret = our_id.secret.as_ref().expect("identity.secret must contain secret");
+    let our_secret = our_id
+        .secret
+        .as_ref()
+        .expect("identity.secret must contain secret");
 
     let official_pub_s =
         fs::read_to_string(official_identity_public_path).expect("read identity.public");
@@ -249,41 +250,44 @@ fn debug_mangle_variants_against_official_hello() {
                                                         PolyMode::UpdatePadded,
                                                         PolyMode::ComputeUnpadded,
                                                     ] {
-                                                    total_count += 1;
-                                                    let tag = compute_mac_full(
-                                                        &packet,
-                                                        &key,
-                                                        cipher,
-                                                        poly_offset,
-                                                        mac_prefix,
-                                                        mask_nonce,
-                                                        verb_inclusion,
-                                                        poly_mode,
-                                                    );
-                                                    let candidates: [[u8; 8]; 4] = [
-                                                        tag[0..8].try_into().unwrap(),
-                                                        tag[8..16].try_into().unwrap(),
+                                                        total_count += 1;
+                                                        let tag = compute_mac_full(
+                                                            &packet,
+                                                            &key,
+                                                            cipher,
+                                                            poly_offset,
+                                                            mac_prefix,
+                                                            mask_nonce,
+                                                            verb_inclusion,
+                                                            poly_mode,
+                                                        );
+                                                        let candidates: [[u8; 8]; 4] = [
+                                                            tag[0..8].try_into().unwrap(),
+                                                            tag[8..16].try_into().unwrap(),
+                                                            {
+                                                                let mut b: [u8; 8] =
+                                                                    tag[0..8].try_into().unwrap();
+                                                                b.reverse();
+                                                                b
+                                                            },
+                                                            {
+                                                                let mut b: [u8; 8] =
+                                                                    tag[8..16].try_into().unwrap();
+                                                                b.reverse();
+                                                                b
+                                                            },
+                                                        ];
+                                                        if candidates
+                                                            .iter()
+                                                            .any(|c| c == &saved_mac)
                                                         {
-                                                            let mut b: [u8; 8] =
-                                                                tag[0..8].try_into().unwrap();
-                                                            b.reverse();
-                                                            b
-                                                        },
-                                                        {
-                                                            let mut b: [u8; 8] =
-                                                                tag[8..16].try_into().unwrap();
-                                                            b.reverse();
-                                                            b
-                                                        },
-                                                    ];
-                                                    if candidates.iter().any(|c| c == &saved_mac) {
-                                                        match_count += 1;
-                                                        eprintln!(
+                                                            match_count += 1;
+                                                            eprintln!(
                                                             "MATCH: secret={secret_label} cipher={cipher:?} xor_len={xor_len} zero_mac_for_xor={zero_mac_for_xor} mask_flags={mask_flags} size_pos={size_pos:?} size_endian={size_endian:?} size_sub={size_sub} poly_offset={poly_offset} mac_prefix={mac_prefix:?} mask_nonce={mask_nonce} verb_inclusion={verb_inclusion:?} poly_mode={poly_mode:?} tag={}",
                                                             tag.iter().map(|b| format!("{:02x}", b)).collect::<String>()
                                                         );
-                                                        // Don't return immediately: collect all matches
-                                                    }
+                                                            // Don't return immediately: collect all matches
+                                                        }
                                                     }
                                                 }
                                             }
@@ -302,7 +306,10 @@ fn debug_mangle_variants_against_official_hello() {
     if match_count > 0 {
         eprintln!("Found {} matches!", match_count);
     } else {
-        panic!("no variants matched saved MAC for this packet (len={})", packet.len());
+        panic!(
+            "no variants matched saved MAC for this packet (len={})",
+            packet.len()
+        );
     }
 }
 
@@ -322,7 +329,10 @@ fn decrypt_official_hello_encrypted_section() {
 
     let our_id_s = fs::read_to_string(our_identity_secret_path).expect("read identity.secret");
     let our_id = Identity::parse(our_id_s.trim()).expect("parse identity.secret");
-    let our_secret = our_id.secret.as_ref().expect("identity.secret must contain secret");
+    let our_secret = our_id
+        .secret
+        .as_ref()
+        .expect("identity.secret must contain secret");
 
     let official_pub_s =
         fs::read_to_string(official_identity_public_path).expect("read identity.public");
@@ -339,54 +349,65 @@ fn decrypt_official_hello_encrypted_section() {
     // Also try null key
     let null_key = [0u8; 32];
     for (key_label, key) in [("shared_secret", &shared_secret), ("null", &null_key)] {
-    for encrypted_start in [119usize, 135] {
-    let encrypted_len = packet_len - encrypted_start;
-    let mut test_pkt = packet.clone();
+        for encrypted_start in [119usize, 135] {
+            let encrypted_len = packet_len - encrypted_start;
+            let mut test_pkt = packet.clone();
 
-    eprintln!(
-        "\n--- Trying key={} encrypted_start={} ---",
-        key_label,
-        encrypted_start
-    );
-    eprintln!(
-        "Encrypted section ({} bytes at offset {}): {}",
-        encrypted_len,
-        encrypted_start,
-        test_pkt[encrypted_start..].iter().map(|b| format!("{:02x}", b)).collect::<String>()
-    );
+            eprintln!(
+                "\n--- Trying key={} encrypted_start={} ---",
+                key_label, encrypted_start
+            );
+            eprintln!(
+                "Encrypted section ({} bytes at offset {}): {}",
+                encrypted_len,
+                encrypted_start,
+                test_pkt[encrypted_start..]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
+            );
 
-    // Decrypt the entire encrypted section
-    zerotier_crypto::salsa::crypt_packet_field(
-        key,
-        &mut test_pkt,
-        encrypted_start,
-        encrypted_len,
-    )
-    .unwrap();
+            // Decrypt the entire encrypted section
+            zerotier_crypto::salsa::crypt_packet_field(
+                key,
+                &mut test_pkt,
+                encrypted_start,
+                encrypted_len,
+            )
+            .unwrap();
 
-    eprintln!(
-        "Decrypted section ({} bytes): {}",
-        encrypted_len,
-        test_pkt[encrypted_start..].iter().map(|b| format!("{:02x}", b)).collect::<String>()
-    );
+            eprintln!(
+                "Decrypted section ({} bytes): {}",
+                encrypted_len,
+                test_pkt[encrypted_start..]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
+            );
 
-    if encrypted_start == 119 {
-        // If encrypted from planet info position:
-        let wid = u64::from_be_bytes(test_pkt[119..127].try_into().unwrap());
-        let wts = u64::from_be_bytes(test_pkt[127..135].try_into().unwrap());
-        let mc = u16::from_be_bytes([test_pkt[135], test_pkt[136]]);
-        eprintln!("  planet_world_id: {} (0x{:016x})", wid, wid);
-        eprintln!("  planet_world_ts: {} (0x{:016x})", wts, wts);
-        eprintln!("  moon_count: {}", mc);
-        if mc == 0 && 137 < packet_len {
-            eprintln!("  After moons ({} bytes): {}", packet_len - 137,
-                test_pkt[137..].iter().map(|b| format!("{:02x}", b)).collect::<String>());
-        }
-    } else {
-        let mc = u16::from_be_bytes([test_pkt[135], test_pkt[136]]);
-        eprintln!("  moon_count: {}", mc);
-    }
-    } // end for encrypted_start
+            if encrypted_start == 119 {
+                // If encrypted from planet info position:
+                let wid = u64::from_be_bytes(test_pkt[119..127].try_into().unwrap());
+                let wts = u64::from_be_bytes(test_pkt[127..135].try_into().unwrap());
+                let mc = u16::from_be_bytes([test_pkt[135], test_pkt[136]]);
+                eprintln!("  planet_world_id: {} (0x{:016x})", wid, wid);
+                eprintln!("  planet_world_ts: {} (0x{:016x})", wts, wts);
+                eprintln!("  moon_count: {}", mc);
+                if mc == 0 && 137 < packet_len {
+                    eprintln!(
+                        "  After moons ({} bytes): {}",
+                        packet_len - 137,
+                        test_pkt[137..]
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>()
+                    );
+                }
+            } else {
+                let mc = u16::from_be_bytes([test_pkt[135], test_pkt[136]]);
+                eprintln!("  moon_count: {}", mc);
+            }
+        } // end for encrypted_start
     } // end for key
 }
 
@@ -410,7 +431,10 @@ fn dearmor_official_hello_with_manytier_code() {
 
     let our_id_s = fs::read_to_string(our_identity_secret_path).expect("read identity.secret");
     let our_id = Identity::parse(our_id_s.trim()).expect("parse identity.secret");
-    let our_secret = our_id.secret.as_ref().expect("identity.secret must contain secret");
+    let our_secret = our_id
+        .secret
+        .as_ref()
+        .expect("identity.secret must contain secret");
 
     let official_pub_s =
         fs::read_to_string(official_identity_public_path).expect("read identity.public");
@@ -422,20 +446,37 @@ fn dearmor_official_hello_with_manytier_code() {
         &x25519_dalek::PublicKey::from(official_pub.public_key.dh),
     );
 
-    eprintln!("Shared secret (first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        shared_secret[0], shared_secret[1], shared_secret[2], shared_secret[3],
-        shared_secret[4], shared_secret[5], shared_secret[6], shared_secret[7]);
-    eprintln!("Packet len: {}, saved MAC: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+    eprintln!(
+        "Shared secret (first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        shared_secret[0],
+        shared_secret[1],
+        shared_secret[2],
+        shared_secret[3],
+        shared_secret[4],
+        shared_secret[5],
+        shared_secret[6],
+        shared_secret[7]
+    );
+    eprintln!(
+        "Packet len: {}, saved MAC: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         packet.len(),
-        packet[PACKET_MAC_OFFSET], packet[PACKET_MAC_OFFSET+1],
-        packet[PACKET_MAC_OFFSET+2], packet[PACKET_MAC_OFFSET+3],
-        packet[PACKET_MAC_OFFSET+4], packet[PACKET_MAC_OFFSET+5],
-        packet[PACKET_MAC_OFFSET+6], packet[PACKET_MAC_OFFSET+7]);
+        packet[PACKET_MAC_OFFSET],
+        packet[PACKET_MAC_OFFSET + 1],
+        packet[PACKET_MAC_OFFSET + 2],
+        packet[PACKET_MAC_OFFSET + 3],
+        packet[PACKET_MAC_OFFSET + 4],
+        packet[PACKET_MAC_OFFSET + 5],
+        packet[PACKET_MAC_OFFSET + 6],
+        packet[PACKET_MAC_OFFSET + 7]
+    );
 
     let result = zerotier_crypto::salsa::dearmor_packet(&shared_secret, &mut packet);
     match result {
         Ok(()) => eprintln!("SUCCESS: ManyTier dearmor_packet verified official HELLO MAC"),
-        Err(e) => panic!("FAILED: ManyTier dearmor_packet rejected official HELLO: {:?}", e),
+        Err(e) => panic!(
+            "FAILED: ManyTier dearmor_packet rejected official HELLO: {:?}",
+            e
+        ),
     }
 }
 
@@ -503,15 +544,16 @@ fn decode_header(label: &str, bytes: &[u8], out: &mut String) {
     let cipher_suite = flags & 0x38; // bits 3..=5
     let hops = flags & 0x07;
     let fragment = flags & 0x40;
-    let mac_hex: String = bytes[19..27]
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
+    let mac_hex: String = bytes[19..27].iter().map(|b| format!("{:02x}", b)).collect();
     let verb = bytes[27];
     let verb_id = verb & 0x1f;
     let verb_high = verb & 0xe0;
 
-    let _ = writeln!(out, "  offset  0..8   : packet_id       = 0x{:016x}", packet_id);
+    let _ = writeln!(
+        out,
+        "  offset  0..8   : packet_id       = 0x{:016x}",
+        packet_id
+    );
     let _ = writeln!(
         out,
         "  offset  8..13  : dest_addr       = {:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -540,9 +582,21 @@ fn decode_header(label: &str, bytes: &[u8], out: &mut String) {
         let _ = writeln!(
             out,
             "                                  (0x20=bit5 {}, 0x40=bit6 {}, 0x80=bit7 {})",
-            if verb_high & 0x20 != 0 { "SET" } else { "unset" },
-            if verb_high & 0x40 != 0 { "SET" } else { "unset" },
-            if verb_high & 0x80 != 0 { "SET" } else { "unset" }
+            if verb_high & 0x20 != 0 {
+                "SET"
+            } else {
+                "unset"
+            },
+            if verb_high & 0x40 != 0 {
+                "SET"
+            } else {
+                "unset"
+            },
+            if verb_high & 0x80 != 0 {
+                "SET"
+            } else {
+                "unset"
+            }
         );
     }
 }
@@ -574,7 +628,10 @@ fn decode_manytier_hello_payload(bytes: &[u8], out: &mut String) {
     let _ = writeln!(out, "  offset 30      : minor           = {}", minor);
     let _ = writeln!(out, "  offset 31..33  : revision        = {}", rev);
     let _ = writeln!(out, "  offset 33..41  : timestamp_ms    = {}", ts);
-    let _ = writeln!(out, "  offset 41..    : identity + dest_inet + moon_count + COR (opaque to this decoder)");
+    let _ = writeln!(
+        out,
+        "  offset 41..    : identity + dest_inet + moon_count + COR (opaque to this decoder)"
+    );
     let _ = writeln!(out, "  ---- raw payload dump from offset 28 ----");
     hex_dump_with_offsets(&bytes[28..], 28, out);
 }
@@ -619,10 +676,17 @@ fn decode_and_diff_hello_layouts() {
          capture lives at tests/shadow/artifacts/run-20260411T120644/host-assisted-fallback/manytier-controller/manytier-data/udp-dumps/",
     );
 
-    let manytier_pkt = fs::read(&manytier_path)
-        .unwrap_or_else(|e| panic!("failed to read ManyTier tx HELLO at {}: {}", manytier_path, e));
+    let manytier_pkt = fs::read(&manytier_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to read ManyTier tx HELLO at {}: {}",
+            manytier_path, e
+        )
+    });
     let official_pkt = fs::read(&official_path).unwrap_or_else(|e| {
-        panic!("failed to read official rx HELLO at {}: {}", official_path, e)
+        panic!(
+            "failed to read official rx HELLO at {}: {}",
+            official_path, e
+        )
     });
 
     let mut out = String::new();

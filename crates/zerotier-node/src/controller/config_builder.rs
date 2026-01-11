@@ -7,10 +7,11 @@
 
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use super::dictionary::Dictionary;
-use super::types::{NetworkRecord, MemberRecord};
+use super::types::{ManagedRoute, MemberRecord, NetworkRecord};
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use zerotier_protocol::verbs::network_config::CertificateOfMembership;
 
 /// Build a serialized NetworkConfig dictionary from controller data.
@@ -22,6 +23,7 @@ use zerotier_protocol::verbs::network_config::CertificateOfMembership;
 pub fn build_network_config(
     network: &NetworkRecord,
     member: &MemberRecord,
+    routes: &[ManagedRoute],
     com: &CertificateOfMembership,
     now_ms: u64,
 ) -> Vec<u8> {
@@ -52,11 +54,14 @@ pub fn build_network_config(
     // f: flags as hex (0 for now)
     dict.add_hex("f", 0);
 
-    // mtu: MTU as decimal string
+    // mtu: MTU as hex
     dict.add_int("mtu", network.mtu as u64);
 
     // ml: multicast limit as hex
     dict.add_hex("ml", network.multicast_limit as u64);
+
+    // ctmd: credential time max delta (30 minutes upstream default)
+    dict.add_hex("ctmd", 1_800_000);
 
     // C: COM binary
     dict.add_binary("C", serialize_com(com));
@@ -73,10 +78,8 @@ pub fn build_network_config(
         dict.add_binary("I", serialize_ip_assignments(&member.ip_assignments));
     }
 
-    // RT: Routes binary (derive from IP assignments)
-    if !member.ip_assignments.is_empty() {
-        dict.add_binary("RT", serialize_routes_from_ips(&member.ip_assignments));
-    }
+    // RT: Routes binary
+    dict.add_binary("RT", serialize_routes(routes, &member.ip_assignments));
 
     dict.serialize()
 }
@@ -85,28 +88,28 @@ pub fn build_network_config(
 fn format_address(addr: &[u8; 5]) -> String {
     alloc::format!(
         "{:02x}{:02x}{:02x}{:02x}{:02x}",
-        addr[0], addr[1], addr[2], addr[3], addr[4]
+        addr[0],
+        addr[1],
+        addr[2],
+        addr[3],
+        addr[4]
     )
 }
 
-/// Serialize a Certificate of Membership to binary.
+/// Serialize a Certificate of Membership to upstream wire format.
 ///
-/// Format: qualifier count (u16 BE), then each qualifier (id u64 BE + value u64 BE +
-/// max_delta u64 BE), then signer_address (5 bytes), then signature (96 bytes).
+/// Format: type byte (1), qualifier count (u16 BE), qualifiers,
+/// signer_address (5 bytes), then signature (96 bytes) if signed.
 pub fn serialize_com(com: &CertificateOfMembership) -> Vec<u8> {
-    let count = com.qualifiers.len() as u16;
-    let total_len = 2 + com.qualifiers.len() * 24 + 5 + 96;
-    let mut buf = Vec::with_capacity(total_len);
-
-    buf.extend_from_slice(&count.to_be_bytes());
-    for q in &com.qualifiers {
-        buf.extend_from_slice(&q.id.to_be_bytes());
-        buf.extend_from_slice(&q.value.to_be_bytes());
-        buf.extend_from_slice(&q.max_delta.to_be_bytes());
-    }
-    buf.extend_from_slice(&com.signer_address);
-    buf.extend_from_slice(&com.signature);
-
+    let mut buf = vec![
+        0u8;
+        1 + 2
+            + (com.qualifiers.len() * 24)
+            + 5
+            + if com.signer_address == [0; 5] { 0 } else { 96 }
+    ];
+    let written = com.serialize(&mut buf);
+    buf.truncate(written);
     buf
 }
 
@@ -149,12 +152,58 @@ pub fn serialize_ip_assignments(ips: &[String]) -> Vec<u8> {
     buf
 }
 
+/// Serialize managed routes and derived IP subnet routes.
+fn serialize_routes(managed: &[ManagedRoute], assignments: &[String]) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // 1. Add explicit managed routes
+    for route in managed {
+        if let Some((target, prefix)) = parse_ip_prefix(&route.target) {
+            if let Some(target_octets) = parse_ipv4(&target) {
+                buf.push(4); // IPv4
+                buf.extend_from_slice(&target_octets);
+                buf.extend_from_slice(&(prefix as u16).to_be_bytes());
+            } else if let Some(target_octets) = parse_ipv6(&target) {
+                buf.push(6); // IPv6
+                buf.extend_from_slice(&target_octets);
+                buf.extend_from_slice(&(prefix as u16).to_be_bytes());
+            } else {
+                continue;
+            }
+
+            if let Some(via_str) = &route.via {
+                if let Some(via_octets) = parse_ipv4(via_str) {
+                    buf.push(4);
+                    buf.extend_from_slice(&via_octets);
+                    buf.extend_from_slice(&0u16.to_be_bytes()); // port 0 for gateway
+                } else if let Some(via_octets) = parse_ipv6(via_str) {
+                    buf.push(6);
+                    buf.extend_from_slice(&via_octets);
+                    buf.extend_from_slice(&0u16.to_be_bytes());
+                } else {
+                    buf.push(0x00); // null via if invalid
+                }
+            } else {
+                buf.push(0x00); // null via
+            }
+            buf.extend_from_slice(&0u16.to_be_bytes()); // flags
+            buf.extend_from_slice(&0u16.to_be_bytes()); // metric
+        }
+    }
+
+    // 2. Add derived routes from IP assignments (if not already covered)
+    buf.extend(serialize_routes_from_ips(assignments));
+
+    buf
+}
+
 /// Serialize routes derived from IP assignments.
 ///
 /// For each IP/prefix, creates a route entry:
 /// - Target: network address with prefix (InetAddress)
 /// - Via: null gateway (type byte 0x00)
 /// - Flags: u16 0x0000
+/// - Metric: u16 0x0000
 fn serialize_routes_from_ips(ips: &[String]) -> Vec<u8> {
     let mut buf = Vec::new();
     for ip_str in ips {
@@ -170,12 +219,15 @@ fn serialize_routes_from_ips(ips: &[String]) -> Vec<u8> {
                 buf.push(0x00);
                 // Flags
                 buf.extend_from_slice(&0u16.to_be_bytes());
+                // Metric
+                buf.extend_from_slice(&0u16.to_be_bytes());
             } else if let Some(octets) = parse_ipv6(&addr) {
                 let network = apply_ipv6_mask(&octets, prefix);
                 buf.push(6); // IPv6
                 buf.extend_from_slice(&network);
                 buf.extend_from_slice(&(prefix as u16).to_be_bytes());
                 buf.push(0x00);
+                buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&0u16.to_be_bytes());
             }
         }
@@ -293,10 +345,10 @@ fn apply_ipv6_mask(octets: &[u8; 16], prefix: u8) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::dictionary::Dictionary;
-    use zerotier_protocol::verbs::network_config::{ComQualifier, CertificateOfMembership};
+    use super::*;
     use alloc::vec;
+    use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
 
     fn test_network() -> NetworkRecord {
         NetworkRecord {
@@ -328,9 +380,18 @@ mod tests {
 
     fn test_com() -> CertificateOfMembership {
         CertificateOfMembership {
+            issued_to: [0xa0, 0xb1, 0xc2, 0xd3, 0xe4],
             qualifiers: vec![
-                ComQualifier { id: 0, value: 0xff00001234560001, max_delta: 0 },
-                ComQualifier { id: 1, value: 1000, max_delta: 100 },
+                ComQualifier {
+                    id: 0,
+                    value: 0xff00001234560001,
+                    max_delta: 0,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 1000,
+                    max_delta: 100,
+                },
             ],
             signer_address: [0x01, 0x02, 0x03, 0x04, 0x05],
             signature: [0xAA; 96],
@@ -343,7 +404,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         assert_eq!(dict.get_text("nwid"), Some("ff00001234560001"));
@@ -354,7 +415,7 @@ mod tests {
         assert_eq!(dict.get_text("r"), Some("2a")); // 42 in hex
         assert_eq!(dict.get_text("id"), Some("a0b1c2d3e4"));
         assert_eq!(dict.get_text("f"), Some("0"));
-        assert_eq!(dict.get_text("mtu"), Some("2800"));
+        assert_eq!(dict.get_text("mtu"), Some("af0"));
         assert_eq!(dict.get_text("ml"), Some("20")); // 32 in hex
     }
 
@@ -404,7 +465,8 @@ mod tests {
         // Target: type=4, 192.168.192.0 (masked), prefix=24
         // Via: 0x00 (null)
         // Flags: 0x0000
-        assert_eq!(serialized.len(), 10); // 1+4+2 + 1 + 2
+        // Metric: 0x0000
+        assert_eq!(serialized.len(), 12); // 1+4+2 + 1 + 2 + 2
         assert_eq!(serialized[0], 4); // IPv4
         assert_eq!(serialized[1], 192);
         assert_eq!(serialized[2], 168);
@@ -414,6 +476,8 @@ mod tests {
         assert_eq!(serialized[7], 0x00); // null via
         assert_eq!(serialized[8], 0x00); // flags
         assert_eq!(serialized[9], 0x00);
+        assert_eq!(serialized[10], 0x00); // metric
+        assert_eq!(serialized[11], 0x00);
     }
 
     #[test]
@@ -423,7 +487,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         assert_eq!(dict.get_text("t"), Some("1")); // public = 1
@@ -435,7 +499,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         let com_binary = dict.get_binary("C").expect("C key missing");
@@ -450,11 +514,23 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         let rules = dict.get_binary("R").expect("R key missing");
         assert_eq!(rules, &[0x01, 0x00]);
+    }
+
+    #[test]
+    fn config_contains_default_ctmd() {
+        let network = test_network();
+        let member = test_member();
+        let com = test_com();
+
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
+        let dict = Dictionary::deserialize(&bytes).unwrap();
+
+        assert_eq!(dict.get_text("ctmd"), Some("1b7740"));
     }
 
     #[test]

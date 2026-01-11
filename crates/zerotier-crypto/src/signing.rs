@@ -1,41 +1,46 @@
-/// Ed25519 signing and verification for ZeroTier V1.
+/// ZeroTier C25519 signing and verification helpers.
 ///
-/// ZeroTier uses 96-byte signature fields: the standard 64-byte Ed25519
-/// signature padded with 32 zero bytes for forward compatibility
-/// (per Pitfall 7 in RESEARCH.md).
+/// ZeroTier signs the first 32 bytes of `SHA-512(message)` with Ed25519 and
+/// stores that 32-byte digest suffix alongside the 64-byte signature.
 use crate::error::CryptoError;
+use sha2::Digest;
 
 /// Sign a message with an Ed25519 signing key.
 ///
-/// Returns a 96-byte array: 64-byte Ed25519 signature + 32 zero-byte padding.
-/// The padding is for ZeroTier forward compatibility with potential future
-/// signature schemes.
+/// Returns a 96-byte ZeroTier signature:
+/// - bytes `0..64`: Ed25519 signature over `SHA-512(message)[..32]`
+/// - bytes `64..96`: `SHA-512(message)[..32]`
 pub fn sign(signing_key: &ed25519_dalek::SigningKey, message: &[u8]) -> [u8; 96] {
     use ed25519_dalek::Signer;
-    let sig = signing_key.sign(message);
+    let digest = sha2::Sha512::digest(message);
+    let sig = signing_key.sign(&digest[..32]);
     let sig_bytes = sig.to_bytes();
-    let mut padded = [0u8; 96];
-    padded[..64].copy_from_slice(&sig_bytes);
-    // bytes 64..96 remain zero (padding)
-    padded
+    let mut signature = [0u8; 96];
+    signature[..64].copy_from_slice(&sig_bytes);
+    signature[64..].copy_from_slice(&digest[..32]);
+    signature
 }
 
 /// Verify a 96-byte ZeroTier signature against a message and verifying key.
 ///
-/// Extracts the first 64 bytes as the Ed25519 signature and ignores
-/// the 32-byte padding.
+/// Verifies both the stored digest suffix and the Ed25519 signature over that
+/// 32-byte digest.
 pub fn verify(
     verifying_key: &ed25519_dalek::VerifyingKey,
     message: &[u8],
     signature: &[u8; 96],
 ) -> Result<(), CryptoError> {
     use ed25519_dalek::Verifier;
+    let digest = sha2::Sha512::digest(message);
+    if signature[64..] != digest[..32] {
+        return Err(CryptoError::SignatureError);
+    }
     let sig_bytes: [u8; 64] = signature[..64]
         .try_into()
         .map_err(|_| CryptoError::SignatureError)?;
     let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
     verifying_key
-        .verify(message, &sig)
+        .verify(&digest[..32], &sig)
         .map_err(|_| CryptoError::SignatureError)
 }
 
@@ -56,10 +61,11 @@ mod tests {
     }
 
     #[test]
-    fn sign_padding_is_zeroes() {
+    fn sign_appends_message_digest_prefix() {
         let key = test_signing_key();
         let sig = sign(&key, b"test message");
-        assert_eq!(&sig[64..96], &[0u8; 32]);
+        let digest = sha2::Sha512::digest(b"test message");
+        assert_eq!(&sig[64..96], &digest[..32]);
     }
 
     #[test]

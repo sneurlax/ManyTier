@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use crate::error::ProtocolError;
+use alloc::vec::Vec;
 
 /// NETWORK_CONFIG_REQUEST payload.
 ///
@@ -55,9 +55,12 @@ impl NetworkConfigRequestPayload {
 pub struct NetworkConfigPayload {
     pub network_id: u64,
     pub dict_data: Vec<u8>,
-    pub chunk_index: Option<u16>,
-    pub total_chunks: Option<u16>,
-    pub signature: Option<[u8; 64]>,
+    pub flags: Option<u8>,
+    pub config_update_id: Option<u64>,
+    pub total_length: Option<u32>,
+    pub chunk_index: Option<u32>,
+    pub signature_type: Option<u8>,
+    pub signature: Option<Vec<u8>>,
 }
 
 impl NetworkConfigPayload {
@@ -70,15 +73,36 @@ impl NetworkConfigPayload {
         buf[10..dict_end].copy_from_slice(&self.dict_data);
 
         let mut offset = dict_end;
-        if let (Some(ci), Some(tc), Some(ref sig)) =
-            (self.chunk_index, self.total_chunks, &self.signature)
-        {
-            buf[offset..offset + 2].copy_from_slice(&ci.to_be_bytes());
+        if let (
+            Some(flags),
+            Some(config_update_id),
+            Some(total_length),
+            Some(chunk_index),
+            Some(signature_type),
+            Some(signature),
+        ) = (
+            self.flags,
+            self.config_update_id,
+            self.total_length,
+            self.chunk_index,
+            self.signature_type,
+            &self.signature,
+        ) {
+            buf[offset] = flags;
+            offset += 1;
+            buf[offset..offset + 8].copy_from_slice(&config_update_id.to_be_bytes());
+            offset += 8;
+            buf[offset..offset + 4].copy_from_slice(&total_length.to_be_bytes());
+            offset += 4;
+            buf[offset..offset + 4].copy_from_slice(&chunk_index.to_be_bytes());
+            offset += 4;
+            buf[offset] = signature_type;
+            offset += 1;
+            let signature_len = signature.len() as u16;
+            buf[offset..offset + 2].copy_from_slice(&signature_len.to_be_bytes());
             offset += 2;
-            buf[offset..offset + 2].copy_from_slice(&tc.to_be_bytes());
-            offset += 2;
-            buf[offset..offset + 64].copy_from_slice(sig);
-            offset += 64;
+            buf[offset..offset + signature.len()].copy_from_slice(signature);
+            offset += signature.len();
         }
         offset
     }
@@ -104,22 +128,67 @@ impl NetworkConfigPayload {
         let dict_data = data[10..10 + dict_len].to_vec();
         let dict_end = 10 + dict_len;
 
-        // Check for optional multipart fields (2+2+64 = 68 bytes)
-        let (chunk_index, total_chunks, signature) = if data.len() >= dict_end + 68 {
-            let ci = u16::from_be_bytes([data[dict_end], data[dict_end + 1]]);
-            let tc = u16::from_be_bytes([data[dict_end + 2], data[dict_end + 3]]);
-            let mut sig = [0u8; 64];
-            sig.copy_from_slice(&data[dict_end + 4..dict_end + 68]);
-            (Some(ci), Some(tc), Some(sig))
-        } else {
-            (None, None, None)
-        };
+        let (flags, config_update_id, total_length, chunk_index, signature_type, signature) =
+            if data.len() == dict_end {
+                (None, None, None, None, None, None)
+            } else {
+                if data.len() < dict_end + 20 {
+                    return Err(ProtocolError::TooShort {
+                        need: dict_end + 20,
+                        got: data.len(),
+                    });
+                }
+                let flags = data[dict_end];
+                let config_update_id = u64::from_be_bytes([
+                    data[dict_end + 1],
+                    data[dict_end + 2],
+                    data[dict_end + 3],
+                    data[dict_end + 4],
+                    data[dict_end + 5],
+                    data[dict_end + 6],
+                    data[dict_end + 7],
+                    data[dict_end + 8],
+                ]);
+                let total_length = u32::from_be_bytes([
+                    data[dict_end + 9],
+                    data[dict_end + 10],
+                    data[dict_end + 11],
+                    data[dict_end + 12],
+                ]);
+                let chunk_index = u32::from_be_bytes([
+                    data[dict_end + 13],
+                    data[dict_end + 14],
+                    data[dict_end + 15],
+                    data[dict_end + 16],
+                ]);
+                let signature_type = data[dict_end + 17];
+                let signature_len =
+                    u16::from_be_bytes([data[dict_end + 18], data[dict_end + 19]]) as usize;
+                if data.len() < dict_end + 20 + signature_len {
+                    return Err(ProtocolError::TooShort {
+                        need: dict_end + 20 + signature_len,
+                        got: data.len(),
+                    });
+                }
+                let signature = data[dict_end + 20..dict_end + 20 + signature_len].to_vec();
+                (
+                    Some(flags),
+                    Some(config_update_id),
+                    Some(total_length),
+                    Some(chunk_index),
+                    Some(signature_type),
+                    Some(signature),
+                )
+            };
 
         Ok(NetworkConfigPayload {
             network_id,
             dict_data,
+            flags,
+            config_update_id,
+            total_length,
             chunk_index,
-            total_chunks,
+            signature_type,
             signature,
         })
     }
@@ -137,17 +206,24 @@ pub struct ComQualifier {
 ///
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificateOfMembership {
+    pub issued_to: [u8; 5],
     pub qualifiers: Vec<ComQualifier>,
     pub signer_address: [u8; 5],
     pub signature: [u8; 96],
 }
 
+fn u64_to_zt_address(value: u64) -> [u8; 5] {
+    let bytes = value.to_be_bytes();
+    [bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]
+}
+
 impl CertificateOfMembership {
     /// Serialize into buffer. Returns bytes written.
     pub fn serialize(&self, buf: &mut [u8]) -> usize {
+        buf[0] = 1;
         let count = self.qualifiers.len() as u16;
-        buf[0..2].copy_from_slice(&count.to_be_bytes());
-        let mut offset = 2;
+        buf[1..3].copy_from_slice(&count.to_be_bytes());
+        let mut offset = 3;
 
         for q in &self.qualifiers {
             buf[offset..offset + 8].copy_from_slice(&q.id.to_be_bytes());
@@ -160,29 +236,35 @@ impl CertificateOfMembership {
 
         buf[offset..offset + 5].copy_from_slice(&self.signer_address);
         offset += 5;
-        buf[offset..offset + 96].copy_from_slice(&self.signature);
-        offset += 96;
+        if self.signer_address != [0; 5] {
+            buf[offset..offset + 96].copy_from_slice(&self.signature);
+            offset += 96;
+        }
         offset
     }
 
     /// Deserialize from wire bytes. Returns the COM and bytes consumed.
     pub fn deserialize(data: &[u8]) -> Result<(Self, usize), ProtocolError> {
-        if data.len() < 2 {
+        if data.len() < 8 {
             return Err(ProtocolError::TooShort {
-                need: 2,
+                need: 8,
                 got: data.len(),
             });
         }
-        let count = u16::from_be_bytes([data[0], data[1]]) as usize;
-        let needed = 2 + count * 24 + 5 + 96;
-        if data.len() < needed {
+        if data[0] != 1 {
+            return Err(ProtocolError::InvalidPacket);
+        }
+
+        let count = u16::from_be_bytes([data[1], data[2]]) as usize;
+        let base_needed = 3 + count * 24 + 5;
+        if data.len() < base_needed {
             return Err(ProtocolError::TooShort {
-                need: needed,
+                need: base_needed,
                 got: data.len(),
             });
         }
 
-        let mut offset = 2;
+        let mut offset = 3;
         let mut qualifiers = Vec::with_capacity(count);
         for _ in 0..count {
             let id = u64::from_be_bytes([
@@ -225,16 +307,31 @@ impl CertificateOfMembership {
             });
         }
 
+        let mut issued_to = [0u8; 5];
+        if let Some(qualifier) = qualifiers.iter().find(|q| q.id == 2) {
+            issued_to = u64_to_zt_address(qualifier.value);
+        }
+
         let mut signer_address = [0u8; 5];
         signer_address.copy_from_slice(&data[offset..offset + 5]);
         offset += 5;
 
         let mut signature = [0u8; 96];
-        signature.copy_from_slice(&data[offset..offset + 96]);
-        offset += 96;
+        if signer_address != [0; 5] {
+            let needed = offset + 96;
+            if data.len() < needed {
+                return Err(ProtocolError::TooShort {
+                    need: needed,
+                    got: data.len(),
+                });
+            }
+            signature.copy_from_slice(&data[offset..offset + 96]);
+            offset += 96;
+        }
 
         Ok((
             CertificateOfMembership {
+                issued_to,
                 qualifiers,
                 signer_address,
                 signature,
@@ -249,10 +346,10 @@ impl CertificateOfMembership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkCredentialsPayload {
     pub com: Option<CertificateOfMembership>,
-        pub capabilities_raw: Vec<u8>,
-        pub tags_raw: Vec<u8>,
-        pub revocations_raw: Vec<u8>,
-        pub coo_raw: Vec<u8>,
+    pub capabilities_raw: Vec<u8>,
+    pub tags_raw: Vec<u8>,
+    pub revocations_raw: Vec<u8>,
+    pub coo_raw: Vec<u8>,
 }
 
 impl NetworkCredentialsPayload {
@@ -295,8 +392,7 @@ impl NetworkCredentialsPayload {
         buf[offset..offset + 2].copy_from_slice(&rev_len.to_be_bytes());
         offset += 2;
         if !self.revocations_raw.is_empty() {
-            buf[offset..offset + self.revocations_raw.len()]
-                .copy_from_slice(&self.revocations_raw);
+            buf[offset..offset + self.revocations_raw.len()].copy_from_slice(&self.revocations_raw);
             offset += self.revocations_raw.len();
         }
 
@@ -315,10 +411,7 @@ impl NetworkCredentialsPayload {
     /// Deserialize from wire bytes.
     pub fn deserialize(data: &[u8]) -> Result<Self, ProtocolError> {
         if data.is_empty() {
-            return Err(ProtocolError::TooShort {
-                need: 1,
-                got: 0,
-            });
+            return Err(ProtocolError::TooShort { need: 1, got: 0 });
         }
 
         let mut offset = 0;
@@ -411,8 +504,11 @@ mod tests {
         let payload = NetworkConfigPayload {
             network_id: 0xfedcba9876543210,
             dict_data: vec![1, 2, 3, 4, 5],
+            flags: None,
+            config_update_id: None,
+            total_length: None,
             chunk_index: None,
-            total_chunks: None,
+            signature_type: None,
             signature: None,
         };
         let mut buf = [0u8; 64];
@@ -424,21 +520,21 @@ mod tests {
 
     #[test]
     fn network_config_multipart() {
-        let mut sig = [0u8; 64];
-        for (i, b) in sig.iter_mut().enumerate() {
-            *b = i as u8;
-        }
+        let sig = vec![0x11; 96];
         let payload = NetworkConfigPayload {
             network_id: 0x1122334455667788,
             dict_data: vec![0xAA, 0xBB],
-            chunk_index: Some(0),
-            total_chunks: Some(3),
+            flags: Some(0),
+            config_update_id: Some(0x0102030405060708),
+            total_length: Some(4096),
+            chunk_index: Some(2048),
+            signature_type: Some(1),
             signature: Some(sig),
         };
         let mut buf = [0u8; 256];
         let n = payload.serialize(&mut buf);
-        // 8 + 2 + 2 + 2 + 2 + 64 = 80
-        assert_eq!(n, 80);
+        // 8 + 2 + 2 + 1 + 8 + 4 + 4 + 1 + 2 + 96 = 128
+        assert_eq!(n, 128);
         let parsed = NetworkConfigPayload::deserialize(&buf[..n]).unwrap();
         assert_eq!(parsed, payload);
     }
@@ -450,6 +546,7 @@ mod tests {
             *b = (i * 3) as u8;
         }
         let com = CertificateOfMembership {
+            issued_to: [0x01, 0x02, 0x03, 0x04, 0x05],
             qualifiers: vec![
                 ComQualifier {
                     id: 0,
@@ -463,7 +560,7 @@ mod tests {
                 },
                 ComQualifier {
                     id: 2,
-                    value: 0xdeadbeef,
+                    value: 0x0102030405,
                     max_delta: 0xffffffffffffffff,
                 },
             ],
@@ -472,8 +569,8 @@ mod tests {
         };
         let mut buf = [0u8; 512];
         let n = com.serialize(&mut buf);
-        // 2 + 3*24 + 5 + 96 = 175
-        assert_eq!(n, 175);
+        // 1 + 2 + 3*24 + 5 + 96 = 176
+        assert_eq!(n, 176);
         let (parsed, consumed) = CertificateOfMembership::deserialize(&buf[..n]).unwrap();
         assert_eq!(consumed, n);
         assert_eq!(parsed, com);
@@ -485,14 +582,15 @@ mod tests {
         sig[0] = 0x01;
         sig[95] = 0xFF;
         let com = CertificateOfMembership {
+            issued_to: [0; 5],
             qualifiers: vec![],
             signer_address: [0x11, 0x22, 0x33, 0x44, 0x55],
             signature: sig,
         };
         let mut buf = [0u8; 256];
         let n = com.serialize(&mut buf);
-        // 2 + 0 + 5 + 96 = 103
-        assert_eq!(n, 103);
+        // 1 + 2 + 0 + 5 + 96 = 104
+        assert_eq!(n, 104);
         let (parsed, _) = CertificateOfMembership::deserialize(&buf[..n]).unwrap();
         assert_eq!(parsed.signature[0], 0x01);
         assert_eq!(parsed.signature[95], 0xFF);
@@ -504,11 +602,19 @@ mod tests {
         let mut sig = [0u8; 96];
         sig[0] = 0xDE;
         let com = CertificateOfMembership {
-            qualifiers: vec![ComQualifier {
-                id: 0,
-                value: 42,
-                max_delta: 10,
-            }],
+            issued_to: [0x01, 0x02, 0x03, 0x04, 0x05],
+            qualifiers: vec![
+                ComQualifier {
+                    id: 0,
+                    value: 42,
+                    max_delta: 10,
+                },
+                ComQualifier {
+                    id: 2,
+                    value: 0x0102030405,
+                    max_delta: 0,
+                },
+            ],
             signer_address: [0x01, 0x02, 0x03, 0x04, 0x05],
             signature: sig,
         };

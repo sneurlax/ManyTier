@@ -2,13 +2,13 @@
 //!
 //! Implements the official ZeroTier controller API endpoints:
 //! - GET    /controller/network                         -> list network IDs
-//! - POST   /controller/network/{nwid}                  -> create or update network
-//! - GET    /controller/network/{nwid}                  -> get network config
-//! - DELETE /controller/network/{nwid}                  -> delete network
-//! - GET    /controller/network/{nwid}/member           -> list member IDs
-//! - GET    /controller/network/{nwid}/member/{nodeId}  -> get member
-//! - POST   /controller/network/{nwid}/member/{nodeId}  -> update member
-//! - DELETE /controller/network/{nwid}/member/{nodeId}  -> delete member
+//! - POST   /controller/network/:nwid                  -> create or update network
+//! - GET    /controller/network/:nwid                  -> get network config
+//! - DELETE /controller/network/:nwid                  -> delete network
+//! - GET    /controller/network/:nwid/member           -> list member IDs
+//! - GET    /controller/network/:nwid/member/:nodeId   -> get member
+//! - POST   /controller/network/:nwid/member/:nodeId   -> update member
+//! - DELETE /controller/network/:nwid/member/:nodeId   -> delete member
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,10 +19,10 @@ use axum::response::IntoResponse;
 use axum::{Json, Router};
 
 use zerotier_node::controller::storage::ControllerStorage;
-use zerotier_node::controller::types::IpPool;
+use zerotier_node::controller::types::{IpPool, ManagedRoute};
 
 use super::types::{
-    ControllerMemberResponse, ControllerNetworkResponse, IpPoolResponse,
+    ControllerMemberResponse, ControllerNetworkResponse, IpPoolResponse, RouteResponse,
     UpdateMemberRequest, UpdateNetworkRequest,
 };
 use super::AppState;
@@ -32,17 +32,14 @@ pub fn controller_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/network", axum::routing::get(list_networks))
         .route(
-            "/network/{nwid}",
+            "/network/:nwid",
             axum::routing::get(get_network)
                 .post(update_network)
                 .delete(delete_network),
         )
+        .route("/network/:nwid/member", axum::routing::get(list_members))
         .route(
-            "/network/{nwid}/member",
-            axum::routing::get(list_members),
-        )
-        .route(
-            "/network/{nwid}/member/{node_id}",
+            "/network/:nwid/member/:node_id",
             axum::routing::get(get_member)
                 .post(update_member)
                 .delete(delete_member),
@@ -52,10 +49,7 @@ pub fn controller_routes() -> Router<Arc<AppState>> {
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn error_response(status: StatusCode, message: &str) -> ApiError {
-    (
-        status,
-        Json(serde_json::json!({ "message": message })),
-    )
+    (status, Json(serde_json::json!({ "message": message })))
 }
 
 fn parse_network_id(hex: &str) -> Result<u64, ApiError> {
@@ -133,11 +127,25 @@ fn parse_dotted_ipv4(s: &str) -> Option<[u8; 4]> {
     ])
 }
 
+fn route_to_response(route: &ManagedRoute) -> RouteResponse {
+    RouteResponse {
+        target: route.target.clone(),
+        via: route.via.clone(),
+    }
+}
+
+fn parse_managed_route(resp: &RouteResponse) -> ManagedRoute {
+    ManagedRoute {
+        target: resp.target.clone(),
+        via: resp.via.clone(),
+    }
+}
+
 /// GET /controller/network -- list all network IDs.
-async fn list_networks(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+async fn list_networks(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
     let ctrl = controller.lock().await;
     let ids = ctrl
@@ -154,7 +162,9 @@ async fn get_network(
     State(state): State<Arc<AppState>>,
     Path(nwid): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
     let network_id = parse_network_id(&nwid)?;
     let ctrl = controller.lock().await;
@@ -171,6 +181,12 @@ async fn get_network(
         .await
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
 
+    let routes = ctrl
+        .storage
+        .get_routes(network_id)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
+
     let response = ControllerNetworkResponse {
         id: format_network_id(network.id),
         name: network.name,
@@ -183,7 +199,7 @@ async fn get_network(
         v6_assign_mode: v6_assign_mode_to_json(&network.v6_assign_mode),
         ip_assignment_pools: pools.iter().map(ip_pool_to_response).collect(),
         enable_broadcast: network.enable_broadcast,
-        routes: Vec::new(), // Routes not yet stored in NetworkRecord
+        routes: routes.iter().map(route_to_response).collect(),
     };
 
     Ok(Json(response))
@@ -199,7 +215,9 @@ async fn update_network(
     Path(nwid): Path<String>,
     Json(body): Json<UpdateNetworkRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
 
     if nwid.ends_with("______") {
@@ -227,11 +245,8 @@ async fn update_network(
             || body.enable_broadcast.is_some()
             || body.v4_assign_mode.is_some()
         {
-            if let Some(mut network) = ctrl
-                .storage
-                .get_network(network_id)
-                .await
-                .map_err(|e| {
+            if let Some(mut network) =
+                ctrl.storage.get_network(network_id).await.map_err(|e| {
                     error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
                 })?
             {
@@ -253,6 +268,17 @@ async fn update_network(
                 })?;
         }
 
+        // Apply routes if provided
+        if let Some(ref routes) = body.routes {
+            let parsed: Vec<ManagedRoute> = routes.iter().map(parse_managed_route).collect();
+            ctrl.storage
+                .set_routes(network_id, &parsed)
+                .await
+                .map_err(|e| {
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
+                })?;
+        }
+
         // Return the created network
         let network = ctrl
             .storage
@@ -260,15 +286,21 @@ async fn update_network(
             .await
             .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?
             .ok_or_else(|| {
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "created network not found")
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "created network not found",
+                )
             })?;
-        let ip_pools = ctrl
-            .storage
-            .get_ip_pools(network_id)
-            .await
-            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
+        let ip_pools =
+            ctrl.storage.get_ip_pools(network_id).await.map_err(|e| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
+            })?;
+        let routes =
+            ctrl.storage.get_routes(network_id).await.map_err(|e| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
+            })?;
 
-        return Ok(Json(network_to_response(network, &ip_pools)));
+        return Ok(Json(network_to_response(network, &ip_pools, &routes)));
     }
 
     // Update existing network
@@ -284,9 +316,10 @@ async fn update_network(
     apply_network_updates(&mut network, &body);
     network.revision += 1;
 
-    ctrl.storage.update_network(&network).await.map_err(|e| {
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
-    })?;
+    ctrl.storage
+        .update_network(&network)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
 
     // Update IP pools if provided
     if let Some(ref pools) = body.ip_assignment_pools {
@@ -294,9 +327,16 @@ async fn update_network(
         ctrl.storage
             .set_ip_pools(network_id, &parsed)
             .await
-            .map_err(|e| {
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
-            })?;
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
+    }
+
+    // Update routes if provided
+    if let Some(ref routes) = body.routes {
+        let parsed: Vec<ManagedRoute> = routes.iter().map(parse_managed_route).collect();
+        ctrl.storage
+            .set_routes(network_id, &parsed)
+            .await
+            .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
     }
 
     let ip_pools = ctrl
@@ -305,7 +345,13 @@ async fn update_network(
         .await
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
 
-    Ok(Json(network_to_response(network, &ip_pools)))
+    let routes = ctrl
+        .storage
+        .get_routes(network_id)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
+
+    Ok(Json(network_to_response(network, &ip_pools, &routes)))
 }
 
 /// Apply partial updates from an UpdateNetworkRequest to a NetworkRecord.
@@ -343,6 +389,7 @@ fn apply_network_updates(
 fn network_to_response(
     network: zerotier_node::controller::types::NetworkRecord,
     pools: &[IpPool],
+    routes: &[ManagedRoute],
 ) -> ControllerNetworkResponse {
     ControllerNetworkResponse {
         id: format_network_id(network.id),
@@ -356,7 +403,7 @@ fn network_to_response(
         v6_assign_mode: v6_assign_mode_to_json(&network.v6_assign_mode),
         ip_assignment_pools: pools.iter().map(ip_pool_to_response).collect(),
         enable_broadcast: network.enable_broadcast,
-        routes: Vec::new(),
+        routes: routes.iter().map(route_to_response).collect(),
     }
 }
 
@@ -365,7 +412,9 @@ async fn delete_network(
     State(state): State<Arc<AppState>>,
     Path(nwid): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
     let network_id = parse_network_id(&nwid)?;
     let ctrl = controller.lock().await;
@@ -384,11 +433,18 @@ async fn delete_network(
         .await
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
 
-    ctrl.storage.delete_network(network_id).await.map_err(|e| {
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
-    })?;
+    let routes = ctrl
+        .storage
+        .get_routes(network_id)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
 
-    Ok(Json(network_to_response(network, &pools)))
+    ctrl.storage
+        .delete_network(network_id)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
+
+    Ok(Json(network_to_response(network, &pools, &routes)))
 }
 
 /// GET /controller/network/{nwid}/member -- list member node IDs.
@@ -399,7 +455,9 @@ async fn list_members(
     State(state): State<Arc<AppState>>,
     Path(nwid): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
     let network_id = parse_network_id(&nwid)?;
     let ctrl = controller.lock().await;
@@ -422,7 +480,9 @@ async fn get_member(
     State(state): State<Arc<AppState>>,
     Path((nwid, node_id_hex)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
     let network_id = parse_network_id(&nwid)?;
     let node_id = parse_node_id_bytes(&node_id_hex)?;
@@ -445,7 +505,9 @@ async fn update_member(
     Path((nwid, node_id_hex)): Path<(String, String)>,
     Json(body): Json<UpdateMemberRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
     let network_id = parse_network_id(&nwid)?;
     let node_id = parse_node_id_bytes(&node_id_hex)?;
@@ -493,9 +555,10 @@ async fn update_member(
     }
 
     // Save the member first (so engine methods can find it)
-    ctrl.storage.upsert_member(&member).await.map_err(|e| {
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e))
-    })?;
+    ctrl.storage
+        .upsert_member(&member)
+        .await
+        .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
 
     Ok(Json(member_to_response(&member)))
 }
@@ -505,7 +568,9 @@ async fn delete_member(
     State(state): State<Arc<AppState>>,
     Path((nwid, node_id_hex)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let controller = state.controller.as_ref()
+    let controller = state
+        .controller
+        .as_ref()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "controller not enabled"))?;
     let network_id = parse_network_id(&nwid)?;
     let node_id = parse_node_id_bytes(&node_id_hex)?;

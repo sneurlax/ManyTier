@@ -51,8 +51,7 @@ impl ApiClient {
         path: &str,
         body: Option<&str>,
     ) -> anyhow::Result<String> {
-        let mut stream =
-            TcpStream::connect(format!("{}:{}", self.host, self.port)).await?;
+        let mut stream = TcpStream::connect(format!("{}:{}", self.host, self.port)).await?;
 
         let content_length = body.map(|b| b.len()).unwrap_or(0);
         let request = format!(

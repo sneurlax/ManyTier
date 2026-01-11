@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use zerotier_node::controller::storage::ControllerStorage;
-use zerotier_node::controller::types::{IpPool, MemberRecord, NetworkRecord};
+use zerotier_node::controller::types::{IpPool, ManagedRoute, MemberRecord, NetworkRecord};
 
 /// Filesystem storage error.
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +36,7 @@ impl FilesystemStorage {
         tokio::fs::create_dir_all(base.join("networks")).await?;
         tokio::fs::create_dir_all(base.join("members")).await?;
         tokio::fs::create_dir_all(base.join("pools")).await?;
+        tokio::fs::create_dir_all(base.join("routes")).await?;
         Ok(Self { base_dir: base })
     }
 
@@ -59,6 +60,12 @@ impl FilesystemStorage {
     fn pools_path(&self, network_id: u64) -> PathBuf {
         self.base_dir
             .join("pools")
+            .join(format!("{:016x}.json", network_id))
+    }
+
+    fn routes_path(&self, network_id: u64) -> PathBuf {
+        self.base_dir
+            .join("routes")
             .join(format!("{:016x}.json", network_id))
     }
 }
@@ -122,11 +129,13 @@ impl ControllerStorage for FilesystemStorage {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        // Also clean up members and pools for this network
+        // Also clean up members, pools, and routes for this network
         let member_dir = self.member_dir(id);
         let _ = tokio::fs::remove_dir_all(&member_dir).await;
         let pools_path = self.pools_path(id);
         let _ = tokio::fs::remove_file(&pools_path).await;
+        let routes_path = self.routes_path(id);
+        let _ = tokio::fs::remove_file(&routes_path).await;
         Ok(())
     }
 
@@ -168,11 +177,7 @@ impl ControllerStorage for FilesystemStorage {
         Ok(())
     }
 
-    async fn delete_member(
-        &self,
-        network_id: u64,
-        node_id: &[u8; 5],
-    ) -> Result<(), Self::Error> {
+    async fn delete_member(&self, network_id: u64, node_id: &[u8; 5]) -> Result<(), Self::Error> {
         let path = self.member_path(network_id, node_id);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -211,11 +216,7 @@ impl ControllerStorage for FilesystemStorage {
         }
     }
 
-    async fn set_ip_pools(
-        &self,
-        network_id: u64,
-        pools: &[IpPool],
-    ) -> Result<(), Self::Error> {
+    async fn set_ip_pools(&self, network_id: u64, pools: &[IpPool]) -> Result<(), Self::Error> {
         let path = self.pools_path(network_id);
         let data = serde_json::to_string_pretty(pools)?;
         tokio::fs::write(&path, data).await?;
@@ -231,5 +232,25 @@ impl ControllerStorage for FilesystemStorage {
             }
         }
         Ok(all_ips)
+    }
+
+    async fn get_routes(&self, network_id: u64) -> Result<Vec<ManagedRoute>, Self::Error> {
+        let path = self.routes_path(network_id);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(data) => Ok(serde_json::from_str(&data)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn set_routes(
+        &self,
+        network_id: u64,
+        routes: &[ManagedRoute],
+    ) -> Result<(), Self::Error> {
+        let path = self.routes_path(network_id);
+        let data = serde_json::to_string_pretty(routes)?;
+        tokio::fs::write(&path, data).await?;
+        Ok(())
     }
 }

@@ -3,7 +3,6 @@
 /// Provides the core VL2 types for tracking which peers are members of a
 /// virtual network, verifying Certificates of Membership, and looking up
 /// members by IP or MAC address.
-
 extern crate alloc;
 
 use alloc::vec::Vec;
@@ -12,6 +11,9 @@ use core::net::{Ipv4Addr, Ipv6Addr};
 use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
 
 use crate::ethernet;
+
+pub const COM_QUALIFIER_TIMESTAMP_ID: u64 = 0;
+pub const COM_REFRESH_MARGIN_CAP_MS: u64 = 60_000;
 
 /// A member of a virtual network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,8 +39,13 @@ pub struct NetworkMembership {
     pub our_com: Option<CertificateOfMembership>,
     pub peer_coms: Vec<([u8; 5], CertificateOfMembership)>,
     pub mtu: u16,
+    pub assigned_ipv4: Option<Ipv4Addr>,
+    pub assigned_ipv6: Option<Ipv6Addr>,
     pub routes: Vec<Route>,
+    pub pending_config_request: bool,
     pub last_config_request: u64,
+    pub last_multicast_like: u64,
+    pub last_multicast_gather: u64,
 }
 
 impl NetworkMembership {
@@ -50,22 +57,33 @@ impl NetworkMembership {
             our_com: None,
             peer_coms: Vec::new(),
             mtu,
+            assigned_ipv4: None,
+            assigned_ipv6: None,
             routes: Vec::new(),
+            pending_config_request: false,
             last_config_request: 0,
+            last_multicast_like: 0,
+            last_multicast_gather: 0,
         }
     }
 
     /// Look up a member by IPv4 address.
     pub fn lookup_ipv4(&self, ip: Ipv4Addr) -> Option<&NetworkMember> {
         self.members.iter().find(|m| {
-            m.ipv4.as_ref().map(|(addr, _)| *addr == ip).unwrap_or(false)
+            m.ipv4
+                .as_ref()
+                .map(|(addr, _)| *addr == ip)
+                .unwrap_or(false)
         })
     }
 
     /// Look up a member by IPv6 address.
     pub fn lookup_ipv6(&self, ip: Ipv6Addr) -> Option<&NetworkMember> {
         self.members.iter().find(|m| {
-            m.ipv6.as_ref().map(|(addr, _)| *addr == ip).unwrap_or(false)
+            m.ipv6
+                .as_ref()
+                .map(|(addr, _)| *addr == ip)
+                .unwrap_or(false)
         })
     }
 
@@ -91,12 +109,45 @@ impl NetworkMembership {
             None => false,
         }
     }
+
+    pub fn our_com_timestamp_qualifier(&self) -> Option<&ComQualifier> {
+        self.our_com
+            .as_ref()?
+            .qualifiers
+            .iter()
+            .find(|q| q.id == COM_QUALIFIER_TIMESTAMP_ID)
+    }
+
+    /// Returns the proactive refresh margin derived from the COM lifetime.
+    ///
+    /// Exact zerotier-one refresh timing is still unknown in-tree. We use a
+    /// bounded assumption based on the observed qualifier-0 lifetime:
+    /// refresh during the final quarter of the lifetime, capped at 60s.
+    pub fn our_com_refresh_margin_ms(&self) -> Option<u64> {
+        let qualifier = self.our_com_timestamp_qualifier()?;
+        Some(
+            qualifier
+                .max_delta
+                .saturating_div(4)
+                .clamp(1_000, COM_REFRESH_MARGIN_CAP_MS),
+        )
+    }
+
+    pub fn our_com_refresh_due(&self, now_ms: u64) -> bool {
+        let qualifier = match self.our_com_timestamp_qualifier() {
+            Some(qualifier) => qualifier,
+            None => return self.our_com.is_none(),
+        };
+
+        let refresh_margin = self.our_com_refresh_margin_ms().unwrap_or(0);
+        let refresh_at = qualifier
+            .value
+            .saturating_add(qualifier.max_delta.saturating_sub(refresh_margin));
+        now_ms >= refresh_at
+    }
 }
 
-fn peer_com_agrees_with(
-    ours: &CertificateOfMembership,
-    theirs: &CertificateOfMembership,
-) -> bool {
+fn peer_com_agrees_with(ours: &CertificateOfMembership, theirs: &CertificateOfMembership) -> bool {
     for our_q in &ours.qualifiers {
         // `issued_to` is peer-specific and must not be compared across members.
         if our_q.id == 2 {
@@ -121,10 +172,7 @@ fn peer_com_agrees_with(
 
 /// Check if two COMs agree: all qualifiers in `ours` must have a matching
 /// qualifier (by ID) in `theirs` with |value difference| <= max_delta.
-pub fn com_agrees_with(
-    ours: &CertificateOfMembership,
-    theirs: &CertificateOfMembership,
-) -> bool {
+pub fn com_agrees_with(ours: &CertificateOfMembership, theirs: &CertificateOfMembership) -> bool {
     for our_q in &ours.qualifiers {
         match theirs.qualifiers.iter().find(|oq| oq.id == our_q.id) {
             None => return false,
@@ -173,6 +221,7 @@ mod tests {
 
     fn make_com(qualifiers: Vec<ComQualifier>) -> CertificateOfMembership {
         CertificateOfMembership {
+            issued_to: [0; 5],
             qualifiers,
             signer_address: [0; 5],
             signature: [0; 96],
@@ -184,68 +233,144 @@ mod tests {
     #[test]
     fn agrees_with_matching_qualifiers() {
         let ours = make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
-            ComQualifier { id: 1, value: 0xff, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1000,
+                max_delta: 100,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff,
+                max_delta: 0,
+            },
         ]);
         let theirs = make_com(vec![
-            ComQualifier { id: 0, value: 1050, max_delta: 100 },
-            ComQualifier { id: 1, value: 0xff, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1050,
+                max_delta: 100,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff,
+                max_delta: 0,
+            },
         ]);
         assert!(com_agrees_with(&ours, &theirs));
     }
 
     #[test]
     fn agrees_with_exact_delta_boundary() {
-        let ours = make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
-        ]);
-        let theirs = make_com(vec![
-            ComQualifier { id: 0, value: 1100, max_delta: 100 },
-        ]);
+        let ours = make_com(vec![ComQualifier {
+            id: 0,
+            value: 1000,
+            max_delta: 100,
+        }]);
+        let theirs = make_com(vec![ComQualifier {
+            id: 0,
+            value: 1100,
+            max_delta: 100,
+        }]);
         assert!(com_agrees_with(&ours, &theirs));
     }
 
     #[test]
     fn rejects_exceeding_delta() {
-        let ours = make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
-        ]);
-        let theirs = make_com(vec![
-            ComQualifier { id: 0, value: 1101, max_delta: 100 },
-        ]);
+        let ours = make_com(vec![ComQualifier {
+            id: 0,
+            value: 1000,
+            max_delta: 100,
+        }]);
+        let theirs = make_com(vec![ComQualifier {
+            id: 0,
+            value: 1101,
+            max_delta: 100,
+        }]);
         assert!(!com_agrees_with(&ours, &theirs));
     }
 
     #[test]
     fn rejects_missing_qualifier() {
         let ours = make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
-            ComQualifier { id: 1, value: 0xff, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1000,
+                max_delta: 100,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff,
+                max_delta: 0,
+            },
         ]);
         let theirs = make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
+            ComQualifier {
+                id: 0,
+                value: 1000,
+                max_delta: 100,
+            },
             // Missing qualifier ID 1
         ]);
         assert!(!com_agrees_with(&ours, &theirs));
     }
 
     #[test]
+    fn com_refresh_due_with_missing_com() {
+        let net = NetworkMembership::new(1, 2800);
+        assert!(net.our_com_refresh_due(1000));
+    }
+
+    #[test]
+    fn com_refresh_due_before_expiry_with_bounded_margin() {
+        let mut net = NetworkMembership::new(1, 2800);
+        net.our_com = Some(make_com(vec![ComQualifier {
+            id: COM_QUALIFIER_TIMESTAMP_ID,
+            value: 1_000,
+            max_delta: 360_000,
+        }]));
+
+        assert_eq!(net.our_com_refresh_margin_ms(), Some(60_000));
+        assert!(!net.our_com_refresh_due(300_999));
+        assert!(net.our_com_refresh_due(301_000));
+    }
+
+    #[test]
+    fn com_refresh_margin_scales_for_short_lifetime() {
+        let mut net = NetworkMembership::new(1, 2800);
+        net.our_com = Some(make_com(vec![ComQualifier {
+            id: COM_QUALIFIER_TIMESTAMP_ID,
+            value: 5_000,
+            max_delta: 20_000,
+        }]));
+
+        assert_eq!(net.our_com_refresh_margin_ms(), Some(5_000));
+        assert!(!net.our_com_refresh_due(19_999));
+        assert!(net.our_com_refresh_due(20_000));
+    }
+
+    #[test]
     fn agrees_with_empty_qualifiers() {
         let ours = make_com(vec![]);
-        let theirs = make_com(vec![
-            ComQualifier { id: 0, value: 999, max_delta: 0 },
-        ]);
+        let theirs = make_com(vec![ComQualifier {
+            id: 0,
+            value: 999,
+            max_delta: 0,
+        }]);
         assert!(com_agrees_with(&ours, &theirs));
     }
 
     #[test]
     fn rejects_network_id_mismatch() {
-        let ours = make_com(vec![
-            ComQualifier { id: 1, value: 0xaabbccdd, max_delta: 0 },
-        ]);
-        let theirs = make_com(vec![
-            ComQualifier { id: 1, value: 0xaabbccde, max_delta: 0 },
-        ]);
+        let ours = make_com(vec![ComQualifier {
+            id: 1,
+            value: 0xaabbccdd,
+            max_delta: 0,
+        }]);
+        let theirs = make_com(vec![ComQualifier {
+            id: 1,
+            value: 0xaabbccde,
+            max_delta: 0,
+        }]);
         assert!(!com_agrees_with(&ours, &theirs));
     }
 
@@ -260,9 +385,21 @@ mod tests {
 
         // Build qualifiers
         let qualifiers = vec![
-            ComQualifier { id: 0, value: 1711500000000, max_delta: 360000 },
-            ComQualifier { id: 1, value: 0xff00000000abcdef, max_delta: 0 },
-            ComQualifier { id: 2, value: 0xa0b1c2d3e4, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1711500000000,
+                max_delta: 360000,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff00000000abcdef,
+                max_delta: 0,
+            },
+            ComQualifier {
+                id: 2,
+                value: 0xa0b1c2d3e4,
+                max_delta: 0,
+            },
         ];
 
         // Build signed data (qualifiers already sorted by ID)
@@ -276,6 +413,7 @@ mod tests {
         let signature = zerotier_crypto::signing::sign(&signing_key, &signed_data);
 
         let com = CertificateOfMembership {
+            issued_to: [0; 5],
             qualifiers,
             signer_address: [0xa0, 0xb1, 0xc2, 0xd3, 0xe4],
             signature,
@@ -292,9 +430,11 @@ mod tests {
         let wrong_key = SigningKey::from_bytes(&[0x43u8; 32]);
         let wrong_verifying = wrong_key.verifying_key();
 
-        let qualifiers = vec![
-            ComQualifier { id: 0, value: 100, max_delta: 10 },
-        ];
+        let qualifiers = vec![ComQualifier {
+            id: 0,
+            value: 100,
+            max_delta: 10,
+        }];
 
         let mut signed_data = Vec::new();
         for q in &qualifiers {
@@ -306,6 +446,7 @@ mod tests {
         let signature = zerotier_crypto::signing::sign(&signing_key, &signed_data);
 
         let com = CertificateOfMembership {
+            issued_to: [0; 5],
             qualifiers,
             signer_address: [0; 5],
             signature,
@@ -323,9 +464,21 @@ mod tests {
 
         // Qualifiers in sorted order for signing
         let sorted_qualifiers = vec![
-            ComQualifier { id: 0, value: 100, max_delta: 10 },
-            ComQualifier { id: 1, value: 200, max_delta: 0 },
-            ComQualifier { id: 2, value: 300, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 100,
+                max_delta: 10,
+            },
+            ComQualifier {
+                id: 1,
+                value: 200,
+                max_delta: 0,
+            },
+            ComQualifier {
+                id: 2,
+                value: 300,
+                max_delta: 0,
+            },
         ];
 
         let mut signed_data = Vec::new();
@@ -338,10 +491,23 @@ mod tests {
 
         // Create COM with qualifiers in UNSORTED order
         let com = CertificateOfMembership {
+            issued_to: [0; 5],
             qualifiers: vec![
-                ComQualifier { id: 2, value: 300, max_delta: 0 },
-                ComQualifier { id: 0, value: 100, max_delta: 10 },
-                ComQualifier { id: 1, value: 200, max_delta: 0 },
+                ComQualifier {
+                    id: 2,
+                    value: 300,
+                    max_delta: 0,
+                },
+                ComQualifier {
+                    id: 0,
+                    value: 100,
+                    max_delta: 10,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 200,
+                    max_delta: 0,
+                },
             ],
             signer_address: [0; 5],
             signature,
@@ -409,9 +575,11 @@ mod tests {
     #[test]
     fn verify_peer_com_no_our_com() {
         let net = NetworkMembership::new(0xff00000000abcdef, 2800);
-        let peer_com = make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
-        ]);
+        let peer_com = make_com(vec![ComQualifier {
+            id: 0,
+            value: 1000,
+            max_delta: 100,
+        }]);
         assert!(!net.verify_peer_com(&[0x01; 5], &peer_com));
     }
 
@@ -419,12 +587,28 @@ mod tests {
     fn verify_peer_com_with_matching_com() {
         let mut net = NetworkMembership::new(0xff00000000abcdef, 2800);
         net.our_com = Some(make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
-            ComQualifier { id: 1, value: 0xff, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1000,
+                max_delta: 100,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff,
+                max_delta: 0,
+            },
         ]));
         let peer_com = make_com(vec![
-            ComQualifier { id: 0, value: 1050, max_delta: 100 },
-            ComQualifier { id: 1, value: 0xff, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1050,
+                max_delta: 100,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff,
+                max_delta: 0,
+            },
         ]);
         assert!(net.verify_peer_com(&[0x01; 5], &peer_com));
     }
@@ -433,14 +617,38 @@ mod tests {
     fn verify_peer_com_ignores_issued_to_qualifier() {
         let mut net = NetworkMembership::new(0xff00000000abcdef, 2800);
         net.our_com = Some(make_com(vec![
-            ComQualifier { id: 0, value: 1000, max_delta: 100 },
-            ComQualifier { id: 1, value: 0xff00000000abcdef, max_delta: 0 },
-            ComQualifier { id: 2, value: 0x00a0b1c2d3e4, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1000,
+                max_delta: 100,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff00000000abcdef,
+                max_delta: 0,
+            },
+            ComQualifier {
+                id: 2,
+                value: 0x00a0b1c2d3e4,
+                max_delta: 0,
+            },
         ]));
         let peer_com = make_com(vec![
-            ComQualifier { id: 0, value: 1050, max_delta: 100 },
-            ComQualifier { id: 1, value: 0xff00000000abcdef, max_delta: 0 },
-            ComQualifier { id: 2, value: 0x00f0e1d2c3b4, max_delta: 0 },
+            ComQualifier {
+                id: 0,
+                value: 1050,
+                max_delta: 100,
+            },
+            ComQualifier {
+                id: 1,
+                value: 0xff00000000abcdef,
+                max_delta: 0,
+            },
+            ComQualifier {
+                id: 2,
+                value: 0x00f0e1d2c3b4,
+                max_delta: 0,
+            },
         ]);
         assert!(net.verify_peer_com(&[0x01; 5], &peer_com));
     }

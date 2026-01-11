@@ -9,8 +9,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A network record as stored by the controller.
-#[derive(Debug, Clone)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkRecord {
     pub id: u64,
     pub name: String,
@@ -32,8 +31,7 @@ pub struct NetworkRecord {
 }
 
 /// A member record as stored by the controller.
-#[derive(Debug, Clone)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemberRecord {
     pub network_id: u64,
     /// ZeroTier 5-byte address
@@ -47,9 +45,15 @@ pub struct MemberRecord {
 }
 
 /// An IPv4 address pool for auto-assignment.
-#[derive(Debug, Clone)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IpPool {
     pub range_start: [u8; 4],
     pub range_end: [u8; 4],
+}
+
+/// A managed route entry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManagedRoute {
+    pub target: String,
+    pub via: Option<String>,
 }

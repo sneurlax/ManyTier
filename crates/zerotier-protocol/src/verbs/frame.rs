@@ -3,7 +3,6 @@
 /// FRAME wire format:
 ///
 /// EXT_FRAME wire format:
-
 use crate::error::ProtocolError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

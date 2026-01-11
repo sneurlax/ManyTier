@@ -13,7 +13,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::config_builder::build_network_config;
+use super::config_builder::{build_network_config, serialize_com, serialize_inet_address};
+use super::dictionary::Dictionary;
 use super::ip_pool;
 use super::storage::ControllerStorage;
 use super::types::{MemberRecord, NetworkRecord};
@@ -193,6 +194,13 @@ impl<S: ControllerStorage> Controller<S> {
             .await
             .map_err(|e| ControllerError::StorageError(alloc::format!("{}", e)))?;
 
+        // Fetch routes
+        let routes = self
+            .storage
+            .get_routes(network_id)
+            .await
+            .map_err(|e| ControllerError::StorageError(alloc::format!("{}", e)))?;
+
         // Build signed COM
         let issued_to = zt_address_to_u64(requester);
         let com = build_signed_com(
@@ -204,13 +212,40 @@ impl<S: ControllerStorage> Controller<S> {
         );
 
         // Build network config dictionary
-        let dict_data = build_network_config(&network, &member, &com, now_ms);
+        let dict_data = build_network_config(&network, &member, &routes, &com, now_ms);
+        let member_ids = self
+            .storage
+            .list_members(network_id)
+            .await
+            .map_err(|e| ControllerError::StorageError(alloc::format!("{}", e)))?;
+        let mut members = Vec::with_capacity(member_ids.len());
+        for member_id in member_ids {
+            if let Some(record) = self
+                .storage
+                .get_member(network_id, &member_id)
+                .await
+                .map_err(|e| ControllerError::StorageError(alloc::format!("{}", e)))?
+            {
+                members.push(record);
+            }
+        }
+        let dict_data = append_peer_directory(
+            dict_data,
+            &members,
+            network_id,
+            now_ms,
+            &self.signing_key,
+            &self.address,
+        )?;
 
         let config = NetworkConfigPayload {
             network_id,
             dict_data,
+            flags: None,
+            config_update_id: None,
+            total_length: None,
             chunk_index: None,
-            total_chunks: None,
+            signature_type: None,
             signature: None,
         };
 
@@ -273,6 +308,83 @@ impl<S: ControllerStorage> Controller<S> {
     }
 }
 
+fn append_peer_directory(
+    dict_data: Vec<u8>,
+    members: &[MemberRecord],
+    network_id: u64,
+    now_ms: u64,
+    signing_key: &ed25519_dalek::SigningKey,
+    controller_address: &[u8; 5],
+) -> Result<Vec<u8>, ControllerError> {
+    let mut dict = Dictionary::deserialize(&dict_data).map_err(|e| {
+        ControllerError::StorageError(alloc::format!("dict deserialize failed: {e}"))
+    })?;
+    let directory =
+        serialize_peer_directory(members, network_id, now_ms, signing_key, controller_address);
+    if !directory.is_empty() {
+        dict.add_binary("PM", directory);
+    }
+    Ok(dict.serialize())
+}
+
+fn serialize_peer_directory(
+    members: &[MemberRecord],
+    network_id: u64,
+    now_ms: u64,
+    signing_key: &ed25519_dalek::SigningKey,
+    controller_address: &[u8; 5],
+) -> Vec<u8> {
+    let eligible: Vec<_> = members
+        .iter()
+        .filter(|member| member.authorized && !member.ip_assignments.is_empty())
+        .collect();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(eligible.len() as u16).to_be_bytes());
+
+    for member in eligible {
+        buf.extend_from_slice(&member.node_id);
+        buf.extend(serialize_assignment_inet(
+            member
+                .ip_assignments
+                .iter()
+                .find(|assignment| !assignment.contains(':'))
+                .map(|assignment| assignment.as_str()),
+        ));
+        buf.extend(serialize_assignment_inet(
+            member
+                .ip_assignments
+                .iter()
+                .find(|assignment| assignment.contains(':'))
+                .map(|assignment| assignment.as_str()),
+        ));
+
+        let com = build_signed_com(
+            signing_key,
+            controller_address,
+            network_id,
+            zt_address_to_u64(&member.node_id),
+            now_ms,
+        );
+        buf.extend_from_slice(&serialize_com(&com));
+    }
+
+    buf
+}
+
+fn serialize_assignment_inet(assignment: Option<&str>) -> Vec<u8> {
+    let Some(assignment) = assignment else {
+        return vec![0x00];
+    };
+
+    let mut parts = assignment.splitn(2, '/');
+    let ip = parts.next().unwrap_or_default();
+    let prefix = parts
+        .next()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or_else(|| if ip.contains(':') { 128 } else { 32 });
+    serialize_inet_address(ip, prefix)
+}
+
 /// Convert a 5-byte ZeroTier address to a u64 (zero-extended).
 pub fn zt_address_to_u64(addr: &[u8; 5]) -> u64 {
     (addr[0] as u64) << 32
@@ -280,6 +392,16 @@ pub fn zt_address_to_u64(addr: &[u8; 5]) -> u64 {
         | (addr[2] as u64) << 16
         | (addr[3] as u64) << 8
         | (addr[4] as u64)
+}
+
+pub fn u64_to_zt_address(addr: u64) -> [u8; 5] {
+    [
+        (addr >> 32) as u8,
+        (addr >> 24) as u8,
+        (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
+    ]
 }
 
 /// Build a signed Certificate of Membership.
@@ -327,6 +449,7 @@ pub fn build_signed_com(
     let signature = zerotier_crypto::signing::sign(signing_key, &signed_data);
 
     CertificateOfMembership {
+        issued_to: u64_to_zt_address(issued_to),
         qualifiers,
         signer_address: *signer_address,
         signature,
@@ -343,7 +466,7 @@ mod tests {
     use core::fmt;
 
     use super::super::storage::ControllerStorage;
-    use super::super::types::{IpPool, MemberRecord, NetworkRecord};
+    use super::super::types::{IpPool, ManagedRoute, MemberRecord, NetworkRecord};
 
     // --- Minimal in-memory storage for tests ---
 
@@ -360,6 +483,7 @@ mod tests {
         networks: std::sync::Mutex<Vec<NetworkRecord>>,
         members: std::sync::Mutex<Vec<MemberRecord>>,
         pools: std::sync::Mutex<Vec<(u64, Vec<IpPool>)>>,
+        routes: std::sync::Mutex<Vec<(u64, Vec<ManagedRoute>)>>,
     }
 
     impl InMemoryStorage {
@@ -368,6 +492,7 @@ mod tests {
                 networks: std::sync::Mutex::new(Vec::new()),
                 members: std::sync::Mutex::new(Vec::new()),
                 pools: std::sync::Mutex::new(Vec::new()),
+                routes: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -467,6 +592,26 @@ mod tests {
             let mut pools = self.pools.lock().unwrap();
             pools.retain(|(nid, _)| *nid != network_id);
             pools.push((network_id, new_pools.to_vec()));
+            Ok(())
+        }
+
+        async fn get_routes(&self, network_id: u64) -> Result<Vec<ManagedRoute>, Self::Error> {
+            let routes = self.routes.lock().unwrap();
+            Ok(routes
+                .iter()
+                .find(|(nid, _)| *nid == network_id)
+                .map(|(_, r)| r.clone())
+                .unwrap_or_default())
+        }
+
+        async fn set_routes(
+            &self,
+            network_id: u64,
+            new_routes: &[ManagedRoute],
+        ) -> Result<(), Self::Error> {
+            let mut routes = self.routes.lock().unwrap();
+            routes.retain(|(nid, _)| *nid != network_id);
+            routes.push((network_id, new_routes.to_vec()));
             Ok(())
         }
 
@@ -571,7 +716,10 @@ mod tests {
             .unwrap();
 
         let requester = [0x11, 0x22, 0x33, 0x44, 0x55];
-        let response = ctrl.handle_config_request(nid, &requester, 2000).await.unwrap();
+        let response = ctrl
+            .handle_config_request(nid, &requester, 2000)
+            .await
+            .unwrap();
 
         // Member should have an IP assignment
         let member = ctrl

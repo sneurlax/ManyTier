@@ -3,11 +3,10 @@
 /// MULTICAST_LIKE: repeated 18-byte tuples of (network_id, mac, adi).
 /// MULTICAST_GATHER: network_id, flags, mac, adi, gather_limit, optional COM.
 /// MULTICAST_FRAME: network_id, flags, conditional gather_limit/source_mac, dest_mac, adi, ethertype, payload.
-
 extern crate alloc;
 
-use alloc::vec::Vec;
 use crate::error::ProtocolError;
+use alloc::vec::Vec;
 
 /// A single multicast group subscription entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,7 +430,10 @@ mod tests {
         assert_eq!(n, 32);
         let parsed = MulticastFramePayload::parse(&buf[..n]).unwrap();
         assert!(parsed.gather_limit.is_none());
-        assert_eq!(parsed.source_mac, Some([0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f]));
+        assert_eq!(
+            parsed.source_mac,
+            Some([0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f])
+        );
     }
 
     #[test]
@@ -453,7 +455,10 @@ mod tests {
         assert_eq!(n, 39);
         let parsed = MulticastFramePayload::parse(&buf[..n]).unwrap();
         assert_eq!(parsed.gather_limit, Some(1000));
-        assert_eq!(parsed.source_mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+        assert_eq!(
+            parsed.source_mac,
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
         assert_eq!(parsed.ethertype, 0x86DD);
         assert_eq!(parsed.payload, &data[..]);
     }

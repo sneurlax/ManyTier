@@ -5,8 +5,8 @@ use zerotier_crypto::identity::Identity;
 /// Generate a new identity and write to identity.secret / identity.public.
 pub fn generate() -> anyhow::Result<()> {
     let mut rng = GetrandomRng;
-    let identity =
-        Identity::generate(&mut rng).map_err(|e| anyhow::anyhow!("identity generation failed: {:?}", e))?;
+    let identity = Identity::generate(&mut rng)
+        .map_err(|e| anyhow::anyhow!("identity generation failed: {:?}", e))?;
 
     // Write secret identity
     let secret_str = identity
@@ -32,28 +32,36 @@ pub fn show() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// RNG wrapper using getrandom::fill directly to bridge rand_core version conflicts.
+/// RNG wrapper using getrandom directly to bridge rand_core version conflicts.
 ///
 /// The dalek crates use rand_core 0.6 transitively while our workspace uses 0.9.
-/// This wrapper implements rand_core::RngCore using getrandom::fill to avoid
+/// This wrapper implements rand_core::RngCore using getrandom to avoid
 /// version-mismatch trait bound errors with OsRng.
 struct GetrandomRng;
 
 impl rand_core::RngCore for GetrandomRng {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
-        getrandom::fill(&mut buf).expect("getrandom failed");
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
         u32::from_le_bytes(buf)
     }
 
     fn next_u64(&mut self) -> u64 {
         let mut buf = [0u8; 8];
-        getrandom::fill(&mut buf).expect("getrandom failed");
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
         u64::from_le_bytes(buf)
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::fill(dest).expect("getrandom failed");
+        getrandom::getrandom(dest).expect("getrandom failed");
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        getrandom::getrandom(dest).map_err(|_| {
+            rand_core::Error::from(
+                core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap(),
+            )
+        })
     }
 }
 

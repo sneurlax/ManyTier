@@ -2,7 +2,6 @@
 ///
 /// ARP requests arriving as EXT_FRAME payloads (ethertype 0x0806) on the virtual
 /// network are resolved locally from the member table, preventing broadcast flooding.
-
 extern crate alloc;
 
 use core::net::Ipv4Addr;
@@ -170,7 +169,7 @@ mod tests {
         data[2..4].copy_from_slice(&0x0800u16.to_be_bytes());
         data[4] = 6; // hw_len
         data[5] = 4; // proto_len
-        // operation = 1 (request)
+                     // operation = 1 (request)
         data[6..8].copy_from_slice(&1u16.to_be_bytes());
         // sender hw
         data[8..14].copy_from_slice(&[0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f]);

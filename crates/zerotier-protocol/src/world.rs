@@ -1,6 +1,5 @@
 // World (Planet/Moon) binary format parser.
 /// Binary format:
-
 use alloc::vec::Vec;
 use zerotier_crypto::identity::Identity;
 
@@ -242,7 +241,8 @@ impl World {
 
         // Roots
         for root in &self.roots {
-            let id_written = identity_wire::serialize_identity_public(&root.identity, &mut buf[pos..]);
+            let id_written =
+                identity_wire::serialize_identity_public(&root.identity, &mut buf[pos..]);
             pos += id_written;
 
             buf[pos] = root.endpoints.len() as u8;
@@ -304,7 +304,8 @@ impl World {
 
         // Roots
         for root in &self.roots {
-            let id_written = identity_wire::serialize_identity_public(&root.identity, &mut buf[pos..]);
+            let id_written =
+                identity_wire::serialize_identity_public(&root.identity, &mut buf[pos..]);
             pos += id_written;
 
             buf[pos] = root.endpoints.len() as u8;
@@ -484,8 +485,14 @@ mod tests {
         let n = world.serialize(&mut buf).unwrap();
         let parsed = World::deserialize(&buf[..n]).unwrap();
         // Identity was successfully parsed via identity_wire::deserialize_identity
-        assert_eq!(parsed.roots[0].identity.address, world.roots[0].identity.address);
-        assert_eq!(parsed.roots[0].identity.public_key, world.roots[0].identity.public_key);
+        assert_eq!(
+            parsed.roots[0].identity.address,
+            world.roots[0].identity.address
+        );
+        assert_eq!(
+            parsed.roots[0].identity.public_key,
+            world.roots[0].identity.public_key
+        );
     }
 
     #[test]
@@ -503,7 +510,10 @@ mod tests {
         let world = World::deserialize(DEFAULT_PLANET).expect("default planet should parse");
         assert_eq!(world.world_type, WorldType::Planet);
         assert_eq!(world.id, WORLD_ID_EARTH); // 149604618
-        assert!(!world.roots.is_empty(), "planet must have at least one root");
+        assert!(
+            !world.roots.is_empty(),
+            "planet must have at least one root"
+        );
         for root in &world.roots {
             assert!(!root.endpoints.is_empty(), "each root must have endpoints");
         }

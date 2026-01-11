@@ -1,11 +1,10 @@
 /// PUSH_DIRECT_PATHS verb codec (verb 0x10).
 ///
-
 extern crate alloc;
 
-use alloc::vec::Vec;
 use crate::error::ProtocolError;
 use crate::inet_address::InetAddress;
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectPath {

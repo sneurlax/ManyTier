@@ -2,7 +2,6 @@
 ///
 /// Public identity wire layout (71 bytes):
 /// `[address:5][type:1][dh_pubkey:32][signing_pubkey:32][secret_len:1(=0)]`
-
 use crate::error::ProtocolError;
 use zerotier_crypto::identity::{Address, Identity, PublicKey};
 
@@ -38,8 +37,7 @@ pub fn deserialize_identity(data: &[u8]) -> Result<(Identity, usize), ProtocolEr
 
     let mut addr_bytes = [0u8; 5];
     addr_bytes.copy_from_slice(&data[0..5]);
-    let address =
-        Address::new(addr_bytes).map_err(|_| ProtocolError::InvalidAddress)?;
+    let address = Address::new(addr_bytes).map_err(|_| ProtocolError::InvalidAddress)?;
 
     let id_type = data[5];
     if id_type != IDENTITY_TYPE_C25519 {
@@ -49,8 +47,7 @@ pub fn deserialize_identity(data: &[u8]) -> Result<(Identity, usize), ProtocolEr
     let mut pub_bytes = [0u8; 64];
     pub_bytes[..32].copy_from_slice(&data[6..38]);
     pub_bytes[32..].copy_from_slice(&data[38..70]);
-    let public_key =
-        PublicKey::from_bytes(&pub_bytes).map_err(ProtocolError::CryptoError)?;
+    let public_key = PublicKey::from_bytes(&pub_bytes).map_err(ProtocolError::CryptoError)?;
 
     let secret_len = data[70] as usize;
     let consumed = IDENTITY_PUBLIC_WIRE_LEN + secret_len;

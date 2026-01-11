@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use zerotier_node::controller::storage::ControllerStorage;
-use zerotier_node::controller::types::{IpPool, MemberRecord, NetworkRecord};
+use zerotier_node::controller::types::{IpPool, ManagedRoute, MemberRecord, NetworkRecord};
 
 /// In-memory storage error.
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +16,7 @@ struct InMemoryState {
     networks: Vec<NetworkRecord>,
     members: Vec<MemberRecord>,
     ip_pools: Vec<(u64, IpPool)>,
+    routes: Vec<(u64, ManagedRoute)>,
 }
 
 /// In-memory controller storage backend.
@@ -33,6 +34,7 @@ impl InMemoryStorage {
                 networks: Vec::new(),
                 members: Vec::new(),
                 ip_pools: Vec::new(),
+                routes: Vec::new(),
             }),
         }
     }
@@ -73,6 +75,7 @@ impl ControllerStorage for InMemoryStorage {
         state.networks.retain(|n| n.id != id);
         state.members.retain(|m| m.network_id != id);
         state.ip_pools.retain(|(nid, _)| *nid != id);
+        state.routes.retain(|(nid, _)| *nid != id);
         Ok(())
     }
 
@@ -108,11 +111,7 @@ impl ControllerStorage for InMemoryStorage {
         Ok(())
     }
 
-    async fn delete_member(
-        &self,
-        network_id: u64,
-        node_id: &[u8; 5],
-    ) -> Result<(), Self::Error> {
+    async fn delete_member(&self, network_id: u64, node_id: &[u8; 5]) -> Result<(), Self::Error> {
         let mut state = self.state.lock().unwrap();
         state
             .members
@@ -140,11 +139,7 @@ impl ControllerStorage for InMemoryStorage {
             .collect())
     }
 
-    async fn set_ip_pools(
-        &self,
-        network_id: u64,
-        pools: &[IpPool],
-    ) -> Result<(), Self::Error> {
+    async fn set_ip_pools(&self, network_id: u64, pools: &[IpPool]) -> Result<(), Self::Error> {
         let mut state = self.state.lock().unwrap();
         state.ip_pools.retain(|(nid, _)| *nid != network_id);
         for pool in pools {
@@ -160,5 +155,28 @@ impl ControllerStorage for InMemoryStorage {
             all_ips.extend(member.ip_assignments.clone());
         }
         Ok(all_ips)
+    }
+
+    async fn get_routes(&self, network_id: u64) -> Result<Vec<ManagedRoute>, Self::Error> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .routes
+            .iter()
+            .filter(|(nid, _)| *nid == network_id)
+            .map(|(_, route)| route.clone())
+            .collect())
+    }
+
+    async fn set_routes(
+        &self,
+        network_id: u64,
+        routes: &[ManagedRoute],
+    ) -> Result<(), Self::Error> {
+        let mut state = self.state.lock().unwrap();
+        state.routes.retain(|(nid, _)| *nid != network_id);
+        for route in routes {
+            state.routes.push((network_id, route.clone()));
+        }
+        Ok(())
     }
 }

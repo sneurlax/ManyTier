@@ -2,7 +2,6 @@
 ///
 /// Determines how to route outbound packets: direct to peer, relay through
 /// root server, or drop. Implements hop count management for relayed packets.
-
 use zerotier_protocol::constants::ZT_RELAY_MAX_HOPS;
 
 use crate::topology::Topology;
@@ -11,9 +10,7 @@ use crate::topology::Topology;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDecision {
     /// Send directly to the peer at this address.
-    Direct {
-        address: core::net::SocketAddr,
-    },
+    Direct { address: core::net::SocketAddr },
     /// Relay through a root server.
     Relay {
         root_address: core::net::SocketAddr,
@@ -34,11 +31,7 @@ impl Switch {
     /// 2. If dest peer exists but only relay path -> Relay
     /// 3. Dest peer unknown -> Relay through best root (triggers WHOIS)
     /// 4. No root available -> Drop
-    pub fn route(
-        topology: &Topology,
-        dest: &[u8; 5],
-        now_ms: u64,
-    ) -> RouteDecision {
+    pub fn route(topology: &Topology, dest: &[u8; 5], now_ms: u64) -> RouteDecision {
         // Check if we know the destination peer
         if let Some(peer) = topology.get_peer(dest) {
             // Try to find a direct path

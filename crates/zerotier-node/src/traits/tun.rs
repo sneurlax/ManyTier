@@ -30,9 +30,5 @@ pub trait TunDevice: Send + Sync {
     /// Add a route through this TUN device.
     /// target is the destination network in CIDR notation (e.g., "10.147.20.0/24" or "fd00::/64").
     /// gateway is optional; if None, the route goes directly through this device.
-    async fn add_route(
-        &self,
-        target: &str,
-        gateway: Option<IpAddr>,
-    ) -> Result<(), Self::Error>;
+    async fn add_route(&self, target: &str, gateway: Option<IpAddr>) -> Result<(), Self::Error>;
 }

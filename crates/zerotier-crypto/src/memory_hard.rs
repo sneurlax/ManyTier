@@ -1,10 +1,10 @@
 /// Memory-hard proof-of-work hash for ZeroTier V1 identity address derivation.
 ///
 /// This implements the algorithm from ZeroTierOne/node/Identity.cpp
-/// `_computeMemoryHardHash()`. The function uses a 2MB buffer filled
-/// via Salsa20 (20 rounds) in a CBC-like chaining mode, then performs
-/// memory-dependent digest mixing to make the computation resistant to
-/// GPU/ASIC acceleration.
+/// `_computeMemoryHardHash()`. The function fills a 2MB buffer via
+/// Salsa20 (20 rounds) in a CBC-like chaining mode, then uses that
+/// buffer as a lookup table to swap 64-bit words into the digest while
+/// continuing the same Salsa20 stream.
 ///
 /// IMPORTANT: This uses Salsa20 (20 rounds), NOT Salsa20/12. The 12-round
 /// variant is used for packet encryption only (per Pitfall 4 in RESEARCH.md).
@@ -31,11 +31,14 @@ pub const HASHCASH_THRESHOLD: u8 = 17;
 ///
 /// 1. SHA-512 the public key to get a 64-byte digest
 /// 2. Initialize Salsa20 with key=digest[0..32], nonce=digest[32..40]
-/// 3. Fill a 2MB buffer in 64-byte blocks using CBC-like chaining:
-///    - First block: XOR digest with genmem[0..64], then encrypt
-///    - Subsequent: XOR previous encrypted block, then encrypt
-/// 4. Memory-dependent mixing loop over digest bytes
-/// 5. Final Salsa20 encryption pass over digest
+/// 3. Fill a 2MB buffer in 64-byte blocks:
+///    - First block: encrypt 64 zero bytes
+///    - Subsequent blocks: copy the previous ciphertext block, then encrypt
+/// 4. Iterate over the 2MB buffer as big-endian u64 pairs:
+///    - First word selects one of the 8 digest u64 slots
+///    - Second word selects one of the 262_144 genmem u64 slots
+///    - Swap those raw 8-byte words
+///    - Encrypt the 64-byte digest in place with the same Salsa20 stream
 pub fn compute_memory_hard_hash(public_key: &[u8; 64]) -> [u8; 64] {
     // Step 1: SHA-512 of concatenated public keys
     let mut hasher = Sha512::new();
@@ -45,56 +48,48 @@ pub fn compute_memory_hard_hash(public_key: &[u8; 64]) -> [u8; 64] {
     // Step 2: Allocate 2MB buffer
     let mut genmem = vec![0u8; MEMORY_SIZE];
 
-    // Step 3: Initialize Salsa20 (20 rounds) with key and nonce from digest
-    // Reference: Identity.cpp lines in _computeMemoryHardHash
+    // Step 3: Initialize Salsa20 (20 rounds) with key and nonce from digest.
     let key: [u8; 32] = digest[0..32].try_into().unwrap();
     let nonce: [u8; 8] = digest[32..40].try_into().unwrap();
     let mut s20 = Salsa20::new(&key.into(), &nonce.into());
 
     // Fill genmem in 64-byte blocks with CBC-like chaining.
-    // First block: copy digest as initial value, then encrypt
-    genmem[0..64].copy_from_slice(&digest);
+    // The first block starts as zeroes, then each following block copies the
+    // previous ciphertext block before being encrypted in place.
     s20.apply_keystream(&mut genmem[0..64]);
-
-    // Subsequent blocks: XOR with previous block (CBC-like), then encrypt
     for i in 1..NUM_BLOCKS {
         let prev_start = (i - 1) * 64;
         let curr_start = i * 64;
-        // Copy previous block's ciphertext into current block
-        // (genmem was zeroed, so this is equivalent to XOR with zero then copy)
-        for j in 0..64 {
-            genmem[curr_start + j] = genmem[prev_start + j];
-        }
+        let mut prev_block = [0u8; 64];
+        prev_block.copy_from_slice(&genmem[prev_start..prev_start + 64]);
+        genmem[curr_start..curr_start + 64].copy_from_slice(&prev_block);
         s20.apply_keystream(&mut genmem[curr_start..curr_start + 64]);
     }
 
-    // Step 4: Memory-dependent mixing loop
-    // Reference: Identity.cpp _computeMemoryHardHash mixing loop
-    // For each byte in digest, use two consecutive digest bytes as an index
-    // into genmem, then XOR digest bytes with the referenced genmem region.
-    for i in 0..64 {
-        let idx1 = digest[i] as usize;
-        let idx2 = digest[(i + 1) % 64] as usize;
-        // Compute byte offset into genmem, aligned to 64-byte blocks
-        let genmem_idx = ((idx1 << 8) | idx2) * 64 % MEMORY_SIZE;
+    // Step 4: Use genmem as a lookup table to swap raw 64-bit words into the
+    // digest, matching the official implementation's pointer-cast behavior.
+    let genmem_words = MEMORY_SIZE / 8;
+    let digest_words = 64 / 8;
+    let mut i = 0usize;
+    while i < genmem_words {
+        let idx1 = u64::from_be_bytes(genmem[i * 8..i * 8 + 8].try_into().unwrap()) as usize
+            % digest_words;
+        i += 1;
+        let idx2 = u64::from_be_bytes(genmem[i * 8..i * 8 + 8].try_into().unwrap()) as usize
+            % genmem_words;
+        i += 1;
 
-        // XOR digest with the referenced 64-byte block from genmem
-        for j in 0..64 {
-            digest[j] ^= genmem[genmem_idx + j];
-        }
+        let digest_offset = idx1 * 8;
+        let genmem_offset = idx2 * 8;
 
-        // Re-initialize Salsa20 and encrypt the affected genmem region
-        let new_key: [u8; 32] = digest[0..32].try_into().unwrap();
-        let new_nonce: [u8; 8] = digest[32..40].try_into().unwrap();
-        let mut s20_mix = Salsa20::new(&new_key.into(), &new_nonce.into());
-        s20_mix.apply_keystream(&mut genmem[genmem_idx..genmem_idx + 64]);
+        let mut tmp = [0u8; 8];
+        tmp.copy_from_slice(&genmem[genmem_offset..genmem_offset + 8]);
+        genmem[genmem_offset..genmem_offset + 8]
+            .copy_from_slice(&digest[digest_offset..digest_offset + 8]);
+        digest[digest_offset..digest_offset + 8].copy_from_slice(&tmp);
+
+        s20.apply_keystream(&mut digest);
     }
-
-    // Step 5: Final Salsa20 encryption pass over digest
-    let final_key: [u8; 32] = digest[0..32].try_into().unwrap();
-    let final_nonce: [u8; 8] = digest[32..40].try_into().unwrap();
-    let mut s20_final = Salsa20::new(&final_key.into(), &final_nonce.into());
-    s20_final.apply_keystream(&mut digest);
 
     digest
 }
@@ -200,6 +195,22 @@ mod tests {
         assert_eq!(
             derive_address(&digest).unwrap(),
             [0xAA, 0xBB, 0xCC, 0xDD, 0xEE]
+        );
+    }
+
+    #[test]
+    fn official_identity_vector_matches_official_address() {
+        let public_key: [u8; 64] = crate::hex_util::decode(
+            "32c0edec3768cd88dda9f173bab28d8dd0a449ccaf0d469fb3bdad68403b527b\
+             5f795abc5445de6e5234ca6a22f43539bb4d47c4e03df4cc5d426e91db9c2def",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let digest = compute_memory_hard_hash(&public_key);
+        assert_eq!(
+            derive_address(&digest),
+            Some([0x00, 0x7a, 0xf6, 0x4f, 0x5d])
         );
     }
 

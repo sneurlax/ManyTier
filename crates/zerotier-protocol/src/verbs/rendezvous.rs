@@ -1,6 +1,5 @@
 /// RENDEZVOUS verb codec (verb 0x05).
 ///
-
 use crate::error::ProtocolError;
 use crate::inet_address::InetAddress;
 
@@ -16,43 +15,47 @@ impl RendezvousPayload {
     pub fn serialize(&self, buf: &mut [u8]) -> usize {
         buf[0] = self.flags;
         buf[1..6].copy_from_slice(&self.peer_address);
-        // Write address length byte then raw address bytes
+        // Write address type, then length byte, then raw address bytes
         match &self.address {
             InetAddress::V4 { ip, port } => {
-                buf[6] = 6; // 4 ip + 2 port
-                buf[7..11].copy_from_slice(ip);
-                buf[11..13].copy_from_slice(&port.to_be_bytes());
-                13
+                buf[6] = 4; // type
+                buf[7] = 6; // length: 4 ip + 2 port
+                buf[8..12].copy_from_slice(ip);
+                buf[12..14].copy_from_slice(&port.to_be_bytes());
+                14
             }
             InetAddress::V6 { ip, port } => {
-                buf[6] = 18; // 16 ip + 2 port
-                buf[7..23].copy_from_slice(ip);
-                buf[23..25].copy_from_slice(&port.to_be_bytes());
-                25
+                buf[6] = 6; // type
+                buf[7] = 18; // length: 16 ip + 2 port
+                buf[8..24].copy_from_slice(ip);
+                buf[24..26].copy_from_slice(&port.to_be_bytes());
+                26
             }
             InetAddress::Null => {
-                buf[6] = 0;
-                7
+                buf[6] = 0; // type
+                buf[7] = 0; // length
+                8
             }
         }
     }
 
     /// Deserialize from wire bytes.
     pub fn deserialize(data: &[u8]) -> Result<Self, ProtocolError> {
-        if data.len() < 7 {
+        if data.len() < 8 {
             return Err(ProtocolError::TooShort {
-                need: 7,
+                need: 8,
                 got: data.len(),
             });
         }
         let flags = data[0];
         let mut peer_address = [0u8; 5];
         peer_address.copy_from_slice(&data[1..6]);
-        let addr_len = data[6] as usize;
+        let _addr_type = data[6];
+        let addr_len = data[7] as usize;
 
-        if data.len() < 7 + addr_len {
+        if data.len() < 8 + addr_len {
             return Err(ProtocolError::TooShort {
-                need: 7 + addr_len,
+                need: 8 + addr_len,
                 got: data.len(),
             });
         }
@@ -60,14 +63,14 @@ impl RendezvousPayload {
         let address = match addr_len {
             6 => {
                 let mut ip = [0u8; 4];
-                ip.copy_from_slice(&data[7..11]);
-                let port = u16::from_be_bytes([data[11], data[12]]);
+                ip.copy_from_slice(&data[8..12]);
+                let port = u16::from_be_bytes([data[12], data[13]]);
                 InetAddress::V4 { ip, port }
             }
             18 => {
                 let mut ip = [0u8; 16];
-                ip.copy_from_slice(&data[7..23]);
-                let port = u16::from_be_bytes([data[23], data[24]]);
+                ip.copy_from_slice(&data[8..24]);
+                let port = u16::from_be_bytes([data[24], data[25]]);
                 InetAddress::V6 { ip, port }
             }
             0 => InetAddress::Null,
@@ -98,7 +101,7 @@ mod tests {
         };
         let mut buf = [0u8; 64];
         let n = payload.serialize(&mut buf);
-        assert_eq!(n, 13);
+        assert_eq!(n, 14);
         let parsed = RendezvousPayload::deserialize(&buf[..n]).unwrap();
         assert_eq!(parsed, payload);
     }
@@ -109,21 +112,19 @@ mod tests {
             flags: 0x01,
             peer_address: [0x01, 0x02, 0x03, 0x04, 0x05],
             address: InetAddress::V6 {
-                ip: [
-                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-                ],
+                ip: [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
                 port: 443,
             },
         };
         let mut buf = [0u8; 64];
         let n = payload.serialize(&mut buf);
-        assert_eq!(n, 25);
+        assert_eq!(n, 26);
         let parsed = RendezvousPayload::deserialize(&buf[..n]).unwrap();
         assert_eq!(parsed, payload);
     }
 
     #[test]
     fn rendezvous_too_short() {
-        assert!(RendezvousPayload::deserialize(&[0; 5]).is_err());
+        assert!(RendezvousPayload::deserialize(&[0; 7]).is_err());
     }
 }

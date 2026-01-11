@@ -1,24 +1,36 @@
 //! Dictionary serializer/deserializer for ZeroTier NetworkConfig wire format.
 //!
-//! The ZeroTier dictionary format encodes key-value pairs:
-//! - Text entries: `key=value\n` (ASCII key, ASCII value, newline terminated)
-//! - Binary entries: `key\0` + u16 BE length + raw bytes (no newline)
+//! ZeroTier encodes dictionaries as newline-delimited `key=value` pairs.
+//! Values may contain binary data; reserved bytes are escaped so the serialized
+//! form remains a valid C string in upstream zerotier-one.
 
 extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// A single dictionary entry, either text or binary.
+/// A single dictionary entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DictEntry {
-    /// Text entry: key=value\n
-    Text { key: String, value: String },
-    /// Binary entry: key\0 + u16 BE length + raw bytes
-    Binary { key: String, data: Vec<u8> },
+pub struct DictEntry {
+    key: String,
+    value: Vec<u8>,
 }
 
-/// A ZeroTier dictionary: ordered collection of text and binary entries.
+impl DictEntry {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    pub fn value_as_text(&self) -> Option<&str> {
+        core::str::from_utf8(&self.value).ok()
+    }
+}
+
+/// A ZeroTier dictionary: ordered collection of key/value entries.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Dictionary {
     entries: Vec<DictEntry>,
@@ -29,31 +41,20 @@ fn format_hex(value: u64) -> String {
     alloc::format!("{:x}", value)
 }
 
-/// Format a u64 as decimal string.
-fn format_decimal(value: u64) -> String {
-    alloc::format!("{}", value)
-}
-
 /// Error type for dictionary deserialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DictionaryError {
-    /// Unexpected end of input.
-    UnexpectedEof,
     /// Key contained invalid UTF-8.
     InvalidKey,
-    /// Text value contained invalid UTF-8.
-    InvalidValue,
-    /// Binary entry length exceeds remaining data.
-    BinaryLengthOverflow,
+    /// Entry did not contain `=` before the line terminator or EOF.
+    MissingEquals,
 }
 
 impl core::fmt::Display for DictionaryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::UnexpectedEof => write!(f, "unexpected end of dictionary data"),
             Self::InvalidKey => write!(f, "dictionary key is not valid UTF-8"),
-            Self::InvalidValue => write!(f, "dictionary text value is not valid UTF-8"),
-            Self::BinaryLengthOverflow => write!(f, "binary entry length exceeds data"),
+            Self::MissingEquals => write!(f, "dictionary entry is missing '=' separator"),
         }
     }
 }
@@ -66,11 +67,11 @@ impl Dictionary {
         }
     }
 
-    /// Add a text entry (key=value\n).
+    /// Add a text entry.
     pub fn add_text(&mut self, key: &str, value: &str) {
-        self.entries.push(DictEntry::Text {
+        self.entries.push(DictEntry {
             key: String::from(key),
-            value: String::from(value),
+            value: value.as_bytes().to_vec(),
         });
     }
 
@@ -79,35 +80,36 @@ impl Dictionary {
         self.add_text(key, &format_hex(value));
     }
 
-    /// Add a text entry with a u64 value formatted as decimal.
+    /// Add an integer entry using upstream ZeroTier's lowercase-hex encoding.
     pub fn add_int(&mut self, key: &str, value: u64) {
-        self.add_text(key, &format_decimal(value));
+        self.add_hex(key, value);
     }
 
-    /// Add a binary entry (key\0 + u16 BE length + raw bytes).
+    /// Add a binary entry.
     pub fn add_binary(&mut self, key: &str, data: Vec<u8>) {
-        self.entries.push(DictEntry::Binary {
+        self.entries.push(DictEntry {
             key: String::from(key),
-            data,
+            value: data,
         });
     }
 
     /// Serialize the dictionary to bytes.
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        for entry in &self.entries {
-            match entry {
-                DictEntry::Text { key, value } => {
-                    buf.extend_from_slice(key.as_bytes());
-                    buf.push(b'=');
-                    buf.extend_from_slice(value.as_bytes());
-                    buf.push(b'\n');
-                }
-                DictEntry::Binary { key, data } => {
-                    buf.extend_from_slice(key.as_bytes());
-                    buf.push(0x00);
-                    buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
-                    buf.extend_from_slice(data);
+        for (index, entry) in self.entries.iter().enumerate() {
+            if index > 0 {
+                buf.push(b'\n');
+            }
+            buf.extend_from_slice(entry.key.as_bytes());
+            buf.push(b'=');
+            for &byte in &entry.value {
+                match byte {
+                    0 => buf.extend_from_slice(br"\0"),
+                    b'\r' => buf.extend_from_slice(br"\r"),
+                    b'\n' => buf.extend_from_slice(br"\n"),
+                    b'\\' => buf.extend_from_slice(br"\\"),
+                    b'=' => buf.extend_from_slice(br"\e"),
+                    _ => buf.push(byte),
                 }
             }
         }
@@ -115,73 +117,73 @@ impl Dictionary {
     }
 
     /// Deserialize a dictionary from bytes.
-    ///
-    /// Parsing logic:
-    /// - Scan for `=` or `\0` after key bytes to determine entry type
-    /// - If `=` found: read until `\n` for text value
-    /// - If `\0` found: read u16 BE length, then that many raw bytes
     pub fn deserialize(data: &[u8]) -> Result<Self, DictionaryError> {
         let mut entries = Vec::new();
         let mut pos = 0;
-        let len = data.len();
 
-        while pos < len {
-            // Find the key delimiter: '=' for text, '\0' for binary
-            let key_start = pos;
-            let mut delimiter = None;
-            while pos < len {
-                if data[pos] == b'=' {
-                    delimiter = Some(b'=');
-                    break;
-                } else if data[pos] == 0x00 {
-                    delimiter = Some(0x00);
-                    break;
-                }
+        while pos < data.len() {
+            while pos < data.len() && matches!(data[pos], b'\r' | b'\n') {
                 pos += 1;
             }
+            if pos >= data.len() {
+                break;
+            }
 
-            let delim = delimiter.ok_or(DictionaryError::UnexpectedEof)?;
+            let key_start = pos;
+            while pos < data.len() && !matches!(data[pos], b'=' | b'\r' | b'\n') {
+                pos += 1;
+            }
+            if pos >= data.len() || data[pos] != b'=' {
+                return Err(DictionaryError::MissingEquals);
+            }
             let key = core::str::from_utf8(&data[key_start..pos])
                 .map_err(|_| DictionaryError::InvalidKey)?;
+            pos += 1;
 
-            pos += 1; // skip delimiter
+            let mut value = Vec::new();
+            let mut escape = false;
+            while pos < data.len() {
+                let byte = data[pos];
+                if escape {
+                    escape = false;
+                    match byte {
+                        b'r' => value.push(b'\r'),
+                        b'n' => value.push(b'\n'),
+                        b'0' => value.push(0),
+                        b'e' => value.push(b'='),
+                        _ => value.push(byte),
+                    }
+                    pos += 1;
+                    continue;
+                }
 
-            match delim {
-                b'=' => {
-                    // Text entry: read until newline
-                    let value_start = pos;
-                    while pos < len && data[pos] != b'\n' {
+                match byte {
+                    b'\\' => {
+                        escape = true;
                         pos += 1;
                     }
-                    let value = core::str::from_utf8(&data[value_start..pos])
-                        .map_err(|_| DictionaryError::InvalidValue)?;
-                    entries.push(DictEntry::Text {
-                        key: String::from(key),
-                        value: String::from(value),
-                    });
-                    if pos < len {
-                        pos += 1; // skip newline
+                    b'\r' | b'\n' => break,
+                    _ => {
+                        value.push(byte);
+                        pos += 1;
                     }
                 }
-                0x00 => {
-                    // Binary entry: u16 BE length + raw bytes
-                    if pos + 2 > len {
-                        return Err(DictionaryError::BinaryLengthOverflow);
+            }
+
+            entries.push(DictEntry {
+                key: String::from(key),
+                value,
+            });
+
+            if pos < data.len() {
+                if data[pos] == b'\r' {
+                    pos += 1;
+                    if pos < data.len() && data[pos] == b'\n' {
+                        pos += 1;
                     }
-                    let bin_len =
-                        u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-                    pos += 2;
-                    if pos + bin_len > len {
-                        return Err(DictionaryError::BinaryLengthOverflow);
-                    }
-                    let bin_data = data[pos..pos + bin_len].to_vec();
-                    entries.push(DictEntry::Binary {
-                        key: String::from(key),
-                        data: bin_data,
-                    });
-                    pos += bin_len;
+                } else {
+                    pos += 1;
                 }
-                _ => unreachable!(),
             }
         }
 
@@ -191,10 +193,8 @@ impl Dictionary {
     /// Get a text entry value by key.
     pub fn get_text(&self, key: &str) -> Option<&str> {
         for entry in &self.entries {
-            if let DictEntry::Text { key: k, value } = entry {
-                if k == key {
-                    return Some(value);
-                }
+            if entry.key == key {
+                return entry.value_as_text();
             }
         }
         None
@@ -203,13 +203,16 @@ impl Dictionary {
     /// Get a binary entry data by key.
     pub fn get_binary(&self, key: &str) -> Option<&[u8]> {
         for entry in &self.entries {
-            if let DictEntry::Binary { key: k, data } = entry {
-                if k == key {
-                    return Some(data);
-                }
+            if entry.key == key {
+                return Some(entry.value());
             }
         }
         None
+    }
+
+    /// Get a lowercase-hex integer value by key.
+    pub fn get_hex_u64(&self, key: &str) -> Option<u64> {
+        u64::from_str_radix(self.get_text(key)?, 16).ok()
     }
 
     /// Get all entries.
@@ -241,13 +244,16 @@ mod tests {
     #[test]
     fn binary_entry_roundtrip() {
         let mut dict = Dictionary::new();
-        dict.add_binary("C", vec![0x01, 0x02, 0x03, 0x04, 0x05]);
+        dict.add_binary("C", vec![0x01, 0x02, 0x00, 0x0a, 0x0d, b'=', b'\\', 0xff]);
         dict.add_binary("R", vec![0x01, 0x00]);
 
         let bytes = dict.serialize();
         let parsed = Dictionary::deserialize(&bytes).unwrap();
 
-        assert_eq!(parsed.get_binary("C"), Some(&[0x01, 0x02, 0x03, 0x04, 0x05][..]));
+        assert_eq!(
+            parsed.get_binary("C"),
+            Some(&[0x01, 0x02, 0x00, 0x0a, 0x0d, b'=', b'\\', 0xff][..])
+        );
         assert_eq!(parsed.get_binary("R"), Some(&[0x01, 0x00][..]));
     }
 
@@ -256,7 +262,7 @@ mod tests {
         let mut dict = Dictionary::new();
         dict.add_text("nwid", "ff00001234560001");
         dict.add_binary("C", vec![0xDE, 0xAD, 0xBE, 0xEF]);
-        dict.add_text("mtu", "2800");
+        dict.add_text("mtu", "af0");
         dict.add_binary("R", vec![0x01, 0x00]);
         dict.add_text("n", "test");
 
@@ -265,7 +271,7 @@ mod tests {
 
         assert_eq!(parsed.get_text("nwid"), Some("ff00001234560001"));
         assert_eq!(parsed.get_binary("C"), Some(&[0xDE, 0xAD, 0xBE, 0xEF][..]));
-        assert_eq!(parsed.get_text("mtu"), Some("2800"));
+        assert_eq!(parsed.get_text("mtu"), Some("af0"));
         assert_eq!(parsed.get_binary("R"), Some(&[0x01, 0x00][..]));
         assert_eq!(parsed.get_text("n"), Some("test"));
     }
@@ -290,7 +296,8 @@ mod tests {
         let parsed = Dictionary::deserialize(&bytes).unwrap();
 
         assert_eq!(parsed.get_text("nwid"), Some("ff00001234560001"));
-        assert_eq!(parsed.get_text("mtu"), Some("2800"));
+        assert_eq!(parsed.get_text("mtu"), Some("af0"));
+        assert_eq!(parsed.get_hex_u64("mtu"), Some(2800));
     }
 
     #[test]
@@ -299,8 +306,7 @@ mod tests {
         dict.add_binary("E", vec![]);
 
         let bytes = dict.serialize();
-        // key 'E' (1 byte) + \0 (1 byte) + u16 len 0 (2 bytes) = 4 bytes
-        assert_eq!(bytes.len(), 4);
+        assert_eq!(bytes, b"E=");
 
         let parsed = Dictionary::deserialize(&bytes).unwrap();
         assert_eq!(parsed.get_binary("E"), Some(&[][..]));
@@ -312,17 +318,21 @@ mod tests {
         dict.add_text("k", "v");
 
         let bytes = dict.serialize();
-        // k=v\n
-        assert_eq!(bytes, b"k=v\n");
+        assert_eq!(bytes, b"k=v");
     }
 
     #[test]
-    fn binary_wire_format() {
+    fn binary_wire_format_escapes_reserved_bytes() {
         let mut dict = Dictionary::new();
-        dict.add_binary("B", vec![0xAA, 0xBB]);
+        dict.add_binary("B", vec![0x00, b'\r', b'\n', b'\\', b'=', b'A']);
 
         let bytes = dict.serialize();
-        // B\0 + 00 02 + AA BB
-        assert_eq!(bytes, &[b'B', 0x00, 0x00, 0x02, 0xAA, 0xBB]);
+        assert_eq!(bytes, b"B=\\0\\r\\n\\\\\\eA");
+
+        let parsed = Dictionary::deserialize(&bytes).unwrap();
+        assert_eq!(
+            parsed.get_binary("B"),
+            Some(&[0x00, b'\r', b'\n', b'\\', b'=', b'A'][..])
+        );
     }
 }
