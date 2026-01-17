@@ -3,8 +3,8 @@ use std::io;
 use std::path::Path;
 
 use etherparse::{SlicedPacket, TransportSlice};
-use pcap_file::DataLink;
 use pcap_file::pcap::PcapReader;
+use pcap_file::DataLink;
 use zerotier_protocol::header::PacketHeader;
 use zerotier_protocol::verb::Verb;
 use zerotier_protocol::verbs::hello::HelloPayload;
@@ -13,6 +13,7 @@ use zerotier_protocol::verbs::network_config::{
 };
 use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
 use zerotier_protocol::verbs::whois::WhoisRequest;
+use zerotier_protocol::{is_fragment, FragmentHeader};
 
 const ZT_PORT: u16 = 9993;
 
@@ -57,13 +58,21 @@ pub enum DecodedPayload {
     NetworkConfig {
         network_id: u64,
         dict_data: Vec<u8>,
-        chunk_index: Option<u16>,
-        total_chunks: Option<u16>,
+        chunk_index: Option<u32>,
+        total_length: Option<u32>,
     },
     NetworkCredentials {
         signer: Option<String>,
         qualifier_ids: Vec<u64>,
         qualifier_values: Vec<u64>,
+    },
+    Fragment {
+        packet_id: u64,
+        destination: String,
+        fragment_number: u8,
+        total_fragments: u8,
+        hops: u8,
+        payload_len: usize,
     },
 }
 
@@ -118,16 +127,49 @@ pub fn parse_host_pcaps(
             }
 
             let udp_payload = udp.payload();
-            let Some(header) = PacketHeader::from_bytes(udp_payload) else {
-                continue;
-            };
-
             let raw_payload = udp_payload.to_vec();
             let direction = if destination_port == ZT_PORT {
                 PacketDirection::Inbound
             } else {
                 PacketDirection::Outbound
             };
+
+            if is_fragment(udp_payload) {
+                let Some(header) = FragmentHeader::from_bytes(udp_payload) else {
+                    continue;
+                };
+                let packet_id = header.packet_id_u64();
+                let destination = header.dest;
+
+                packets.push(CapturedPacket {
+                    host: host.to_string(),
+                    source_port,
+                    destination_port,
+                    direction,
+                    sequence: packets.len(),
+                    packet_id,
+                    source: [0; 5],
+                    destination,
+                    cipher_suite: 0,
+                    verb: None,
+                    verb_name: "Fragment".to_string(),
+                    raw_payload: raw_payload.clone(),
+                    decoded_payload: Some(DecodedPayload::Fragment {
+                        packet_id,
+                        destination: format_address(&destination),
+                        fragment_number: header.fragment_number(),
+                        total_fragments: header.total_fragments(),
+                        hops: header.hops,
+                        payload_len: raw_payload.len().saturating_sub(16),
+                    }),
+                });
+                continue;
+            }
+
+            let Some(header) = PacketHeader::from_bytes(udp_payload) else {
+                continue;
+            };
+
             let verb = Verb::from_byte(header.verb);
             let verb_name = verb
                 .map(verb_name)
@@ -217,7 +259,7 @@ fn decode_payload(verb: Option<Verb>, payload: &[u8]) -> Option<DecodedPayload> 
                 network_id: config.network_id,
                 dict_data: config.dict_data,
                 chunk_index: config.chunk_index,
-                total_chunks: config.total_chunks,
+                total_length: config.total_length,
             }),
         Verb::NetworkCredentials => {
             NetworkCredentialsPayload::deserialize(payload)

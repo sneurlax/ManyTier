@@ -1,0 +1,97 @@
+# Shadow VL2 ping test with oversized ICMP payloads to force ZeroTier fragmentation.
+#
+# Topology: 3 nodes (1 root + 2 vl2-peers) on a fully connected graph.
+# The peer args include --ping-payload-bytes 2600 so reduced static MTUs in the
+# generated configs exercise fragmentation and reassembly end to end.
+
+general:
+  stop_time: 30s
+  model_unblocked_syscall_latency: true
+
+host_option_defaults:
+  pcap_enabled: true
+  pcap_capture_size: "65535 B"
+
+network:
+  graph:
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+        ]
+        node [
+          id 1
+        ]
+        node [
+          id 2
+        ]
+        edge [
+          source 0
+          target 0
+          latency "1 ns"
+        ]
+        edge [
+          source 1
+          target 1
+          latency "1 ns"
+        ]
+        edge [
+          source 2
+          target 2
+          latency "1 ns"
+        ]
+        edge [
+          source 0
+          target 1
+          latency "5 ms"
+        ]
+        edge [
+          source 0
+          target 2
+          latency "5 ms"
+        ]
+        edge [
+          source 1
+          target 2
+          latency "5 ms"
+        ]
+      ]
+
+hosts:
+  root:
+    network_node_id: 0
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role root --identity shadow-data/root.identity --port 9993"
+      start_time: 1s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer1:
+    network_node_id: 1
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer1.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer1.json --peer-ip 10.147.20.2 --ping-payload-bytes 2600"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
+
+  peer2:
+    network_node_id: 2
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../target/release/shadow-node
+      args: "--role vl2-peer --identity shadow-data/peer2.identity --planet shadow-data/planet.bin --port 9993 --network-config shadow-data/net-peer2.json --peer-ip 10.147.20.1 --ping-payload-bytes 2600"
+      start_time: 3s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"

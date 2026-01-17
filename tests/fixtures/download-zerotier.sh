@@ -1,5 +1,6 @@
 #!/bin/bash
-# Download pinned zerotier-one binary for interop testing
+# Download pinned zerotier-one binary for interop testing.
+# Used by both the Shadow-native scenarios and the host-assisted fallback harness.
 # Pinned to version 1.14.2 
 set -euo pipefail
 

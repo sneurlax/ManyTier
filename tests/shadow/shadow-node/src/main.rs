@@ -54,9 +54,17 @@ struct Args {
     #[arg(long)]
     peer_ip: Option<String>,
 
+    /// ICMP payload size for VL2 ping generation
+    #[arg(long, default_value = "16")]
+    ping_payload_bytes: usize,
+
     /// Expected number of peers (for controller role)
     #[arg(long)]
     peer_count: Option<u32>,
+
+    /// Advertised network MTU (for controller role)
+    #[arg(long)]
+    mtu: Option<u16>,
 
     /// Network ID to join (hex, for vl2-peer in dynamic mode)
     #[arg(long)]
@@ -113,12 +121,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let our_zt_address = *identity.address.as_bytes();
-    let mut node = Node::new(identity, &planet_data)
+    let initial_packet_id = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        & 0x0000_FFFF_FFFF_FFFF) as u64;
+    let mut node = Node::new(identity, &planet_data, initial_packet_id)
         .map_err(|e| anyhow::anyhow!("failed to create node: {e}"))?;
 
     // VL2 controller setup: join network and prepare to respond to NETWORK_CONFIG_REQUEST
     let controller_state = if args.role == "vl2-controller" {
-        let config_path = args.network_config.as_ref()
+        let config_path = args
+            .network_config
+            .as_ref()
             .expect("vl2-controller requires --network-config");
         let config_json = std::fs::read(config_path)?;
         let static_config = zerotier_node::network_config::load_from_json(&config_json)
@@ -130,13 +145,18 @@ async fn main() -> anyhow::Result<()> {
         let membership = zerotier_node::network::NetworkMembership::from_static_config(
             &static_config,
             &our_zt_address,
-        ).map_err(|e| anyhow::anyhow!("config error: {}", e))?;
+        )
+        .map_err(|e| anyhow::anyhow!("config error: {}", e))?;
         node.join_network(membership);
 
         // Extract the controller signing key from node's identity secret
-        let signing_key = node.identity.secret.as_ref()
+        let signing_key = node
+            .identity
+            .secret
+            .as_ref()
             .expect("controller needs secret identity")
-            .signing.clone();
+            .signing
+            .clone();
 
         tracing::info!(
             network_id = %format!("{:016x}", network_id),
@@ -158,9 +178,13 @@ async fn main() -> anyhow::Result<()> {
         let expected_peers = args.peer_count.unwrap_or(10);
 
         // Extract the controller signing key from node's identity secret
-        let signing_key = node.identity.secret.as_ref()
+        let signing_key = node
+            .identity
+            .secret
+            .as_ref()
             .expect("controller needs secret identity")
-            .signing.clone();
+            .signing
+            .clone();
 
         // Create Controller engine with InMemoryStorage
         let storage = zerotier_service::storage::InMemoryStorage::new();
@@ -172,27 +196,42 @@ async fn main() -> anyhow::Result<()> {
 
         // Create a public network (auto-authorize all peers)
         let random_suffix: u32 = 0x000001; // Deterministic for testing
-        let network_id = controller.create_network(random_suffix, now_ms()).await
+        let network_id = controller
+            .create_network(random_suffix, now_ms())
+            .await
             .expect("failed to create network");
 
         // Make it public so peers are auto-authorized
         {
-            let mut net = controller.storage.get_network(network_id).await
-                .unwrap().unwrap();
+            let mut net = controller
+                .storage
+                .get_network(network_id)
+                .await
+                .unwrap()
+                .unwrap();
             net.private = false;
+            if let Some(mtu) = args.mtu {
+                net.mtu = mtu;
+            }
             controller.storage.update_network(&net).await.unwrap();
         }
 
         // Set up IP pool: 192.168.200.1 - 192.168.200.254
-        controller.storage.set_ip_pools(network_id, &[
-            zerotier_node::controller::types::IpPool {
-                range_start: [192, 168, 200, 1],
-                range_end: [192, 168, 200, 254],
-            },
-        ]).await.unwrap();
+        controller
+            .storage
+            .set_ip_pools(
+                network_id,
+                &[zerotier_node::controller::types::IpPool {
+                    range_start: [192, 168, 200, 1],
+                    range_end: [192, 168, 200, 254],
+                }],
+            )
+            .await
+            .unwrap();
 
         tracing::info!(
             network_id = %format!("{:016x}", network_id),
+            mtu = args.mtu.unwrap_or(2800),
             expected_peers = expected_peers,
             event = "controller_started",
             "Dynamic controller started with public network"
@@ -211,12 +250,12 @@ async fn main() -> anyhow::Result<()> {
 
     // VL2 peer setup: join network from static config
     let vl2_state = if args.role == "vl2-peer" {
-        let config_path = args.network_config.as_ref()
+        let config_path = args
+            .network_config
+            .as_ref()
             .expect("vl2-peer requires --network-config");
-        let peer_ip_str = args.peer_ip.as_ref()
-            .expect("vl2-peer requires --peer-ip");
-        let peer_ip: std::net::Ipv4Addr = peer_ip_str.parse()
-            .expect("invalid --peer-ip address");
+        let peer_ip_str = args.peer_ip.as_ref().expect("vl2-peer requires --peer-ip");
+        let peer_ip: std::net::Ipv4Addr = peer_ip_str.parse().expect("invalid --peer-ip address");
 
         let config_json = std::fs::read(config_path)?;
         let static_config = zerotier_node::network_config::load_from_json(&config_json)
@@ -227,7 +266,8 @@ async fn main() -> anyhow::Result<()> {
         let membership = zerotier_node::network::NetworkMembership::from_static_config(
             &static_config,
             &our_zt_address,
-        ).map_err(|e| anyhow::anyhow!("config error: {}", e))?;
+        )
+        .map_err(|e| anyhow::anyhow!("config error: {}", e))?;
         node.join_network(membership);
 
         tracing::info!(
@@ -252,20 +292,24 @@ async fn main() -> anyhow::Result<()> {
         Some(Vl2PeerState {
             network_id,
             target_ip: peer_ip,
+            ping_payload_bytes: args.ping_payload_bytes,
             ping_sent: false,
             ping_received: false,
         })
     } else if args.role == "dynamic-peer" {
         // Dynamic peer: join network by ID, receive config from controller dynamically
-        let network_id_hex = args.network_id.as_ref()
+        let network_id_hex = args
+            .network_id
+            .as_ref()
             .expect("dynamic-peer requires --network-id");
-        let network_id = u64::from_str_radix(network_id_hex, 16)
-            .expect("invalid --network-id hex string");
-        let peer_ip_str = args.peer_ip.as_ref()
+        let network_id =
+            u64::from_str_radix(network_id_hex, 16).expect("invalid --network-id hex string");
+        let peer_ip_str = args
+            .peer_ip
+            .as_ref()
             .or(args.target_ip.as_ref())
             .expect("dynamic-peer requires --peer-ip or --target-ip");
-        let peer_ip: std::net::Ipv4Addr = peer_ip_str.parse()
-            .expect("invalid --peer-ip address");
+        let peer_ip: std::net::Ipv4Addr = peer_ip_str.parse().expect("invalid --peer-ip address");
 
         // Join with empty membership (no static config) -- tick() will send
         // NETWORK_CONFIG_REQUEST and the controller's NETWORK_CONFIG/NETWORK_CREDENTIALS
@@ -283,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Vl2PeerState {
             network_id,
             target_ip: peer_ip,
+            ping_payload_bytes: args.ping_payload_bytes,
             ping_sent: false,
             ping_received: false,
         })
@@ -292,9 +337,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Bind UDP transport
     let bind_addr: SocketAddr = format!("0.0.0.0:{}", args.port).parse()?;
-    let transport =
-        zerotier_service::NativeTransport::bind(bind_addr).await
-            .map_err(|e| anyhow::anyhow!("failed to bind UDP: {}", e))?;
+    let transport = zerotier_service::NativeTransport::bind(bind_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to bind UDP: {}", e))?;
 
     tracing::info!(
         addr = %transport.local_addr().unwrap(),
@@ -308,9 +353,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Main event loop
     let mut buf = [0u8; 4096];
-    let mut tick_interval = tokio::time::interval(
-        std::time::Duration::from_millis(ZT_PING_CHECK_INTERVAL),
-    );
+    let mut tick_interval =
+        tokio::time::interval(std::time::Duration::from_millis(ZT_PING_CHECK_INTERVAL));
 
     // VL2 peer state (mutable in loop)
     let mut vl2 = vl2_state;
@@ -389,6 +433,7 @@ async fn main() -> anyhow::Result<()> {
 struct Vl2PeerState {
     network_id: u64,
     target_ip: std::net::Ipv4Addr,
+    ping_payload_bytes: usize,
     ping_sent: bool,
     ping_received: bool,
 }
@@ -409,7 +454,8 @@ struct ControllerState {
 /// Used by the `controller` role for planet simulation. Auto-authorizes peers
 /// and assigns IPs dynamically from a pool.
 struct DynamicControllerState {
-    controller: zerotier_node::controller::engine::Controller<zerotier_service::storage::InMemoryStorage>,
+    controller:
+        zerotier_node::controller::engine::Controller<zerotier_service::storage::InMemoryStorage>,
     network_id: u64,
     expected_peers: u32,
     peers_joined: std::collections::HashSet<[u8; 5]>,
@@ -427,7 +473,13 @@ fn handle_vl2_actions(
     our_zt_address: &[u8; 5],
 ) {
     for action in actions {
-        if let NodeAction::FrameReceived { network_id, ethertype, payload, .. } = action {
+        if let NodeAction::FrameReceived {
+            network_id,
+            ethertype,
+            payload,
+            ..
+        } = action
+        {
             if *network_id != state.network_id || *ethertype != 0x0800 {
                 continue;
             }
@@ -474,6 +526,7 @@ fn handle_vl2_actions(
                         0x0800,
                         &reply,
                         our_zt_address,
+                        now_ms(),
                     );
                     for a in out_actions {
                         node.push_action(a);
@@ -535,7 +588,9 @@ fn handle_controller_actions(
             );
 
             // Load static config to get member info
-            let static_config = match zerotier_node::network_config::load_from_json(&ctrl.static_config_json) {
+            let static_config = match zerotier_node::network_config::load_from_json(
+                &ctrl.static_config_json,
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!(event = "config_parse_error", error = %e, "failed to parse static config");
@@ -568,8 +623,8 @@ fn handle_controller_actions(
 
             let now_ms_val = now_ms();
             let dict = format!(
-                "nwid={:016x}\nn=manytier-test\nt={}\nv=1\nmtu=2800\nmulticastLimit=32\ntype=1\nipAssignments={}\n",
-                network_id, now_ms_val, ip_assignments,
+                "nwid={:016x}\nn=manytier-test\nt={}\nv=1\nmtu={}\nmulticastLimit=32\ntype=1\nipAssignments={}\n",
+                network_id, now_ms_val, static_config.mtu, ip_assignments,
             );
             let dict_bytes = dict.as_bytes().to_vec();
 
@@ -577,13 +632,18 @@ fn handle_controller_actions(
             let nc_payload = NetworkConfigPayload {
                 network_id: *network_id,
                 dict_data: dict_bytes,
+                flags: None,
+                config_update_id: None,
+                total_length: None,
                 chunk_index: None,
-                total_chunks: None,
+                signature_type: None,
                 signature: None,
             };
 
             // Extract shared secret before mutable borrow of node
-            let shared_secret = node.topology.get_peer(requester_address)
+            let shared_secret = node
+                .topology
+                .get_peer(requester_address)
                 .and_then(|peer| peer.shared_secret().map(|s| *s));
 
             if let Some(ref shared_secret) = shared_secret {
@@ -711,7 +771,10 @@ async fn handle_dynamic_controller_actions(
 
             // Use Controller engine to handle the request
             let now = now_ms();
-            let response = dc.controller.handle_config_request(*network_id, requester_address, now).await;
+            let response = dc
+                .controller
+                .handle_config_request(*network_id, requester_address, now)
+                .await;
 
             let response = match response {
                 Ok(r) => r,
@@ -726,7 +789,9 @@ async fn handle_dynamic_controller_actions(
             };
 
             // Extract shared secret before mutable borrow of node
-            let shared_secret = node.topology.get_peer(requester_address)
+            let shared_secret = node
+                .topology
+                .get_peer(requester_address)
                 .and_then(|peer| peer.shared_secret().map(|s| *s));
 
             if let Some(ref shared_secret) = shared_secret {
@@ -810,9 +875,21 @@ fn build_signed_com(
     use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
 
     let qualifiers = vec![
-        ComQualifier { id: 0, value: timestamp, max_delta: 360000 },
-        ComQualifier { id: 1, value: network_id, max_delta: 0 },
-        ComQualifier { id: 2, value: issued_to, max_delta: 0 },
+        ComQualifier {
+            id: 0,
+            value: timestamp,
+            max_delta: 360000,
+        },
+        ComQualifier {
+            id: 1,
+            value: network_id,
+            max_delta: 0,
+        },
+        ComQualifier {
+            id: 2,
+            value: issued_to,
+            max_delta: 0,
+        },
     ];
 
     // Build canonical signed data (sorted by qualifier ID, each as id+value+max_delta in BE)
@@ -826,6 +903,7 @@ fn build_signed_com(
     let signature = zerotier_crypto::signing::sign(signing_key, &signed_data);
 
     CertificateOfMembership {
+        issued_to: u64_to_zt_address(issued_to),
         qualifiers,
         signer_address: *signer_address,
         signature,
@@ -900,6 +978,16 @@ fn zt_address_to_u64(addr: &[u8; 5]) -> u64 {
         | (addr[4] as u64)
 }
 
+fn u64_to_zt_address(addr: u64) -> [u8; 5] {
+    [
+        (addr >> 32) as u8,
+        (addr >> 24) as u8,
+        (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
+    ]
+}
+
 /// Parse a hex address string into 5 bytes, returning None on failure.
 fn parse_hex_address_safe(hex: &str) -> Option<[u8; 5]> {
     let hex = hex.trim();
@@ -926,7 +1014,10 @@ async fn try_send_ping(
             Some(n) => n,
             None => return,
         };
-        let member = network.members.iter().find(|m| &m.zt_address == our_zt_address);
+        let member = network
+            .members
+            .iter()
+            .find(|m| &m.zt_address == our_zt_address);
         match member.and_then(|m| m.ipv4.map(|(ip, _)| ip)) {
             Some(ip) => ip,
             None => return,
@@ -934,13 +1025,13 @@ async fn try_send_ping(
     };
 
     // Build ICMP echo request as IPv4 packet
-    let icmp_payload = b"manytier-vl2-test";
+    let icmp_payload = vec![0x5a; state.ping_payload_bytes];
     let ipv4_packet = build_icmp_echo_request(
         our_ip,
         state.target_ip,
         1, // id
         1, // seq
-        icmp_payload,
+        &icmp_payload,
     );
 
     // Send as outbound frame through VL2 path
@@ -950,10 +1041,13 @@ async fn try_send_ping(
         0x0800,
         &ipv4_packet,
         our_zt_address,
+        now_ms(),
     );
 
     // Check if any action is WhoisNeeded: send WHOIS and retry later
-    let has_whois = actions.iter().any(|a| matches!(a, NodeAction::WhoisNeeded { .. }));
+    let has_whois = actions
+        .iter()
+        .any(|a| matches!(a, NodeAction::WhoisNeeded { .. }));
     if has_whois {
         for action in &actions {
             if let NodeAction::WhoisNeeded { addresses } = action {
@@ -975,6 +1069,7 @@ async fn try_send_ping(
         tracing::info!(
             target_ip = %state.target_ip,
             actions = actions.len(),
+            payload_bytes = state.ping_payload_bytes,
             event = "vl2_ping_sent",
             "VL2 ping sent"
         );
@@ -1002,15 +1097,17 @@ fn build_icmp_echo_request(
 
     // IPv4 header (20 bytes)
     pkt[0] = 0x45; // version=4, IHL=5
-    pkt[1] = 0;    // DSCP/ECN
+    pkt[1] = 0; // DSCP/ECN
     pkt[2] = (total_len >> 8) as u8;
     pkt[3] = total_len as u8;
-    pkt[4] = 0; pkt[5] = 0; // identification
+    pkt[4] = 0;
+    pkt[5] = 0; // identification
     pkt[6] = 0x40; // flags: don't fragment
-    pkt[7] = 0;    // fragment offset
-    pkt[8] = 64;   // TTL
-    pkt[9] = 1;    // protocol: ICMP
-    pkt[10] = 0; pkt[11] = 0; // header checksum (filled below)
+    pkt[7] = 0; // fragment offset
+    pkt[8] = 64; // TTL
+    pkt[9] = 1; // protocol: ICMP
+    pkt[10] = 0;
+    pkt[11] = 0; // header checksum (filled below)
     pkt[12..16].copy_from_slice(&src_ip.octets());
     pkt[16..20].copy_from_slice(&dst_ip.octets());
 
@@ -1022,7 +1119,8 @@ fn build_icmp_echo_request(
     // ICMP echo request
     pkt[20] = 8; // type: echo request
     pkt[21] = 0; // code
-    pkt[22] = 0; pkt[23] = 0; // checksum (filled below)
+    pkt[22] = 0;
+    pkt[23] = 0; // checksum (filled below)
     pkt[24] = (id >> 8) as u8;
     pkt[25] = id as u8;
     pkt[26] = (seq >> 8) as u8;
@@ -1095,10 +1193,7 @@ fn internet_checksum(data: &[u8]) -> u16 {
     !sum as u16
 }
 
-async fn execute_actions(
-    transport: &zerotier_service::NativeTransport,
-    actions: &[NodeAction],
-) {
+async fn execute_actions(transport: &zerotier_service::NativeTransport, actions: &[NodeAction]) {
     for action in actions {
         match action {
             NodeAction::SendTo { data, address } => {
@@ -1113,7 +1208,13 @@ async fn execute_actions(
                     "WHOIS needed for addresses"
                 );
             }
-            NodeAction::FrameReceived { network_id, src_mac, dest_mac: _, ethertype, payload } => {
+            NodeAction::FrameReceived {
+                network_id,
+                src_mac,
+                dest_mac: _,
+                ethertype,
+                payload,
+            } => {
                 tracing::info!(
                     network_id = %format!("{:016x}", network_id),
                     src_mac = %format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]),
@@ -1123,7 +1224,11 @@ async fn execute_actions(
                     "VL2 frame received"
                 );
             }
-            NodeAction::LocalReply { network_id, ethertype, payload } => {
+            NodeAction::LocalReply {
+                network_id,
+                ethertype,
+                payload,
+            } => {
                 tracing::debug!(
                     network_id = %format!("{:016x}", network_id),
                     ethertype = %format!("0x{:04x}", ethertype),
@@ -1132,7 +1237,11 @@ async fn execute_actions(
                     "local reply generated"
                 );
             }
-            NodeAction::NetworkConfigRequested { requester_address, network_id, .. } => {
+            NodeAction::NetworkConfigRequested {
+                requester_address,
+                network_id,
+                ..
+            } => {
                 tracing::debug!(
                     network_id = %format!("{:016x}", network_id),
                     requester = %format!("{:02x}{:02x}{:02x}{:02x}{:02x}",
@@ -1224,10 +1333,8 @@ fn build_test_planet(
     };
 
     let root = WorldRoot {
-        identity: zerotier_crypto::identity::Identity::parse(
-            &identity.to_public_string(),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to derive public identity: {e}"))?,
+        identity: zerotier_crypto::identity::Identity::parse(&identity.to_public_string())
+            .map_err(|e| anyhow::anyhow!("failed to derive public identity: {e}"))?,
         endpoints: vec![endpoint],
     };
 
@@ -1235,8 +1342,8 @@ fn build_test_planet(
         world_type: WorldType::Planet,
         id: 0x4d414e59_54494552, // "MANYTIER" as u64
         timestamp: now_ms(),
-        signing_key: [0u8; 64],  // Test planet -- no real signing key
-        signature: [0u8; 96],    // Test planet -- no real signature
+        signing_key: [0u8; 64], // Test planet -- no real signing key
+        signature: [0u8; 96],   // Test planet -- no real signature
         roots: vec![root],
         dict_data: None,
     };

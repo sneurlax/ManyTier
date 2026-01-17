@@ -19,9 +19,10 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Cursor;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use etherparse::PacketBuilder;
 use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
@@ -1077,13 +1078,13 @@ fn compare_decoded_payload(
                 network_id: left_network_id,
                 dict_data: left_dict,
                 chunk_index: left_chunk,
-                total_chunks: left_total,
+                total_length: left_total,
             }),
             Some(DecodedPayload::NetworkConfig {
                 network_id: right_network_id,
                 dict_data: right_dict,
                 chunk_index: right_chunk,
-                total_chunks: right_total,
+                total_length: right_total,
             }),
         ) => {
             if (left_network_id, left_dict, left_chunk, left_total)
@@ -1147,8 +1148,22 @@ fn zerotier_one_binary_path(work_dir: &Path) -> Option<PathBuf> {
     Some(workspace_root(work_dir).join("tests/fixtures/zerotier-one"))
 }
 
+fn cargo_target_dir(work_dir: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(target_dir) => {
+            let target_dir = PathBuf::from(target_dir);
+            if target_dir.is_absolute() {
+                target_dir
+            } else {
+                workspace_root(work_dir).join(target_dir)
+            }
+        }
+        None => workspace_root(work_dir).join("target"),
+    }
+}
+
 fn manytier_binary_path(work_dir: &Path) -> Option<PathBuf> {
-    Some(workspace_root(work_dir).join("target/debug/manytier"))
+    Some(cargo_target_dir(work_dir).join("debug/manytier"))
 }
 
 fn sanitize_artifact_label(label: &str) -> String {
@@ -1945,6 +1960,70 @@ fn wait_for_assigned_ipv4_via_manytier_api(
     None
 }
 
+fn assigned_ipv4_via_manytier_controller_member_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+    member_addr_hex: &str,
+) -> Option<String> {
+    let url = format!(
+        "http://127.0.0.1:{}/controller/network/{}/member/{}",
+        api_port, network_id, member_addr_hex
+    );
+    let output = Command::new("curl")
+        .args(["-s", "-H", &format!("X-ZT1-Auth: {}", authtoken), &url])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let member: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let assigned = member.get("ipAssignments")?.as_array()?;
+    assigned
+        .iter()
+        .filter_map(|value| value.as_str())
+        .find(|value| !value.contains(':'))
+        .map(|value| value.split('/').next().unwrap_or(value).to_string())
+}
+
+fn wait_for_assigned_ipv4_via_manytier_controller_member_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+    member_addr_hex: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(ip) = assigned_ipv4_via_manytier_controller_member_api(
+            api_port,
+            authtoken,
+            network_id,
+            member_addr_hex,
+        ) {
+            return Some(ip);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    None
+}
+
+fn wait_for_file_contains(path: &Path, needle: &str, timeout: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if std::fs::read_to_string(path)
+            .map(|content| content.contains(needle))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
+}
+
 fn fallback_tun_name(network_id: &str, node_addr: &[u8; 5]) -> Option<String> {
     let network_id = u64::from_str_radix(network_id, 16).ok()?;
     Some(format!(
@@ -1982,6 +2061,72 @@ fn trigger_ping_over_interface(interface: &str, dest_ip: &str) -> bool {
             false
         }
     }
+}
+
+fn interface_name_for_ipv4(ip_addr: &str) -> Option<String> {
+    let output = Command::new("ip")
+        .args(["-o", "-4", "addr", "show"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        let Some(_) = parts.next() else {
+            continue;
+        };
+        let Some(interface) = parts.next() else {
+            continue;
+        };
+        let interface = interface.trim_end_matches(':').to_string();
+        while let Some(part) = parts.next() {
+            if part != "inet" {
+                continue;
+            }
+            let Some(cidr) = parts.next() else {
+                break;
+            };
+            let candidate_ip = cidr.split('/').next().unwrap_or(cidr);
+            if candidate_ip == ip_addr {
+                return Some(interface);
+            }
+        }
+    }
+
+    None
+}
+
+fn wait_for_interface_name_for_ipv4(ip_addr: &str, timeout: std::time::Duration) -> Option<String> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(interface) = interface_name_for_ipv4(ip_addr) {
+            return Some(interface);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    None
+}
+
+fn strip_ansi_escape_sequences(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
+            let _ = chars.next();
+            while let Some(code) = chars.next() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+            continue;
+        }
+        cleaned.push(ch);
+    }
+
+    cleaned
 }
 
 /// Read a ManyTier authtoken from its data directory.
@@ -2056,9 +2201,10 @@ fn build_moon_for_localhost(
     (planet_path, moon_id)
 }
 
-fn build_planet_for_localhost(
+fn build_planet_for_ipv4(
     artifact_root: &Path,
     controller_identity_str: &str,
+    endpoint_ip: Ipv4Addr,
     udp_port: u16,
 ) -> PathBuf {
     let planet_path = artifact_root.join("localhost-planet.bin");
@@ -2075,12 +2221,126 @@ fn build_planet_for_localhost(
         .expect("failed to parse controller identity for localhost planet");
 
     let endpoint = zerotier_protocol::inet_address::InetAddress::V4 {
-        ip: [127, 0, 0, 1],
+        ip: endpoint_ip.octets(),
         port: udp_port,
     };
 
     write_signed_localhost_planet(&planet_path, identity, endpoint);
     planet_path
+}
+
+fn build_planet_for_localhost(
+    artifact_root: &Path,
+    controller_identity_str: &str,
+    udp_port: u16,
+) -> PathBuf {
+    build_planet_for_ipv4(
+        artifact_root,
+        controller_identity_str,
+        Ipv4Addr::new(127, 0, 0, 1),
+        udp_port,
+    )
+}
+
+fn parse_ss_ipv4_local_address(local: &str, expected_port: u16) -> Option<Ipv4Addr> {
+    if local.starts_with('[') {
+        return None;
+    }
+
+    let local = local.split('%').next().unwrap_or(local);
+    let (host, port) = local.rsplit_once(':')?;
+    if port.parse::<u16>().ok()? != expected_port {
+        return None;
+    }
+    host.parse::<Ipv4Addr>().ok()
+}
+
+fn discover_udp_bind_ipv4(pid: u32, udp_port: u16) -> Option<Ipv4Addr> {
+    let output = Command::new("ss").args(["-H", "-lunp"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let needle = format!("pid={},", pid);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut loopback = None;
+
+    for line in stdout.lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+
+        let Some(local) = line.split_whitespace().nth(4) else {
+            continue;
+        };
+        let Some(ip) = parse_ss_ipv4_local_address(local, udp_port) else {
+            continue;
+        };
+
+        if ip.is_unspecified() {
+            continue;
+        }
+        if ip.is_loopback() {
+            loopback.get_or_insert(ip);
+            continue;
+        }
+
+        return Some(ip);
+    }
+
+    loopback
+}
+
+fn wait_for_udp_bind_ipv4(pid: u32, udp_port: u16, timeout: Duration) -> Option<Ipv4Addr> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(ip) = discover_udp_bind_ipv4(pid, udp_port) {
+            return Some(ip);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
+fn discover_primary_ipv4() -> Option<Ipv4Addr> {
+    let route_output = Command::new("ip")
+        .args(["-4", "route", "get", "1.1.1.1"])
+        .output()
+        .ok()?;
+    if route_output.status.success() {
+        let stdout = String::from_utf8_lossy(&route_output.stdout);
+        let mut parts = stdout.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == "src" {
+                let ip = parts.next()?.parse::<Ipv4Addr>().ok()?;
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    let addr_output = Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "scope", "global"])
+        .output()
+        .ok()?;
+    if !addr_output.status.success() {
+        return None;
+    }
+
+    for line in String::from_utf8_lossy(&addr_output.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == "inet" {
+                let ip = parts.next()?.split('/').next()?.parse::<Ipv4Addr>().ok()?;
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn localhost_planet_signing_material() -> (ed25519_dalek::SigningKey, [u8; 64]) {
@@ -3723,10 +3983,11 @@ pub mod tests {
     // as host-native fallback evidence.
     //
     // Scenario architecture:
-    //   Controller (zerotier-one or ManyTier) runs on localhost:UDP_PORT_C
-    //   ManyTier client runs on localhost:UDP_PORT_M
-    //   ManyTier uses a custom planet file pointing to 127.0.0.1:UDP_PORT_C
-    //   so it can reach the controller without live root servers.
+    //   Controller (zerotier-one or ManyTier) runs on the current host namespace.
+    //   ManyTier client runs host-natively on a fixed UDP port.
+    //   ManyTier uses a custom planet file pointing to a controller UDP endpoint
+    //   that the official binary is bound to, so it can reach the
+    //   controller without live root servers.
     //
     // Evidence compromise (explicit):
     //   Shadow-native PCAP/trace evidence: NONE (official controller cannot
@@ -3890,6 +4151,40 @@ pub mod tests {
             bootstrap.record_network(nwid);
         }
 
+        let controller_bind_pid =
+            std::fs::read_to_string(controller_layout.home_dir.join("zerotier-one.pid"))
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+                .unwrap_or_else(|| controller_child.id());
+
+        let controller_endpoint_ip = wait_for_udp_bind_ipv4(
+            controller_bind_pid,
+            CONTROLLER_UDP_PORT,
+            Duration::from_secs(10),
+        )
+        .or_else(|| {
+            if controller_bind_pid == controller_child.id() {
+                None
+            } else {
+                wait_for_udp_bind_ipv4(
+                    controller_child.id(),
+                    CONTROLLER_UDP_PORT,
+                    Duration::from_secs(2),
+                )
+            }
+        })
+        .or_else(discover_primary_ipv4)
+        .unwrap_or_else(|| {
+            let _ = controller_child.kill();
+            let _ = controller_child.wait();
+            panic!(
+                "official zerotier-one did not expose a usable IPv4 bind on UDP port {} (pid file pid={}, child pid={})",
+                CONTROLLER_UDP_PORT,
+                controller_bind_pid,
+                controller_child.id()
+            );
+        });
+
         // Step 2: Read the controller's public identity string for planet building.
         let controller_identity_public = {
             let path = controller_layout.home_dir.join("identity.public");
@@ -3906,20 +4201,26 @@ pub mod tests {
 
         bootstrap.record_planet(PlanetInfo {
             root_identity: controller_identity_public.clone(),
-            endpoints: vec![format!("127.0.0.1:{}", CONTROLLER_UDP_PORT)],
+            endpoints: vec![format!(
+                "{}:{}",
+                controller_endpoint_ip, CONTROLLER_UDP_PORT
+            )],
         });
 
         bootstrap.write_manifest();
 
-        // Step 3: Build a localhost planet pointing to the controller.
-        let planet_path = build_planet_for_localhost(
+        // Step 3: Build a planet pointing to a controller address that the
+        // official binary is listening on.
+        let planet_path = build_planet_for_ipv4(
             &shadow_test_dir,
             &controller_identity_public,
+            controller_endpoint_ip,
             CONTROLLER_UDP_PORT,
         );
         eprintln!(
-            "[fallback] Built localhost planet at {} pointing to 127.0.0.1:{}",
+            "[fallback] Built controller planet at {} pointing to {}:{}",
             planet_path.display(),
+            controller_endpoint_ip,
             CONTROLLER_UDP_PORT
         );
 
@@ -4774,8 +5075,10 @@ pub mod tests {
     fn test_official_joins_manytier_controller_fallback() {
         const CONTROLLER_UDP_PORT: u16 = 31993;
         const OFFICIAL_UDP_PORT: u16 = 31994;
+        const PEER_UDP_PORT: u16 = 31995;
         const CONTROLLER_API_PORT: u16 = 31095;
         const OFFICIAL_API_PORT: u16 = 31096;
+        const PEER_API_PORT: u16 = 31097;
 
         let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -4969,7 +5272,114 @@ pub mod tests {
             .as_deref()
             .and_then(|s| u64::from_str_radix(s, 16).ok());
 
-        // Step 5: Prepare the official zerotier-one home directory.
+        let controller_assigned_ipv4 = if let (Some(network_id), Some(token), Some(member_addr)) = (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            controller_addr,
+        ) {
+            let joined = join_network_via_manytier_api(CONTROLLER_API_PORT, token, network_id);
+            let authorized = authorize_member_via_manytier_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback-official] Controller self-join/authorization helpers exercised on {}: join={} authorize={}",
+                network_id, joined, authorized
+            );
+            wait_for_assigned_ipv4_via_manytier_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                std::time::Duration::from_secs(10),
+            )
+        } else {
+            None
+        };
+        let controller_interface = controller_assigned_ipv4
+            .as_deref()
+            .and_then(|ip| wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10)))
+            .or_else(|| {
+                controller_assigned_ipv4.as_deref().and_then(|_| {
+                    network_id_str
+                        .as_deref()
+                        .zip(controller_addr.as_ref())
+                        .and_then(|(network_id, member_addr)| fallback_tun_name(network_id, member_addr))
+                })
+            });
+
+        // Step 5: Start a ManyTier peer on the same localhost planet so the
+        // harness can force real mixed-lane traffic instead of waiting for the
+        // official client to emit spontaneous frames.
+        eprintln!(
+            "[fallback-official] Starting ManyTier mixed-lane peer on UDP:{} API:{}",
+            PEER_UDP_PORT, PEER_API_PORT
+        );
+        let peer_process = spawn_manytier_with_planet(
+            &shadow_test_dir,
+            "manytier-mixed-peer",
+            PEER_API_PORT,
+            PEER_UDP_PORT,
+            false,
+            planet_path
+                .as_ref()
+                .map(|(localhost_planet, _, _)| localhost_planet.as_path()),
+        );
+        let peer_data_dir = peer_process.layout.home_dir.clone();
+        let peer_ready =
+            wait_for_manytier_ready(&peer_data_dir, std::time::Duration::from_secs(30));
+        if !peer_ready {
+            let controller_result = finish_host_native_process(controller_process);
+            let peer_result = finish_host_native_process(peer_process);
+            panic!(
+                "ManyTier mixed-lane peer did not finish identity/API startup in 30s.\n\
+                 Controller:\n{}\n\nPeer:\n{}",
+                format_host_native_check(&controller_result),
+                format_host_native_check(&peer_result)
+            );
+        }
+        let peer_authtoken = read_manytier_authtoken(&peer_data_dir);
+        let peer_addr = read_manytier_address(&peer_data_dir);
+        if let Some(ref member_addr) = peer_addr {
+            bootstrap.record_node(NodeInfo {
+                label: "manytier-mixed-peer".to_string(),
+                runtime: "manytier".to_string(),
+                identity: hex_encode_address(member_addr),
+                home_dir: peer_data_dir.clone(),
+                udp_port: Some(PEER_UDP_PORT),
+                api_port: Some(PEER_API_PORT),
+            });
+            bootstrap.write_manifest();
+        }
+        if let (Some(network_id), Some(token)) = (network_id_str.as_deref(), peer_authtoken.as_deref())
+        {
+            let joined = join_network_via_manytier_api(PEER_API_PORT, token, network_id);
+            eprintln!(
+                "[fallback-official] ManyTier mixed-lane peer join helper exercised on {} via API {}: {}",
+                network_id, PEER_API_PORT, joined
+            );
+        }
+        if let (Some(network_id), Some(token), Some(member_addr)) = (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            peer_addr,
+        ) {
+            let authorized = authorize_member_via_manytier_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                &hex_encode_address(&member_addr),
+            );
+            eprintln!(
+                "[fallback-official] ManyTier mixed-lane peer authorization helper exercised for {} on {}: {}",
+                hex_encode_address(&member_addr),
+                network_id,
+                authorized
+            );
+        }
+
+        // Step 6: Prepare the official zerotier-one home directory.
         // Install the localhost planet into the official home so it redirects to the
         // ManyTier controller instead of trying to reach official roots.
         //
@@ -5033,12 +5443,12 @@ pub mod tests {
             .expect("failed to start official zerotier-one client");
 
         // Wait for official identity to be generated.
-        let official_addr = (0..20).find_map(|_| {
+        let official_node_addr = (0..20).find_map(|_| {
             std::thread::sleep(std::time::Duration::from_millis(500));
             read_zerotier_identity_address(&official_layout.home_dir)
         });
 
-        if let Some(ref addr) = official_addr {
+        if let Some(ref addr) = official_node_addr {
             bootstrap.record_node(NodeInfo {
                 label: official_label.to_string(),
                 runtime: "official".to_string(),
@@ -5050,12 +5460,12 @@ pub mod tests {
             bootstrap.write_manifest();
         }
 
-        let official_identity_ready = official_addr.is_some();
+        let official_identity_ready = official_node_addr.is_some();
         if let (true, Some(network_id), Some(token), Some(member_addr)) = (
             official_identity_ready,
             network_id_str.as_deref(),
             controller_authtoken.as_deref(),
-            read_zerotier_identity_address(&official_layout.home_dir),
+            official_node_addr,
         ) {
             let authorized = authorize_member_via_manytier_api(
                 CONTROLLER_API_PORT,
@@ -5102,6 +5512,151 @@ pub mod tests {
                 "[fallback-official] Official join command status: {:?}",
                 join_status
             );
+
+            let session_log_needle = format!("peer={}", hex_encode_address(&member_addr));
+            if wait_for_file_contains(
+                &controller_process.layout.stderr_path,
+                &session_log_needle,
+                std::time::Duration::from_secs(8),
+            ) {
+                let refresh_status = Command::new(&zt_one_bin)
+                    .args([
+                        "-q",
+                        &format!("-D{}", official_layout.home_dir.to_str().unwrap()),
+                        "join",
+                        network_id,
+                    ])
+                    .status()
+                    .expect("failed to execute official refresh join command");
+                eprintln!(
+                    "[fallback-official] Official join refresh status: {:?}",
+                    refresh_status
+                );
+                std::thread::sleep(std::time::Duration::from_secs(4));
+            }
+        }
+
+        let official_assigned_ipv4 = if let (Some(network_id), Some(token), Some(member_addr)) = (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            official_node_addr,
+        ) {
+            wait_for_assigned_ipv4_via_manytier_controller_member_api(
+                CONTROLLER_API_PORT,
+                token,
+                network_id,
+                &hex_encode_address(&member_addr),
+                std::time::Duration::from_secs(10),
+            )
+        } else {
+            None
+        };
+        let peer_assigned_ipv4 = if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), peer_authtoken.as_deref())
+        {
+            wait_for_assigned_ipv4_via_manytier_api(
+                PEER_API_PORT,
+                token,
+                network_id,
+                std::time::Duration::from_secs(10),
+            )
+        } else {
+            None
+        };
+        let official_interface = official_assigned_ipv4
+            .as_deref()
+            .and_then(|ip| wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10)));
+        let peer_interface = peer_assigned_ipv4
+            .as_deref()
+            .and_then(|ip| wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10)))
+            .or_else(|| {
+                peer_assigned_ipv4.as_deref().and_then(|_| {
+                    network_id_str
+                        .as_deref()
+                        .zip(peer_addr.as_ref())
+                        .and_then(|(network_id, member_addr)| fallback_tun_name(network_id, member_addr))
+                })
+            });
+        let (manytier_endpoint_label, manytier_endpoint_ip, manytier_endpoint_interface) =
+            if let (Some(ip), Some(interface)) =
+                (controller_assigned_ipv4.as_deref(), controller_interface.as_deref())
+            {
+                ("controller", Some(ip), Some(interface))
+            } else if let (Some(ip), Some(interface)) =
+                (peer_assigned_ipv4.as_deref(), peer_interface.as_deref())
+            {
+                ("mixed-peer", Some(ip), Some(interface))
+            } else {
+                ("missing", None, None)
+            };
+        let mut official_ping_trigger = None;
+        let mut manytier_ping_trigger = None;
+        if let (
+            Some(network_id),
+            Some(controller_token),
+            Some(peer_token),
+            Some(official_ip),
+            Some(manytier_ip),
+            Some(official_ifname),
+            Some(manytier_ifname),
+        ) = (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            peer_authtoken.as_deref(),
+            official_assigned_ipv4.as_deref(),
+            manytier_endpoint_ip,
+            official_interface.as_deref(),
+            manytier_endpoint_interface,
+        ) {
+            let controller_refresh =
+                join_network_via_manytier_api(CONTROLLER_API_PORT, controller_token, network_id);
+            let peer_refresh = join_network_via_manytier_api(PEER_API_PORT, peer_token, network_id);
+            let official_refresh = Command::new(&zt_one_bin)
+                .args([
+                    "-q",
+                    &format!("-D{}", official_layout.home_dir.to_str().unwrap()),
+                    "join",
+                    network_id,
+                ])
+                .status()
+                .expect("failed to execute official pre-ping join refresh");
+            eprintln!(
+                "[fallback-official] Pre-ping config refresh after assigned IPv4s were observed: controller={} peer={} official={:?}",
+                controller_refresh, peer_refresh, official_refresh
+            );
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            official_ping_trigger = Some(trigger_ping_over_interface(official_ifname, manytier_ip));
+            manytier_ping_trigger = Some(trigger_ping_over_interface(manytier_ifname, official_ip));
+            eprintln!(
+                "[fallback-official] Data-plane trigger: official {}({}) -> {} {} via {} = {}",
+                official_ifname,
+                official_ip,
+                manytier_endpoint_label,
+                manytier_ip,
+                official_ifname,
+                official_ping_trigger.unwrap_or(false)
+            );
+            eprintln!(
+                "[fallback-official] Data-plane trigger: manytier {} {}({}) -> {} via {} = {}",
+                manytier_endpoint_label,
+                manytier_ifname,
+                manytier_ip,
+                official_ip,
+                manytier_ifname,
+                manytier_ping_trigger.unwrap_or(false)
+            );
+        } else {
+            eprintln!(
+                "[fallback-official] WARNING: Could not derive both assigned IPv4s and interfaces before mixed-lane ping trigger \
+                 (official_ip={:?} controller_ip={:?} peer_ip={:?} official_if={:?} controller_if={:?} peer_if={:?})",
+                official_assigned_ipv4,
+                controller_assigned_ipv4,
+                peer_assigned_ipv4,
+                official_interface,
+                controller_interface,
+                peer_interface,
+            );
         }
 
         // Wait up to 8s for the test window, then collect results.
@@ -5129,6 +5684,7 @@ pub mod tests {
             files: collect_relative_files(&official_layout.artifact_root),
         };
 
+        let peer_result = finish_host_native_process(peer_process);
         let controller_result = finish_host_native_process(controller_process);
 
         // Write evidence manifest for official artifacts.
@@ -5176,6 +5732,14 @@ pub mod tests {
             failure_category,
             format_host_native_check(&official_result),
         );
+        assert!(
+            peer_result.stayed_running,
+            "INFRASTRUCTURE FAILURE: ManyTier mixed-lane peer exited early.\n\
+             Failure category:\n{}\n\n\
+             Mixed peer check:\n{}",
+            failure_category,
+            format_host_native_check(&peer_result),
+        );
 
         // Artifact contract checks.
         assert!(
@@ -5185,6 +5749,10 @@ pub mod tests {
         assert!(
             official_result.files.iter().any(|f| f == "evidence.txt"),
             "official zerotier-one client artifacts missing host-native manifest"
+        );
+        assert!(
+            peer_result.files.iter().any(|f| f == "evidence.txt"),
+            "ManyTier mixed-lane peer artifacts missing host-native manifest"
         );
 
         // Collect comparable handshake/config evidence.
@@ -5202,17 +5770,43 @@ pub mod tests {
              controller_udp_port={}\n\
              official_client_addr={}\n\
              official_udp_port={}\n\
+             controller_assigned_ipv4={}\n\
+             controller_interface={}\n\
+             manytier_peer_addr={}\n\
+             manytier_peer_udp_port={}\n\
              planet=localhost-planet.bin (ManyTier controller identity, 127.0.0.1:{})\n\
              network_id={}\n\
-             network_api_create_result={}\n",
+             network_api_create_result={}\n\
+             official_assigned_ipv4={}\n\
+             manytier_peer_assigned_ipv4={}\n\
+             official_interface={}\n\
+             manytier_peer_interface={}\n\
+             official_ping_trigger={}\n\
+             manytier_peer_ping_trigger={}\n",
             live_execution_lane_label(),
             controller_addr.map(|a| hex_encode_address(&a)).unwrap_or_else(|| "<unknown>".to_string()),
             CONTROLLER_UDP_PORT,
             official_addr.map(|a| hex_encode_address(&a)).unwrap_or_else(|| "<not yet generated>".to_string()),
             OFFICIAL_UDP_PORT,
+            controller_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            controller_interface.as_deref().unwrap_or("<missing>"),
+            peer_addr
+                .map(|a| hex_encode_address(&a))
+                .unwrap_or_else(|| "<not yet generated>".to_string()),
+            PEER_UDP_PORT,
             CONTROLLER_UDP_PORT,
             network_id_str.as_deref().unwrap_or("<not created>"),
             if network_id_str.is_some() { "success" } else { "failed or skipped" },
+            official_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            peer_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            official_interface.as_deref().unwrap_or("<missing>"),
+            peer_interface.as_deref().unwrap_or("<missing>"),
+            official_ping_trigger
+                .map(|success| success.to_string())
+                .unwrap_or_else(|| "<not attempted>".to_string()),
+            manytier_ping_trigger
+                .map(|success| success.to_string())
+                .unwrap_or_else(|| "<not attempted>".to_string()),
         );
 
         write_fallback_evidence_report(
@@ -5253,21 +5847,58 @@ pub mod tests {
         }
 
         // Data-plane downstream check (non-fatal).
-        let controller_combined =
-            format!("{}\n{}", controller_result.stdout, controller_result.stderr);
-        let official_combined = format!("{}\n{}", official_result.stdout, official_result.stderr);
+        let controller_combined = strip_ansi_escape_sequences(&format!(
+            "{}\n{}",
+            controller_result.stdout, controller_result.stderr
+        ));
+        let official_combined = strip_ansi_escape_sequences(&format!(
+            "{}\n{}",
+            official_result.stdout, official_result.stderr
+        ));
+        let peer_combined = strip_ansi_escape_sequences(&format!(
+            "{}\n{}",
+            peer_result.stdout, peer_result.stderr
+        ));
 
         let join_evidence = controller_combined.contains("vl2_network_joined")
             || controller_combined.contains("dynamic_config_received")
             || controller_combined.contains("network_config_request_received")
+            || peer_combined.contains("vl2_network_joined")
+            || peer_combined.contains("dynamic_config_received")
             || official_combined.contains("200 join")
             || official_combined.contains("JOINED");
 
-        let data_plane_evidence = controller_combined.contains("frame_received")
-            || controller_combined.contains("vl2_frame_received")
-            || controller_combined.contains("NETWORK_FRAME")
-            || official_combined.contains("frame_received")
-            || official_combined.contains("NETWORK_FRAME");
+        // Official zerotier-one can relay VL2 traffic via a root path before the
+        // ManyTier controller logs a higher-level `frame_received` marker. Count
+        // controller-side decoded Frame/MulticastFrame packets from the joined
+        // official member as mixed-lane data-plane evidence.
+        let relayed_official_frame_evidence = official_addr
+            .map(|addr| {
+                let addr_hex = hex_encode_address(&addr);
+                controller_combined.lines().any(|line| {
+                    line.contains(&format!("source={addr_hex}"))
+                        && (line.contains("verb=Some(Frame)")
+                            || line.contains("verb=Some(ExtFrame)")
+                            || line.contains("verb=Some(MulticastFrame)"))
+                })
+            })
+            .unwrap_or(false);
+        let peer_side_official_frame_evidence = official_addr
+            .map(|addr| {
+                let addr_hex = hex_encode_address(&addr);
+                peer_combined.lines().any(|line| {
+                    line.contains(&format!("source={addr_hex}"))
+                        && (line.contains("verb=Some(Frame)")
+                            || line.contains("verb=Some(ExtFrame)")
+                            || line.contains("verb=Some(MulticastFrame)"))
+                })
+            })
+            .unwrap_or(false);
+        let tun_inject_evidence = controller_combined.contains("event=\"tun_packet_inject\"")
+            || peer_combined.contains("event=\"tun_packet_inject\"");
+
+        let data_plane_evidence =
+            relayed_official_frame_evidence || peer_side_official_frame_evidence || tun_inject_evidence;
 
         let tun_tap_available = host_tun_tap_available();
         let data_plane_report = format!(
@@ -5278,12 +5909,40 @@ pub mod tests {
              Deferred: full official-in-Shadow coverage is a future todo\n\
              TUN/TAP available: {}\n\
              Join/config-request evidence found: {}\n\
+             Official assigned IPv4: {}\n\
+             Controller assigned IPv4: {}\n\
+             ManyTier peer assigned IPv4: {}\n\
+             Official interface discovered: {}\n\
+             Controller interface discovered: {}\n\
+             ManyTier peer interface discovered: {}\n\
+             Official->ManyTier ping trigger succeeded: {}\n\
+             ManyTier->official ping trigger succeeded: {}\n\
+             Preferred ManyTier endpoint: {}\n\
+             Controller-side relayed official frame observed: {}\n\
+             Peer-side relayed official frame observed: {}\n\
+             Received-TUN injection evidence found: {}\n\
              Data-plane (frame exchange) evidence found: {}\n\
              Note: failure here names whether join or frame exchange broke.\n",
             live_execution_lane_label(),
             EVIDENCE_HOST_NATIVE,
             tun_tap_available,
             join_evidence,
+            official_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            controller_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            peer_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            official_interface.as_deref().unwrap_or("<missing>"),
+            controller_interface.as_deref().unwrap_or("<missing>"),
+            peer_interface.as_deref().unwrap_or("<missing>"),
+            official_ping_trigger
+                .map(|success| success.to_string())
+                .unwrap_or_else(|| "<not attempted>".to_string()),
+            manytier_ping_trigger
+                .map(|success| success.to_string())
+                .unwrap_or_else(|| "<not attempted>".to_string()),
+            manytier_endpoint_label,
+            relayed_official_frame_evidence,
+            peer_side_official_frame_evidence,
+            tun_inject_evidence,
             data_plane_evidence,
         );
 
@@ -5348,6 +6007,12 @@ pub mod tests {
             );
         }
 
+        run_opportunistic_pcap_diff(
+            "manytier-mixed-peer",
+            &peer_result.artifact_root,
+            "manytier-controller",
+            &controller_result.artifact_root,
+        );
         run_opportunistic_pcap_diff(
             "official-zerotier-one-client",
             &official_result.artifact_root,

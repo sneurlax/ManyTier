@@ -1,0 +1,42 @@
+# Shadow startup-only reproducer for official zerotier-one.
+#
+# Topology: 1 node (official daemon only) on a loopback/self-edge graph.
+# Purpose: isolate Shadow/runtime startup behavior from ManyTier controller,
+# network-config, and VL2 exchange logic.
+
+general:
+  stop_time: 10s
+  model_unblocked_syscall_latency: true
+
+host_option_defaults:
+  pcap_enabled: true
+  pcap_capture_size: "65535 B"
+
+network:
+  graph:
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+        ]
+        edge [
+          source 0
+          target 0
+          latency "1 ns"
+        ]
+      ]
+
+hosts:
+  zt-official:
+    network_node_id: 0
+    bandwidth_down: "100 Mbit"
+    bandwidth_up: "100 Mbit"
+    processes:
+    - path: ../../tests/fixtures/zerotier-one
+      args: "-U -p0 shadow-data/zt-data"
+      start_time: 1s
+      expected_final_state: running
+      environment:
+        RUST_LOG: "info"
