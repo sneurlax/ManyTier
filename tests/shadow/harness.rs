@@ -1145,7 +1145,18 @@ fn workspace_root(work_dir: &Path) -> PathBuf {
 }
 
 fn zerotier_one_binary_path(work_dir: &Path) -> Option<PathBuf> {
-    Some(workspace_root(work_dir).join("tests/fixtures/zerotier-one"))
+    let root = workspace_root(work_dir);
+    match std::env::var_os("MANYTIER_ZEROTIER_ONE_BIN") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            Some(if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            })
+        }
+        None => Some(root.join("tests/fixtures/zerotier-one")),
+    }
 }
 
 fn cargo_target_dir(work_dir: &Path) -> PathBuf {
@@ -3119,6 +3130,31 @@ fn run_opportunistic_pcap_diff(
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn test_classify_official_refresh_failure_names_retry_gaps() {
+        let outcome = OfficialToManytierRefreshOutcome {
+            join_evidence: true,
+            data_plane_evidence: false,
+            official_assigned_ipv4: Some("192.168.192.2".to_string()),
+            controller_assigned_ipv4: None,
+            peer_assigned_ipv4: Some("192.168.192.1".to_string()),
+            official_interface: Some("ztofficial".to_string()),
+            controller_interface: None,
+            peer_interface: Some("ztpeer".to_string()),
+            official_ping_trigger: Some(false),
+            manytier_ping_trigger: Some(false),
+            manytier_endpoint_label: "mixed-peer".to_string(),
+        };
+
+        let categories = classify_official_refresh_failure(&outcome);
+
+        assert!(categories.contains(&"interface discovery incomplete after refresh".to_string()));
+        assert!(categories.contains(&"ping stimulation failed after refresh".to_string()));
+        assert!(
+            categories.contains(&"data-plane evidence still missing after refresh".to_string())
+        );
+    }
 
     #[test]
     fn test_parse_host_pcaps_fixture() {
@@ -5305,7 +5341,9 @@ pub mod tests {
                     network_id_str
                         .as_deref()
                         .zip(controller_addr.as_ref())
-                        .and_then(|(network_id, member_addr)| fallback_tun_name(network_id, member_addr))
+                        .and_then(|(network_id, member_addr)| {
+                            fallback_tun_name(network_id, member_addr)
+                        })
                 })
             });
 
@@ -5352,7 +5390,8 @@ pub mod tests {
             });
             bootstrap.write_manifest();
         }
-        if let (Some(network_id), Some(token)) = (network_id_str.as_deref(), peer_authtoken.as_deref())
+        if let (Some(network_id), Some(token)) =
+            (network_id_str.as_deref(), peer_authtoken.as_deref())
         {
             let joined = join_network_via_manytier_api(PEER_API_PORT, token, network_id);
             eprintln!(
@@ -5563,24 +5602,24 @@ pub mod tests {
         } else {
             None
         };
-        let official_interface = official_assigned_ipv4
-            .as_deref()
-            .and_then(|ip| wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10)));
+        let official_interface = official_assigned_ipv4.as_deref().and_then(|ip| {
+            wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10))
+        });
         let peer_interface = peer_assigned_ipv4
             .as_deref()
             .and_then(|ip| wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10)))
             .or_else(|| {
                 peer_assigned_ipv4.as_deref().and_then(|_| {
-                    network_id_str
-                        .as_deref()
-                        .zip(peer_addr.as_ref())
-                        .and_then(|(network_id, member_addr)| fallback_tun_name(network_id, member_addr))
+                    network_id_str.as_deref().zip(peer_addr.as_ref()).and_then(
+                        |(network_id, member_addr)| fallback_tun_name(network_id, member_addr),
+                    )
                 })
             });
         let (manytier_endpoint_label, manytier_endpoint_ip, manytier_endpoint_interface) =
-            if let (Some(ip), Some(interface)) =
-                (controller_assigned_ipv4.as_deref(), controller_interface.as_deref())
-            {
+            if let (Some(ip), Some(interface)) = (
+                controller_assigned_ipv4.as_deref(),
+                controller_interface.as_deref(),
+            ) {
                 ("controller", Some(ip), Some(interface))
             } else if let (Some(ip), Some(interface)) =
                 (peer_assigned_ipv4.as_deref(), peer_interface.as_deref())
@@ -5855,10 +5894,8 @@ pub mod tests {
             "{}\n{}",
             official_result.stdout, official_result.stderr
         ));
-        let peer_combined = strip_ansi_escape_sequences(&format!(
-            "{}\n{}",
-            peer_result.stdout, peer_result.stderr
-        ));
+        let peer_combined =
+            strip_ansi_escape_sequences(&format!("{}\n{}", peer_result.stdout, peer_result.stderr));
 
         let join_evidence = controller_combined.contains("vl2_network_joined")
             || controller_combined.contains("dynamic_config_received")
@@ -5897,8 +5934,9 @@ pub mod tests {
         let tun_inject_evidence = controller_combined.contains("event=\"tun_packet_inject\"")
             || peer_combined.contains("event=\"tun_packet_inject\"");
 
-        let data_plane_evidence =
-            relayed_official_frame_evidence || peer_side_official_frame_evidence || tun_inject_evidence;
+        let data_plane_evidence = relayed_official_frame_evidence
+            || peer_side_official_frame_evidence
+            || tun_inject_evidence;
 
         let tun_tap_available = host_tun_tap_available();
         let data_plane_report = format!(
@@ -5928,7 +5966,9 @@ pub mod tests {
             tun_tap_available,
             join_evidence,
             official_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
-            controller_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            controller_assigned_ipv4
+                .as_deref()
+                .unwrap_or("<unassigned>"),
             peer_assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
             official_interface.as_deref().unwrap_or("<missing>"),
             controller_interface.as_deref().unwrap_or("<missing>"),
