@@ -1,0 +1,46 @@
+[package]
+name = "zerotier-cli-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+[dependencies.zerotier-protocol]
+path = "../crates/zerotier-protocol"
+
+[dependencies.zerotier-crypto]
+path = "../crates/zerotier-crypto"
+
+[[bin]]
+name = "packet_parser"
+path = "fuzz_targets/packet_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_parser"
+path = "fuzz_targets/identity_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network_config_parser"
+path = "fuzz_targets/network_config_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fragment_packet"
+path = "fuzz_targets/fragment_packet.rs"
+test = false
+doc = false
+bench = false
