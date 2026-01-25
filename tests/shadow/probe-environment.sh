@@ -1,6 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+resolve_official_bin() {
+    local configured="${MANYTIER_ZEROTIER_ONE_BIN:-tests/fixtures/zerotier-one}"
+    if [[ "$configured" = /* ]]; then
+        printf '%s\n' "$configured"
+    else
+        printf '%s\n' "$ROOT/$configured"
+    fi
+}
+
 echo "=== ManyTier Privileged Lane Probe ==="
 
 PROBE_TUN=""
@@ -72,10 +84,12 @@ rm -f "$PROBE_ERR" >/dev/null 2>&1 || true
 PROBE_ERR=""
 
 # 4. Check for zerotier-one binary
-if [ -x "tests/fixtures/zerotier-one" ]; then
-    echo "[OK] tests/fixtures/zerotier-one is present and executable"
+OFFICIAL_BIN="$(resolve_official_bin)"
+if [ -x "$OFFICIAL_BIN" ]; then
+    echo "[OK] official zerotier-one binary is present and executable: $OFFICIAL_BIN"
 else
-    echo "[FAIL] tests/fixtures/zerotier-one is missing or not executable. Run 'tests/fixtures/download-zerotier.sh'?"
+    echo "[FAIL] official zerotier-one binary is missing or not executable: $OFFICIAL_BIN"
+    echo "       Run 'tests/fixtures/download-zerotier.sh' or point MANYTIER_ZEROTIER_ONE_BIN at a downloaded fixture?"
     exit 1
 fi
 

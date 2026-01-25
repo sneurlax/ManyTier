@@ -66,10 +66,14 @@ fi
 
 # 1. Setup Artifacts
 TIMESTAMP=$(date +%Y%m%dT%H%M%S)
-ARTIFACT_ROOT="$ROOT/tests/shadow/artifacts/run-$TIMESTAMP"
+ARTIFACT_ROOT="${MANYTIER_ARTIFACT_ROOT:-$ROOT/tests/shadow/artifacts/run-$TIMESTAMP}"
+if [[ "$ARTIFACT_ROOT" != /* ]]; then
+    ARTIFACT_ROOT="$ROOT/$ARTIFACT_ROOT"
+fi
 mkdir -p "$ARTIFACT_ROOT"
 
 echo "Artifacts will be collected in: $ARTIFACT_ROOT"
+echo "Official zerotier-one binary: ${MANYTIER_ZEROTIER_ONE_BIN:-tests/fixtures/zerotier-one}"
 
 export MANYTIER_PRIVILEGED_LIVE=1
 export MANYTIER_ARTIFACT_ROOT="$ARTIFACT_ROOT"
@@ -102,6 +106,9 @@ EOF
         echo "cargo=$CARGO_BIN version=$($CARGO_BIN -V)"
     else
         echo "cargo=<missing> (CARGO_BIN=$CARGO_BIN)"
+    fi
+    if [ -n "${MANYTIER_ZEROTIER_ONE_BIN:-}" ] && [ -x "${MANYTIER_ZEROTIER_ONE_BIN}" ]; then
+        echo "official_bin_version=$("${MANYTIER_ZEROTIER_ONE_BIN}" -v 2>/dev/null || echo unknown)"
     fi
 
     echo "Running test_manytier_joins_manytier_controller_fallback..."
