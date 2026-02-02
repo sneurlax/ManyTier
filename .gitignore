@@ -1,7 +1,14 @@
 /target
+target-user/
 **/*.rs.bk
 *.pdb
 .DS_Store
+/*.moon
+tests/fixtures/zerotier-one-*
+tests/fixtures/planet.bin.new
+tests/shadow/artifacts/run-*/
+tests/shadow/artifacts/verify-*/
+tests/shadow/shadow-node/tests/shadow/
 tests/upstream-dohello-replay/vendored/
 tests/upstream-dohello-replay/replay
 tests/upstream-dohello-replay/*.o
