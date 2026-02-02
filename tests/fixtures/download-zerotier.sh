@@ -4,6 +4,11 @@
 # 1.14.2 binary to tests/fixtures/zerotier-one.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# shellcheck source=tests/shadow/validation-paths.sh
+source "$ROOT/tests/shadow/validation-paths.sh"
+
 DEFAULT_VERSION="1.14.2"
 VERSION="${MANYTIER_ZEROTIER_ONE_VERSION:-$DEFAULT_VERSION}"
 ARCH="${MANYTIER_ZEROTIER_ONE_ARCH:-amd64}"
@@ -61,7 +66,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$OUTPUT" ]; then
-    OUTPUT_DIR="${OUTPUT_DIR:-${LEGACY_OUTPUT_DIR:-tests/fixtures}}"
+    DEFAULT_OUTPUT_DIR="$(manytier_validation_repo_relative "$(manytier_validation_fixture_root)")"
+    OUTPUT_DIR="${OUTPUT_DIR:-${LEGACY_OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}}"
     if [ "$VERSION" = "$DEFAULT_VERSION" ] && [ -z "$LEGACY_OUTPUT_DIR" ] && [ -z "${MANYTIER_ZEROTIER_ONE_VERSION:-}" ]; then
         OUTPUT="$OUTPUT_DIR/zerotier-one"
     else
@@ -69,6 +75,7 @@ if [ -z "$OUTPUT" ]; then
     fi
 fi
 
+OUTPUT="$(manytier_validation_resolve_path "$OUTPUT")"
 mkdir -p "$(dirname "$OUTPUT")"
 
 if [ -f "$OUTPUT" ]; then
@@ -86,7 +93,7 @@ curl -fsSL "$URL" -o "$TEMP/zt.deb"
 cd "$TEMP"
 ar x zt.deb
 tar xf data.tar.* ./usr/sbin/zerotier-one 2>/dev/null || tar xf data.tar.* ./usr/sbin/zerotier-one
-cp usr/sbin/zerotier-one "$OLDPWD/$OUTPUT"
-chmod +x "$OLDPWD/$OUTPUT"
+cp usr/sbin/zerotier-one "$OUTPUT"
+chmod +x "$OUTPUT"
 
 echo "zerotier-one ${VERSION} downloaded to $OUTPUT"

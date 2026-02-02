@@ -2,22 +2,32 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ARTIFACT_PARENT="$REPO_ROOT/tests/shadow/artifacts"
-TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+# shellcheck source=tests/shadow/validation-paths.sh
+source "$REPO_ROOT/tests/shadow/validation-paths.sh"
 
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-$ARTIFACT_PARENT/run-${TIMESTAMP}-hosted-official-validation}"
+TIMESTAMP="$(manytier_validation_timestamp)"
+
+if [[ -n "${MANYTIER_HOSTED_ARTIFACT_ROOT:-}" ]]; then
+  ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "hosted artifact root" "$MANYTIER_HOSTED_ARTIFACT_ROOT")"
+elif [[ -n "${ARTIFACT_ROOT:-}" ]]; then
+  ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "hosted artifact root" "$ARTIFACT_ROOT")"
+elif [[ -n "${MANYTIER_VALIDATION_ARTIFACT_ROOT:-}" ]]; then
+  ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "validation artifact root" "$MANYTIER_VALIDATION_ARTIFACT_ROOT")"
+else
+  ARTIFACT_ROOT="$(manytier_validation_artifact_parent)/run-${TIMESTAMP}-hosted-official-validation"
+fi
 NETWORK_ID="${MANYTIER_HOSTED_NETWORK_ID:-}"
 API_PORT="${MANYTIER_HOSTED_API_PORT:-19093}"
 UDP_PORT="${MANYTIER_HOSTED_UDP_PORT:-19993}"
 TIMEOUT_SECONDS="${MANYTIER_HOSTED_TIMEOUT_SECONDS:-90}"
-TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target-user}"
+TARGET_DIR="$(manytier_validation_target_dir)"
 BINARY="$TARGET_DIR/debug/manytier"
 DATA_DIR="$ARTIFACT_ROOT/manytier-data"
 
 AUTHORIZATION_CHECKPOINT="${MANYTIER_HOSTED_AUTHORIZATION_CHECKPOINT:-off}"
 AUTHORIZATION_WAIT_SECONDS="${MANYTIER_HOSTED_AUTHORIZATION_WAIT_SECONDS:-300}"
 RUN_OFFICIAL_CONTROL="${MANYTIER_HOSTED_RUN_OFFICIAL_CONTROL:-on-failure}"
-OFFICIAL_BIN="${MANYTIER_HOSTED_OFFICIAL_BIN:-$REPO_ROOT/tests/fixtures/zerotier-one}"
+OFFICIAL_BIN="${MANYTIER_HOSTED_OFFICIAL_BIN:-$(manytier_validation_default_official_bin)}"
 OFFICIAL_PORT="${MANYTIER_HOSTED_OFFICIAL_PORT:-19094}"
 
 ROOT_LOG="$ARTIFACT_ROOT/01-root-hello.log"

@@ -4,13 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=tests/shadow/validation-paths.sh
+source "$ROOT/tests/shadow/validation-paths.sh"
+
 resolve_official_bin() {
-    local configured="${MANYTIER_ZEROTIER_ONE_BIN:-tests/fixtures/zerotier-one}"
-    if [[ "$configured" = /* ]]; then
-        printf '%s\n' "$configured"
-    else
-        printf '%s\n' "$ROOT/$configured"
-    fi
+    manytier_validation_default_official_bin
 }
 
 echo "=== ManyTier Privileged Lane Probe ==="

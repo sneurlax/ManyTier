@@ -4,10 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=tests/shadow/validation-paths.sh
+source "$ROOT/tests/shadow/validation-paths.sh"
+
 # Allow explicit override (useful for CI).
 CARGO_BIN="${MANYTIER_CARGO_BIN:-cargo}"
 OWNER_UID="${SUDO_UID:-}"
 OWNER_GID="${SUDO_GID:-}"
+TARGET_DIR="$(manytier_validation_target_dir)"
+SCRATCH_ROOT="$(manytier_validation_scratch_root)"
 
 fix_ownership_on_exit() {
     if [ "$(id -u)" -ne 0 ]; then
@@ -18,9 +23,12 @@ fix_ownership_on_exit() {
     fi
     # Root runs can leave behind root-owned build artifacts and logs, which then
     # break normal developer workflows. Best-effort chown back to the invoking user.
-    chown -R "$OWNER_UID:$OWNER_GID" "$ROOT/target" 2>/dev/null || true
+    chown -R "$OWNER_UID:$OWNER_GID" "$TARGET_DIR" 2>/dev/null || true
     if [ -n "${ARTIFACT_ROOT:-}" ]; then
         chown -R "$OWNER_UID:$OWNER_GID" "$ARTIFACT_ROOT" 2>/dev/null || true
+    fi
+    if [ -n "${MANYTIER_VALIDATION_SCRATCH_ROOT:-}" ]; then
+        chown -R "$OWNER_UID:$OWNER_GID" "$MANYTIER_VALIDATION_SCRATCH_ROOT" 2>/dev/null || true
     fi
 }
 
@@ -65,18 +73,29 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
 fi
 
 # 1. Setup Artifacts
-TIMESTAMP=$(date +%Y%m%dT%H%M%S)
-ARTIFACT_ROOT="${MANYTIER_ARTIFACT_ROOT:-$ROOT/tests/shadow/artifacts/run-$TIMESTAMP}"
-if [[ "$ARTIFACT_ROOT" != /* ]]; then
-    ARTIFACT_ROOT="$ROOT/$ARTIFACT_ROOT"
+TIMESTAMP="$(manytier_validation_timestamp)"
+if [[ -n "${MANYTIER_ARTIFACT_ROOT:-}" ]]; then
+    ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "privileged artifact root" "$MANYTIER_ARTIFACT_ROOT")"
+elif [[ -n "${MANYTIER_VALIDATION_ARTIFACT_ROOT:-}" ]]; then
+    ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "validation artifact root" "$MANYTIER_VALIDATION_ARTIFACT_ROOT")"
+else
+    ARTIFACT_ROOT="$(manytier_validation_artifact_parent)/run-$TIMESTAMP"
 fi
+OFFICIAL_BIN="$(manytier_validation_default_official_bin)"
+export CARGO_TARGET_DIR="$TARGET_DIR"
+export MANYTIER_WORKSPACE_ROOT="$ROOT"
+export MANYTIER_VALIDATION_SCRATCH_ROOT="$SCRATCH_ROOT"
+mkdir -p "$ARTIFACT_ROOT" "$TARGET_DIR" "$SCRATCH_ROOT"
 mkdir -p "$ARTIFACT_ROOT"
 
 echo "Artifacts will be collected in: $ARTIFACT_ROOT"
-echo "Official zerotier-one binary: ${MANYTIER_ZEROTIER_ONE_BIN:-tests/fixtures/zerotier-one}"
+echo "Validation scratch root: $SCRATCH_ROOT"
+echo "Cargo target dir: $TARGET_DIR"
+echo "Official zerotier-one binary: $OFFICIAL_BIN"
 
 export MANYTIER_PRIVILEGED_LIVE=1
 export MANYTIER_ARTIFACT_ROOT="$ARTIFACT_ROOT"
+export MANYTIER_ZEROTIER_ONE_BIN="$OFFICIAL_BIN"
 export TMPDIR="$ARTIFACT_ROOT/tmp"
 mkdir -p "$TMPDIR"
 

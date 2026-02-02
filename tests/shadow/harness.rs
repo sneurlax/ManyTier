@@ -32,6 +32,9 @@ use serde::{Deserialize, Serialize};
 const SHADOW_BIN: &str = "shadow";
 const PRIVILEGED_LIVE_ENV: &str = "MANYTIER_PRIVILEGED_LIVE";
 const ARTIFACT_ROOT_ENV: &str = "MANYTIER_ARTIFACT_ROOT";
+const VALIDATION_FIXTURE_ROOT_ENV: &str = "MANYTIER_VALIDATION_FIXTURE_ROOT";
+const VALIDATION_SCRATCH_ROOT_ENV: &str = "MANYTIER_VALIDATION_SCRATCH_ROOT";
+const WORKSPACE_ROOT_ENV: &str = "MANYTIER_WORKSPACE_ROOT";
 const PRIVILEGED_LIVE_RUNNER: &str = "tests/shadow/run-privileged-live.sh";
 
 #[path = "pcap.rs"]
@@ -277,7 +280,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 
 fn prepare_shadow_test_dir(workspace_root: &Path, test_name: &str) -> PathBuf {
     let source_root = workspace_root.join("tests/shadow");
-    let scratch_base = workspace_root.join("target/shadow-tests");
+    let scratch_base = validation_scratch_root(workspace_root);
     let mut scratch_root = scratch_base.join(test_name);
     if scratch_root.exists() {
         if let Err(err) = std::fs::remove_dir_all(&scratch_root) {
@@ -295,10 +298,7 @@ fn prepare_shadow_test_dir(workspace_root: &Path, test_name: &str) -> PathBuf {
             scratch_root = scratch_base.join(format!("{test_name}-{unique_suffix}"));
             eprintln!(
                 "[shadow-harness] WARNING: failed to reset scratch dir {} ({err}); using {} instead",
-                workspace_root
-                    .join("target/shadow-tests")
-                    .join(test_name)
-                    .display(),
+                scratch_base.join(test_name).display(),
                 scratch_root.display()
             );
         }
@@ -1139,12 +1139,35 @@ fn collect_trace_events(
     traces
 }
 
-fn workspace_root(work_dir: &Path) -> PathBuf {
-    work_dir
+fn workspace_root(_work_dir: &Path) -> PathBuf {
+    if let Some(root) = std::env::var_os(WORKSPACE_ROOT_ENV) {
+        let root = PathBuf::from(root);
+        return if root.is_absolute() {
+            root
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(root)
+        };
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .find(|p| p.join("Cargo.toml").exists() && p.join("target").exists())
+        .find(|path| path.join(".planning").exists() || path.join(".git").exists())
         .expect("failed to locate workspace root")
         .to_path_buf()
+}
+
+fn validation_scratch_root(workspace_root: &Path) -> PathBuf {
+    match std::env::var_os(VALIDATION_SCRATCH_ROOT_ENV) {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        }
+        None => workspace_root.join("tests/shadow/artifacts/scratch"),
+    }
 }
 
 fn zerotier_one_binary_path(work_dir: &Path) -> Option<PathBuf> {
@@ -1158,7 +1181,18 @@ fn zerotier_one_binary_path(work_dir: &Path) -> Option<PathBuf> {
                 root.join(path)
             })
         }
-        None => Some(root.join("tests/fixtures/zerotier-one")),
+        None => Some(match std::env::var_os(VALIDATION_FIXTURE_ROOT_ENV) {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    root.join(path)
+                };
+                path.join("zerotier-one")
+            }
+            None => root.join("tests/fixtures/zerotier-one"),
+        }),
     }
 }
 

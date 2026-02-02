@@ -4,35 +4,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-resolve_path() {
-  local value="$1"
-  if [[ "$value" = /* ]]; then
-    printf '%s\n' "$value"
-  else
-    printf '%s\n' "$ROOT/$value"
-  fi
-}
+# shellcheck source=tests/shadow/validation-paths.sh
+source "$ROOT/tests/shadow/validation-paths.sh"
 
-relative_to_root() {
-  local abs_path="$1"
-  if [[ "$abs_path" == "$ROOT/"* ]]; then
-    printf '%s\n' "${abs_path#$ROOT/}"
-  else
-    printf '%s\n' "$abs_path"
-  fi
-}
-
-TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-ARTIFACT_ROOT="${MANYTIER_TOOL_PARITY_ARTIFACT_ROOT:-tests/shadow/artifacts/run-${TIMESTAMP}-self-hosted-tool-parity}"
-ARTIFACT_ROOT="$(resolve_path "$ARTIFACT_ROOT")"
-if [[ "$ARTIFACT_ROOT" != "$ROOT/"* ]]; then
-  echo "Tool parity artifact root must live inside the repo so Docker can write into the mounted workspace:" >&2
-  echo "  $ARTIFACT_ROOT" >&2
-  exit 1
+TIMESTAMP="$(manytier_validation_timestamp)"
+if [[ -n "${MANYTIER_TOOL_PARITY_ARTIFACT_ROOT:-}" ]]; then
+  ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "tool parity artifact root" "$MANYTIER_TOOL_PARITY_ARTIFACT_ROOT")"
+elif [[ -n "${MANYTIER_VALIDATION_ARTIFACT_ROOT:-}" ]]; then
+  ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "validation artifact root" "$MANYTIER_VALIDATION_ARTIFACT_ROOT")"
+else
+  ARTIFACT_ROOT="$(manytier_validation_artifact_parent)/run-${TIMESTAMP}-self-hosted-tool-parity"
 fi
-ARTIFACT_ROOT_REL="$(relative_to_root "$ARTIFACT_ROOT")"
+ARTIFACT_ROOT_REL="$(manytier_validation_repo_relative "$ARTIFACT_ROOT")"
 IMAGE="${MANYTIER_TOOL_PARITY_IMAGE:-ubuntu:24.04}"
-OFFICIAL_BIN="${MANYTIER_ZEROTIER_ONE_BIN:-tests/fixtures/zerotier-one}"
+OFFICIAL_BIN="$(manytier_validation_default_official_bin)"
 RUN_LOG="$ARTIFACT_ROOT/tool-parity-run.log"
 SUMMARY_PATH="$ARTIFACT_ROOT/self-hosted-tool-parity-summary.md"
 M2O_REPORT="$ARTIFACT_ROOT/tool-parity-manytier-client-official-controller.md"

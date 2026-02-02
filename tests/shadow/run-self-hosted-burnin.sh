@@ -4,23 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-resolve_path() {
-  local value="$1"
-  if [[ "$value" = /* ]]; then
-    printf '%s\n' "$value"
-  else
-    printf '%s\n' "$ROOT/$value"
-  fi
-}
-
-relative_to_root() {
-  local abs_path="$1"
-  if [[ "$abs_path" == "$ROOT/"* ]]; then
-    printf '%s\n' "${abs_path#$ROOT/}"
-  else
-    printf '%s\n' "$abs_path"
-  fi
-}
+# shellcheck source=tests/shadow/validation-paths.sh
+source "$ROOT/tests/shadow/validation-paths.sh"
 
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//'
@@ -28,7 +13,7 @@ slugify() {
 
 fixture_path_for_version() {
   local version="$1"
-  printf 'tests/fixtures/zerotier-one-%s\n' "$version"
+  printf '%s/zerotier-one-%s\n' "$(manytier_validation_repo_relative "$(manytier_validation_fixture_root)")" "$version"
 }
 
 ensure_fixture() {
@@ -36,7 +21,7 @@ ensure_fixture() {
   local fixture_rel
   fixture_rel="$(fixture_path_for_version "$version")"
   local fixture_abs
-  fixture_abs="$(resolve_path "$fixture_rel")"
+  fixture_abs="$(manytier_validation_resolve_path "$fixture_rel")"
   if [[ ! -x "$fixture_abs" ]]; then
     ./tests/fixtures/download-zerotier.sh --version "$version" --output "$fixture_rel" >&2
   fi
@@ -100,13 +85,13 @@ classify_cell() {
   printf 'harness|strict lane failed without a more specific classification\n'
 }
 
-TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-ARTIFACT_ROOT="${MANYTIER_BURNIN_ARTIFACT_ROOT:-tests/shadow/artifacts/run-${TIMESTAMP}-self-hosted-burnin}"
-ARTIFACT_ROOT="$(resolve_path "$ARTIFACT_ROOT")"
-if [[ "$ARTIFACT_ROOT" != "$ROOT/"* ]]; then
-  echo "Burn-in artifact root must live inside the repo so Docker can write into the mounted workspace:" >&2
-  echo "  $ARTIFACT_ROOT" >&2
-  exit 1
+TIMESTAMP="$(manytier_validation_timestamp)"
+if [[ -n "${MANYTIER_BURNIN_ARTIFACT_ROOT:-}" ]]; then
+  ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "burn-in artifact root" "$MANYTIER_BURNIN_ARTIFACT_ROOT")"
+elif [[ -n "${MANYTIER_VALIDATION_ARTIFACT_ROOT:-}" ]]; then
+  ARTIFACT_ROOT="$(manytier_validation_ensure_repo_local "validation artifact root" "$MANYTIER_VALIDATION_ARTIFACT_ROOT")"
+else
+  ARTIFACT_ROOT="$(manytier_validation_artifact_parent)/run-${TIMESTAMP}-self-hosted-burnin"
 fi
 CELLS_DIR="$ARTIFACT_ROOT/cells"
 SUMMARY_PATH="$ARTIFACT_ROOT/burnin-matrix-summary.md"
@@ -166,10 +151,10 @@ for cell in "${MATRIX_CELLS[@]}"; do
   version="${cell%%|*}"
   image="${cell#*|}"
   fixture_rel="$(ensure_fixture "$version")"
-  fixture_abs="$(resolve_path "$fixture_rel")"
+  fixture_abs="$(manytier_validation_resolve_path "$fixture_rel")"
   cell_label="$(slugify "zt-${version}__${image}")"
   cell_dir="$CELLS_DIR/$cell_label"
-  cell_rel="$(relative_to_root "$cell_dir")"
+  cell_rel="$(manytier_validation_repo_relative "$cell_dir")"
   mkdir -p "$cell_dir"
 
   echo "Running matrix cell $cell_label (version=$version image=$image)..."
