@@ -297,7 +297,7 @@ EOF
 
 (
   cd "$REPO_ROOT"
-  cargo test -p zerotier-node --test official_root -- \
+  CARGO_TARGET_DIR="$TARGET_DIR" cargo test -p zerotier-node --test official_root -- \
     --ignored --exact test_official_root_hello_exchange --nocapture
 ) >"$ROOT_LOG" 2>&1 || {
   write_blocker "official-root preflight failed; this shell still cannot prove hosted validation prerequisites"
