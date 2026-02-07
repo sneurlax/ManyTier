@@ -82,9 +82,14 @@ else
     ARTIFACT_ROOT="$(manytier_validation_artifact_parent)/run-$TIMESTAMP"
 fi
 OFFICIAL_BIN="$(manytier_validation_default_official_bin)"
+OFFICIAL_SOURCE="${MANYTIER_VALIDATION_OFFICIAL_SOURCE:-$(manytier_validation_official_bin_source "$OFFICIAL_BIN")}"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 export MANYTIER_WORKSPACE_ROOT="$ROOT"
 export MANYTIER_VALIDATION_SCRATCH_ROOT="$SCRATCH_ROOT"
+export MANYTIER_VALIDATION_ENVIRONMENT_SHAPE="${MANYTIER_VALIDATION_ENVIRONMENT_SHAPE:-current-shell}"
+export MANYTIER_VALIDATION_RUNNER_KIND="${MANYTIER_VALIDATION_RUNNER_KIND:-host}"
+export MANYTIER_VALIDATION_OFFICIAL_SOURCE="$OFFICIAL_SOURCE"
+export MANYTIER_VALIDATION_OFFICIAL_HOST_PATH="${MANYTIER_VALIDATION_OFFICIAL_HOST_PATH:-$OFFICIAL_BIN}"
 mkdir -p "$ARTIFACT_ROOT" "$TARGET_DIR" "$SCRATCH_ROOT"
 mkdir -p "$ARTIFACT_ROOT"
 
@@ -147,3 +152,9 @@ EOF
 
     echo "--- End of Privileged Live Run $TIMESTAMP ---"
 } 2>&1 | tee "$ARTIFACT_ROOT/run.log"
+
+if [[ "${MANYTIER_SKIP_LOCAL_MANIFEST:-0}" != "1" ]]; then
+    if ! ./tests/shadow/write-self-hosted-validation-manifest.sh --artifact-root "$ARTIFACT_ROOT" >/dev/null 2>&1; then
+        echo "WARNING: failed to generate self-hosted validation manifest" >&2
+    fi
+fi

@@ -22,6 +22,7 @@ RUN_LOG="$ARTIFACT_ROOT/tool-parity-run.log"
 SUMMARY_PATH="$ARTIFACT_ROOT/self-hosted-tool-parity-summary.md"
 M2O_REPORT="$ARTIFACT_ROOT/tool-parity-manytier-client-official-controller.md"
 O2M_REPORT="$ARTIFACT_ROOT/tool-parity-official-client-manytier-controller.md"
+MANIFEST_PATH="$ARTIFACT_ROOT/self-hosted-validation-manifest.json"
 
 mkdir -p "$ARTIFACT_ROOT"
 
@@ -59,6 +60,7 @@ cat >"$SUMMARY_PATH" <<EOF
 - official_binary: $OFFICIAL_BIN
 - privileged_lane_exit_code: $lane_status
 - privileged_lane_log: $RUN_LOG
+- validation_manifest: $MANIFEST_PATH
 - manytier_client_vs_official_controller_report: $M2O_REPORT
 - official_client_vs_manytier_controller_report: $O2M_REPORT
 - manytier_client_vs_official_controller_result: ${m2o_result:-<missing>}
