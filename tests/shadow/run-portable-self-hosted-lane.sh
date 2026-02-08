@@ -15,9 +15,15 @@ else
 fi
 mkdir -p "$ARTIFACT_ROOT"
 
-PREFLIGHT_ROOT="$ARTIFACT_ROOT/preflight"
-MANYTIER_SELF_HOSTED_PREFLIGHT_ARTIFACT_ROOT="$PREFLIGHT_ROOT" \
+WORKSTATION_BASELINE_ROOT="$ARTIFACT_ROOT/workstation-baseline"
+MANYTIER_SELF_HOSTED_PREFLIGHT_ARTIFACT_ROOT="$WORKSTATION_BASELINE_ROOT" \
   ./tests/shadow/preflight-self-hosted-official.sh >/dev/null
+
+PORTABLE_CONTRACT_ROOT="$ARTIFACT_ROOT/portable-contract"
+MANYTIER_PORTABLE_PREFLIGHT_ARTIFACT_ROOT="$PORTABLE_CONTRACT_ROOT" \
+  ./tests/shadow/preflight-portable-self-hosted.sh \
+    --baseline-json "$WORKSTATION_BASELINE_ROOT/self-hosted-environment-report.json" \
+    --runner-label "${MANYTIER_PORTABLE_RUNNER_LABEL:-portable-runner}" >/dev/null
 
 REPORT_PATH="$ARTIFACT_ROOT/portable-self-hosted-report.md"
 cat >"$REPORT_PATH" <<EOF
@@ -29,9 +35,10 @@ cat >"$REPORT_PATH" <<EOF
 - classification: environment
 - documented_path: VM or non-loopback runner
 - workstation_read: The current workstation has a working privileged Docker lane, but no separate VM or non-loopback runner is configured yet.
-- preflight_report: $PREFLIGHT_ROOT/self-hosted-environment-report.md
-- next_step_guidance: Provision a Linux VM or remote runner with /dev/net/tun, CAP_NET_ADMIN, Docker or host execution access, and either the installed system zerotier-one binary or a supported pinned fixture.
-- hosted_policy: Hosted official-network execution remains deferred for v1.6.
+- workstation_baseline_report: $WORKSTATION_BASELINE_ROOT/self-hosted-environment-report.md
+- portable_contract_report: $PORTABLE_CONTRACT_ROOT/portable-self-hosted-environment-report.md
+- next_step_guidance: ./tests/shadow/provision-portable-self-hosted-runner.sh --dry-run
+- hosted_policy: Hosted official-network execution remains deferred for v1.7.
 
 ## Accepted Outcome
 

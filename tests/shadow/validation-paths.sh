@@ -139,6 +139,51 @@ manytier_validation_default_official_bin() {
   printf '%s\n' "$(manytier_validation_fixture_root)/zerotier-one"
 }
 
+manytier_validation_shadow_bin() {
+  if [[ -n "${MANYTIER_SHADOW_BIN:-}" ]]; then
+    manytier_validation_resolve_path "$MANYTIER_SHADOW_BIN"
+    return
+  fi
+
+  command -v shadow 2>/dev/null || true
+}
+
+manytier_validation_shadow_version() {
+  local path="${1:-$(manytier_validation_shadow_bin)}"
+  local version
+  if [[ -z "$path" || ! -x "$path" ]]; then
+    printf 'unknown\n'
+    return
+  fi
+
+  version="$("$path" --version 2>/dev/null | head -n 1 | tr -d '\r')"
+  if [[ -n "$version" ]]; then
+    printf '%s\n' "$version"
+  else
+    printf 'unknown\n'
+  fi
+}
+
+manytier_validation_host_label() {
+  if [[ -n "${MANYTIER_VALIDATION_HOST_LABEL:-}" ]]; then
+    printf '%s\n' "$MANYTIER_VALIDATION_HOST_LABEL"
+    return
+  fi
+
+  hostname 2>/dev/null || printf 'unknown\n'
+}
+
+manytier_validation_os_pretty_name() {
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    printf '%s\n' "${PRETTY_NAME:-${NAME:-unknown}}"
+    return
+  fi
+
+  uname -srvmo 2>/dev/null || printf 'unknown\n'
+}
+
 manytier_validation_recommended_official_bin() {
   local system_path
   local system_version

@@ -66,7 +66,8 @@ else
 - classification: environment
 - note: No strict-lane runner is available on this workstation.
 - direct_probe_log: $ARTIFACT_ROOT/direct-probe.log
-- hosted_policy: Hosted official-network execution remains deferred for v1.6.
+- portable_environment_report: ${MANYTIER_PORTABLE_PREFLIGHT_REPORT_MD:-<missing>}
+- hosted_policy: Hosted official-network execution remains deferred for v1.7.
 EOF
   printf '%s\n' "$ARTIFACT_ROOT/$OUTPUT_BASENAME"
   exit 1
@@ -126,11 +127,12 @@ cat >"$ARTIFACT_ROOT/$OUTPUT_BASENAME" <<EOF
 - strict_lane_exit_code: $RUN_STATUS
 - classification: $CLASSIFICATION
 - note: $NOTE
+- portable_environment_report: ${MANYTIER_PORTABLE_PREFLIGHT_REPORT_MD:-<missing>}
 - report: $REPORT_PATH
 - manifest: $MANIFEST_PATH
 - network_id: $NETWORK_ID
 - assigned_ipv4: $ASSIGNED_IPV4
-- hosted_policy: Hosted official-network execution remains deferred for v1.6.
+- hosted_policy: Hosted official-network execution remains deferred for v1.7.
 EOF
 
 printf '%s\n' "$ARTIFACT_ROOT/$OUTPUT_BASENAME"

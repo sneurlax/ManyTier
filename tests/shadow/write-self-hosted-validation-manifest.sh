@@ -34,6 +34,8 @@ RUN_LOG="$ARTIFACT_ROOT/run.log"
 PROBE_LOG="$ARTIFACT_ROOT/probe.log"
 HOST_ASSISTED_ROOT="$ARTIFACT_ROOT/host-assisted-fallback"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+HOST_LABEL="$(manytier_validation_host_label)"
+HOST_OS="$(manytier_validation_os_pretty_name)"
 
 read_report_field() {
   local path="$1"
@@ -119,7 +121,14 @@ fi
 
 ENVIRONMENT_SHAPE="${MANYTIER_VALIDATION_ENVIRONMENT_SHAPE:-unknown}"
 RUNNER_KIND="${MANYTIER_VALIDATION_RUNNER_KIND:-unknown}"
-POLICY_NOTE="Hosted official-network execution remains deferred for v1.6."
+SHADOW_BIN="$(manytier_validation_shadow_bin)"
+SHADOW_VERSION="$(manytier_validation_shadow_version "$SHADOW_BIN")"
+PORTABLE_PREFLIGHT_JSON="${MANYTIER_PORTABLE_PREFLIGHT_REPORT_JSON:-}"
+PORTABLE_PREFLIGHT_MD="${MANYTIER_PORTABLE_PREFLIGHT_REPORT_MD:-}"
+if [[ -z "$PORTABLE_PREFLIGHT_MD" && -n "$PORTABLE_PREFLIGHT_JSON" ]]; then
+  PORTABLE_PREFLIGHT_MD="${PORTABLE_PREFLIGHT_JSON%.json}.md"
+fi
+POLICY_NOTE="Hosted official-network execution remains deferred for v1.7."
 
 M2O_REPORT="$ARTIFACT_ROOT/tool-parity-manytier-client-official-controller.md"
 O2M_REPORT="$ARTIFACT_ROOT/tool-parity-official-client-manytier-controller.md"
@@ -145,6 +154,7 @@ O2M_CONTROLLER_API_PORT="$(read_args_port "$HOST_ASSISTED_ROOT/manytier-controll
 O2M_CONTROLLER_UDP_PORT="$(read_args_port "$HOST_ASSISTED_ROOT/manytier-controller/evidence.txt" "--udp-port")"
 
 export OUTPUT_JSON GENERATED_AT ARTIFACT_ROOT ENVIRONMENT_SHAPE RUNNER_KIND POLICY_NOTE
+export HOST_LABEL HOST_OS SHADOW_BIN SHADOW_VERSION PORTABLE_PREFLIGHT_JSON PORTABLE_PREFLIGHT_MD
 export OFFICIAL_BIN_RUNTIME OFFICIAL_BIN_HOST OFFICIAL_SOURCE OFFICIAL_VERSION OFFICIAL_SUPPORTED
 export PROBE_STATUS="$(read_probe_status)"
 export PROBE_NOTE="$(read_probe_note)"
@@ -163,9 +173,22 @@ const maybe = (value) => {
   return trimmed === '' ? null : trimmed;
 };
 
+const readJsonIfPresent = (filePath) => {
+  const resolved = maybe(filePath);
+  if (!resolved) return null;
+  if (!fs.existsSync(resolved)) return null;
+  return JSON.parse(fs.readFileSync(resolved, 'utf8'));
+};
+
+const portablePreflight = readJsonIfPresent(process.env.PORTABLE_PREFLIGHT_JSON);
+
 const data = {
   generated_at: process.env.GENERATED_AT,
   artifact_root: process.env.ARTIFACT_ROOT,
+  host: {
+    label: process.env.HOST_LABEL,
+    os: process.env.HOST_OS,
+  },
   environment_shape: process.env.ENVIRONMENT_SHAPE,
   runner_kind: process.env.RUNNER_KIND,
   probe: {
@@ -179,7 +202,21 @@ const data = {
     version: process.env.OFFICIAL_VERSION,
     supported: process.env.OFFICIAL_SUPPORTED === 'true',
   },
+  shadow_binary: {
+    path: maybe(process.env.SHADOW_BIN),
+    version: maybe(process.env.SHADOW_VERSION),
+  },
   hosted_policy: process.env.POLICY_NOTE,
+  portable_environment: portablePreflight
+    ? {
+        report_json: maybe(process.env.PORTABLE_PREFLIGHT_JSON),
+        report_md: maybe(process.env.PORTABLE_PREFLIGHT_MD),
+        runner_label: portablePreflight.runner_label ?? null,
+        classification: portablePreflight.classification ?? null,
+        note: portablePreflight.note ?? null,
+        install_delta_from_workstation: portablePreflight.install_delta_from_workstation ?? null,
+      }
+    : null,
   directions: {
     manytier_client_official_controller: {
       status: maybe(process.env.M2O_STATUS),
@@ -224,6 +261,8 @@ cat >"$OUTPUT_MD" <<EOF
 
 - generated: $GENERATED_AT
 - artifact_root: $ARTIFACT_ROOT
+- host_label: $HOST_LABEL
+- host_os: $HOST_OS
 - environment_shape: $ENVIRONMENT_SHAPE
 - runner_kind: $RUNNER_KIND
 - probe_status: $(read_probe_status)
@@ -233,6 +272,10 @@ cat >"$OUTPUT_MD" <<EOF
 - official_binary_source: $OFFICIAL_SOURCE
 - official_binary_version: $OFFICIAL_VERSION
 - official_binary_supported: $OFFICIAL_SUPPORTED
+- shadow_binary_path: ${SHADOW_BIN:-<missing>}
+- shadow_binary_version: $SHADOW_VERSION
+- portable_environment_report_json: ${PORTABLE_PREFLIGHT_JSON:-<missing>}
+- portable_environment_report_md: ${PORTABLE_PREFLIGHT_MD:-<missing>}
 - hosted_policy: $POLICY_NOTE
 
 ## ManyTier Client -> Official Controller

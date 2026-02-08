@@ -18,6 +18,9 @@ TARGET_DIR_REL="$(manytier_validation_repo_relative "${CARGO_TARGET_DIR:-${MANYT
 SCRATCH_ROOT_REL="$(manytier_validation_repo_relative "$(manytier_validation_scratch_root)")"
 OFFICIAL_BIN_HOST="$(manytier_validation_default_official_bin)"
 OFFICIAL_SOURCE="${MANYTIER_VALIDATION_OFFICIAL_SOURCE:-$(manytier_validation_official_bin_source "$OFFICIAL_BIN_HOST")}"
+SHADOW_BIN_HOST="$(manytier_validation_shadow_bin)"
+SHADOW_BIN_CONTAINER="/opt/manytier-shadow/shadow"
+declare -a SHADOW_BIN_MOUNT=()
 OFFICIAL_BIN_CONTAINER=""
 declare -a OFFICIAL_BIN_MOUNT=()
 ARTIFACT_ROOT_REL=""
@@ -32,6 +35,14 @@ if [[ ! -x "$OFFICIAL_BIN_HOST" ]]; then
   exit 1
 fi
 
+if [[ -z "$SHADOW_BIN_HOST" || ! -x "$SHADOW_BIN_HOST" ]]; then
+  echo "Shadow binary is missing or not executable: ${SHADOW_BIN_HOST:-<missing>}" >&2
+  echo "Set MANYTIER_SHADOW_BIN or install shadow on the host before using the Docker wrapper." >&2
+  exit 1
+fi
+
+SHADOW_BIN_MOUNT=(-v "$SHADOW_BIN_HOST:$SHADOW_BIN_CONTAINER:ro")
+
 if manytier_validation_path_is_repo_local "$OFFICIAL_BIN_HOST"; then
   OFFICIAL_BIN_CONTAINER="$(manytier_validation_repo_relative "$OFFICIAL_BIN_HOST")"
 else
@@ -43,12 +54,13 @@ if docker run --rm --privileged --user 0:0 --device /dev/net/tun \
   -v "$PWD":/workspace \
   -v /home/user/.cargo:/home/user/.cargo:ro \
   -v /home/user/.rustup:/home/user/.rustup:ro \
-  -v /home/user/.local/bin/shadow:/usr/local/bin/shadow:ro \
+  "${SHADOW_BIN_MOUNT[@]}" \
   "${OFFICIAL_BIN_MOUNT[@]}" \
   -e HOST_UID="$HOST_UID" \
   -e HOST_GID="$HOST_GID" \
   -e MANYTIER_DUMP_UDP="${MANYTIER_DUMP_UDP:-}" \
   -e MANYTIER_ARTIFACT_ROOT="$ARTIFACT_ROOT_REL" \
+  -e MANYTIER_SHADOW_BIN="$SHADOW_BIN_CONTAINER" \
   -e MANYTIER_ZEROTIER_ONE_BIN="$OFFICIAL_BIN_CONTAINER" \
   -e MANYTIER_VALIDATION_OFFICIAL_HOST_PATH="$OFFICIAL_BIN_HOST" \
   -e MANYTIER_VALIDATION_OFFICIAL_SOURCE="$OFFICIAL_SOURCE" \
@@ -59,13 +71,14 @@ if docker run --rm --privileged --user 0:0 --device /dev/net/tun \
   -e MANYTIER_WORKSPACE_ROOT=/workspace \
   -e HOME=/home/user \
   -e RUSTUP_HOME=/home/user/.rustup \
-  -e PATH=/home/user/.cargo/bin:/usr/local/bin:/usr/bin:/bin \
+  -e PATH=/opt/manytier-shadow:/home/user/.cargo/bin:/usr/local/bin:/usr/bin:/bin \
   -e CARGO_TARGET_DIR="/workspace/$TARGET_DIR_REL" \
   -w /workspace "$IMAGE" \
   bash -lc 'set -euo pipefail
     export HOME=/home/user \
     RUSTUP_HOME=/home/user/.rustup \
-    PATH=/home/user/.cargo/bin:/usr/local/bin:/usr/bin:/bin \
+    MANYTIER_SHADOW_BIN='"$SHADOW_BIN_CONTAINER"' \
+    PATH=/opt/manytier-shadow:/home/user/.cargo/bin:/usr/local/bin:/usr/bin:/bin \
     CARGO_TARGET_DIR=/workspace/'"$TARGET_DIR_REL"' && \
     cleanup() {
       chown -R "$HOST_UID:$HOST_GID" /workspace/tests/shadow/artifacts /workspace/'"$TARGET_DIR_REL"' 2>/dev/null || true

@@ -19,6 +19,15 @@ PROBE_LOG="$ARTIFACT_ROOT/current-shell-probe.log"
 REPORT_MD="$ARTIFACT_ROOT/self-hosted-environment-report.md"
 REPORT_JSON="$ARTIFACT_ROOT/self-hosted-environment-report.json"
 GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+HOST_LABEL="$(manytier_validation_host_label)"
+HOST_OS="$(manytier_validation_os_pretty_name)"
+CARGO_BIN="$(command -v cargo 2>/dev/null || true)"
+CARGO_VERSION="missing"
+if [[ -n "$CARGO_BIN" ]]; then
+  CARGO_VERSION="$("$CARGO_BIN" -V 2>/dev/null | head -n 1 | tr -d '\r')"
+fi
+SHADOW_BIN="$(manytier_validation_shadow_bin)"
+SHADOW_VERSION="$(manytier_validation_shadow_version "$SHADOW_BIN")"
 
 SYSTEM_BIN="$(manytier_validation_system_official_bin)"
 SYSTEM_VERSION="unknown"
@@ -67,6 +76,7 @@ elif [[ "$DOCKER_AVAILABLE" == "true" ]]; then
 fi
 
 export REPORT_JSON GENERATED_AT ARTIFACT_ROOT PROBE_LOG
+export HOST_LABEL HOST_OS CARGO_BIN CARGO_VERSION SHADOW_BIN SHADOW_VERSION
 export SYSTEM_BIN SYSTEM_VERSION SYSTEM_SUPPORTED
 export DEFAULT_FIXTURE DEFAULT_FIXTURE_VERSION FIXTURE_114 FIXTURE_114_VERSION FIXTURE_116 FIXTURE_116_VERSION
 export DIRECT_STATUS DIRECT_NOTE DOCKER_AVAILABLE DOCKER_VERSION
@@ -84,6 +94,10 @@ const maybe = (value) => {
 const data = {
   generated_at: process.env.GENERATED_AT,
   artifact_root: process.env.ARTIFACT_ROOT,
+  host: {
+    label: process.env.HOST_LABEL,
+    os: process.env.HOST_OS,
+  },
   current_shell: {
     status: process.env.DIRECT_STATUS,
     note: process.env.DIRECT_NOTE,
@@ -122,7 +136,15 @@ const data = {
     official_binary_source: process.env.RECOMMENDED_SOURCE,
     reason: process.env.RECOMMENDATION_REASON,
   },
-  policy: 'Hosted official-network execution remains out of scope for v1.6.',
+  cargo: {
+    path: maybe(process.env.CARGO_BIN),
+    version: maybe(process.env.CARGO_VERSION),
+  },
+  shadow_binary: {
+    path: maybe(process.env.SHADOW_BIN),
+    version: maybe(process.env.SHADOW_VERSION),
+  },
+  policy: 'Hosted official-network execution remains out of scope for v1.7.',
 };
 
 fs.writeFileSync(process.env.REPORT_JSON, `${JSON.stringify(data, null, 2)}\n`);
@@ -133,11 +155,17 @@ cat >"$REPORT_MD" <<EOF
 
 - generated: $GENERATED_AT
 - artifact_root: $ARTIFACT_ROOT
+- host_label: $HOST_LABEL
+- host_os: $HOST_OS
 - current_shell_status: $DIRECT_STATUS
 - current_shell_note: $DIRECT_NOTE
 - current_shell_probe_log: $PROBE_LOG
 - docker_available: $DOCKER_AVAILABLE
 - docker_version: $DOCKER_VERSION
+- cargo_bin: ${CARGO_BIN:-<missing>}
+- cargo_version: $CARGO_VERSION
+- shadow_bin: ${SHADOW_BIN:-<missing>}
+- shadow_version: $SHADOW_VERSION
 - system_official_binary: ${SYSTEM_BIN:-<missing>}
 - system_official_version: $SYSTEM_VERSION
 - system_official_supported: $SYSTEM_SUPPORTED
@@ -168,7 +196,7 @@ Interpretation:
 
 ## Policy Guardrail
 
-Hosted official-network execution remains out of scope for v1.6. This report only selects between
+Hosted official-network execution remains out of scope for v1.7. This report only selects between
 the current workstation's self-hosted options.
 EOF
 
