@@ -1,0 +1,3 @@
+[submodule "vendor/ZeroTierOne"]
+	path = vendor/ZeroTierOne
+	url = https://github.com/zerotier/ZeroTierOne.git
