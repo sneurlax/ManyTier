@@ -68,17 +68,23 @@ fn inet_address_from_seed(seed: u64) -> InetAddress {
 }
 
 fn com_from_seed(seed: u64) -> CertificateOfMembership {
-    let qualifiers = (0..(seed as usize % 4))
+    let qualifiers: Vec<ComQualifier> = (0..(seed as usize % 4))
         .map(|index| ComQualifier {
             id: index as u64,
             value: seed.wrapping_add(index as u64),
             max_delta: seed.rotate_left(index as u32),
         })
         .collect();
+    let issued_to = if let Some(q) = qualifiers.iter().find(|q| q.id == 2) {
+        let bytes = q.value.to_be_bytes();
+        [bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]
+    } else {
+        [0u8; 5]
+    };
     let signature: [u8; 96] = make_bytes(seed ^ 0x5555, 96).try_into().unwrap();
     CertificateOfMembership {
         qualifiers,
-        issued_to: make_bytes(seed ^ 0x3333, 5).try_into().unwrap(),
+        issued_to,
         signer_address: address_from_seed(seed ^ 0x7777),
         signature,
     }
