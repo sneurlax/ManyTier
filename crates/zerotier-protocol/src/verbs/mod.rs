@@ -1,9 +1,15 @@
+pub mod ack;
 pub mod error;
 pub mod frame;
 pub mod hello;
 pub mod multicast;
 pub mod network_config;
+pub mod nop;
 pub mod ok;
+pub mod path_negotiation;
 pub mod push_direct;
+pub mod qos;
+pub mod remote_trace;
 pub mod rendezvous;
+pub mod user_message;
 pub mod whois;
