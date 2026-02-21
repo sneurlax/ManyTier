@@ -25,6 +25,12 @@ pub struct RootManager {
     pub last_hello_sent: u64,
 }
 
+impl Default for RootManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RootManager {
     pub fn new() -> Self {
         RootManager { last_hello_sent: 0 }
@@ -46,6 +52,7 @@ impl RootManager {
     /// high-nibble flags. Upstream 1.14.2 defines only `VERB_FLAG_COMPRESSED`
     /// (`0x80`) as a verb flag (`node/Packet.hpp:148`), which does not apply
     /// to HELLO; no other verb flags exist in 1.14.2.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_hello(
         our_identity: &Identity,
         dest_address: &[u8; 5],
@@ -180,6 +187,7 @@ impl RootManager {
     }
 
     /// Build an OK(HELLO) response packet.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_ok_hello(
         our_identity: &Identity,
         dest_address: &[u8; 5],

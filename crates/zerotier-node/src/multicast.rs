@@ -32,6 +32,12 @@ pub struct MulticastManager {
     subscriptions: Vec<(MulticastGroupKey, Vec<Subscriber>)>,
 }
 
+impl Default for MulticastManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MulticastManager {
     /// Create a new empty multicast manager.
     pub fn new() -> Self {

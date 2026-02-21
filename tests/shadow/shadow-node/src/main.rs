@@ -75,6 +75,7 @@ struct Args {
     target_ip: Option<String>,
 }
 
+#[allow(dead_code)]
 #[path = "../../../../tests/fixtures/gen_test_config.rs"]
 mod gen_test_config;
 
@@ -453,6 +454,7 @@ struct ControllerState {
 ///
 /// Used by the `controller` role for planet simulation. Auto-authorizes peers
 /// and assigns IPs dynamically from a pool.
+#[allow(dead_code)]
 struct DynamicControllerState {
     controller:
         zerotier_node::controller::engine::Controller<zerotier_service::storage::InMemoryStorage>,
@@ -644,7 +646,7 @@ fn handle_controller_actions(
             let shared_secret = node
                 .topology
                 .get_peer(requester_address)
-                .and_then(|peer| peer.shared_secret().map(|s| *s));
+                .and_then(|peer| peer.shared_secret().copied());
 
             if let Some(ref shared_secret) = shared_secret {
                 // Build and send NETWORK_CONFIG packet
@@ -727,13 +729,8 @@ async fn handle_dynamic_controller_actions(
     actions: &[NodeAction],
     dc: &mut DynamicControllerState,
     node: &mut Node,
-    our_zt_address: &[u8; 5],
+    _our_zt_address: &[u8; 5],
 ) {
-    use zerotier_node::controller::engine::zt_address_to_u64;
-    use zerotier_protocol::verbs::network_config::{
-        NetworkConfigPayload, NetworkCredentialsPayload,
-    };
-
     // Clone identity public info needed for packet building (avoids borrow conflict)
     let our_public_key = node.identity.public_key.clone();
     let our_identity_for_packets = zerotier_crypto::identity::Identity {
@@ -792,7 +789,7 @@ async fn handle_dynamic_controller_actions(
             let shared_secret = node
                 .topology
                 .get_peer(requester_address)
-                .and_then(|peer| peer.shared_secret().map(|s| *s));
+                .and_then(|peer| peer.shared_secret().copied());
 
             if let Some(ref shared_secret) = shared_secret {
                 // Build and send NETWORK_CONFIG packet
@@ -1256,6 +1253,34 @@ async fn execute_actions(transport: &zerotier_service::NativeTransport, actions:
                     network_id = %format!("{:016x}", network_id),
                     event = "network_configured_action",
                     "NETWORK_CONFIG received and applied"
+                );
+            }
+            NodeAction::UserMessageReceived { origin, type_id, data } => {
+                tracing::debug!(
+                    origin = %format!("{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        origin[0], origin[1], origin[2], origin[3], origin[4]),
+                    type_id,
+                    data_len = data.len(),
+                    event = "user_message_action",
+                    "USER_MESSAGE received"
+                );
+            }
+            NodeAction::RemoteTraceReceived { origin, data } => {
+                tracing::debug!(
+                    origin = %format!("{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        origin[0], origin[1], origin[2], origin[3], origin[4]),
+                    data_len = data.len(),
+                    event = "remote_trace_action",
+                    "REMOTE_TRACE received"
+                );
+            }
+            NodeAction::PathNegotiationReceived { origin, utility } => {
+                tracing::debug!(
+                    origin = %format!("{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        origin[0], origin[1], origin[2], origin[3], origin[4]),
+                    utility,
+                    event = "path_negotiation_action",
+                    "PATH_NEGOTIATION_REQUEST received"
                 );
             }
         }

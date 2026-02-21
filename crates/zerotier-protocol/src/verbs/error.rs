@@ -1,6 +1,5 @@
 use crate::error::ProtocolError;
 use crate::verb::Verb;
-///
 use alloc::vec::Vec;
 
 /// ZeroTier V1 error codes.

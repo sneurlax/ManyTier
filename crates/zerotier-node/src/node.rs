@@ -23,6 +23,11 @@ use zerotier_protocol::verbs::network_config::{
 };
 use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
 use zerotier_protocol::verbs::rendezvous::RendezvousPayload;
+use zerotier_protocol::verbs::ack::AckPayload;
+use zerotier_protocol::verbs::path_negotiation::PathNegotiationRequestPayload;
+use zerotier_protocol::verbs::qos::QosMeasurementPayload;
+use zerotier_protocol::verbs::remote_trace::RemoteTracePayload;
+use zerotier_protocol::verbs::user_message::UserMessagePayload;
 use zerotier_protocol::verbs::whois::WhoisRequest;
 use zerotier_protocol::{is_fragment, FragmentHeader, PacketHeader, ProtocolError};
 
@@ -79,6 +84,22 @@ pub enum NodeAction {
         from: core::net::SocketAddr,
         /// Packet ID from the request (for OK response correlation).
         packet_id: u64,
+    },
+    /// A USER_MESSAGE (verb 0x14) was received.
+    UserMessageReceived {
+        origin: [u8; 5],
+        type_id: u64,
+        data: Vec<u8>,
+    },
+    /// A REMOTE_TRACE (verb 0x15) was received.
+    RemoteTraceReceived {
+        origin: [u8; 5],
+        data: Vec<u8>,
+    },
+    /// A PATH_NEGOTIATION_REQUEST (verb 0x16) was received.
+    PathNegotiationReceived {
+        origin: [u8; 5],
+        utility: i16,
     },
 }
 
@@ -821,8 +842,158 @@ impl Node {
                     }
                 }
             }
-            _ => {
-                // Other verbs: not yet handled
+            Some(Verb::Nop) => {
+                tracing::trace!(
+                    target: "manytier",
+                    event = "nop_received",
+                    peer = %format_args!(
+                        "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        source[0], source[1], source[2], source[3], source[4]
+                    ),
+                    "received NOP"
+                );
+            }
+            Some(Verb::Ack) => {
+                match AckPayload::deserialize(verb_payload) {
+                    Ok(ack) => {
+                        tracing::debug!(
+                            target: "manytier",
+                            event = "ack_received",
+                            peer = %format_args!(
+                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                source[0], source[1], source[2], source[3], source[4]
+                            ),
+                            bytes_acked = ack.bytes_acked,
+                            "received ACK"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "manytier",
+                            event = "ack_decode_failed",
+                            error = %e,
+                            "failed to decode ACK"
+                        );
+                    }
+                }
+            }
+            Some(Verb::QosMeasurement) => {
+                match QosMeasurementPayload::deserialize(verb_payload) {
+                    Ok(qos) => {
+                        tracing::debug!(
+                            target: "manytier",
+                            event = "qos_received",
+                            peer = %format_args!(
+                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                source[0], source[1], source[2], source[3], source[4]
+                            ),
+                            record_count = qos.records.len(),
+                            "received QoS measurement"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "manytier",
+                            event = "qos_decode_failed",
+                            error = %e,
+                            "failed to decode QoS measurement"
+                        );
+                    }
+                }
+            }
+            Some(Verb::UserMessage) => {
+                match UserMessagePayload::deserialize(verb_payload) {
+                    Ok(msg) => {
+                        tracing::debug!(
+                            target: "manytier",
+                            event = "user_message_received",
+                            peer = %format_args!(
+                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                source[0], source[1], source[2], source[3], source[4]
+                            ),
+                            type_id = msg.type_id,
+                            data_len = msg.data.len(),
+                            "received USER_MESSAGE"
+                        );
+                        self.actions.push(NodeAction::UserMessageReceived {
+                            origin: source,
+                            type_id: msg.type_id,
+                            data: msg.data,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "manytier",
+                            event = "user_message_decode_failed",
+                            error = %e,
+                            "failed to decode USER_MESSAGE"
+                        );
+                    }
+                }
+            }
+            Some(Verb::RemoteTrace) => {
+                match RemoteTracePayload::deserialize(verb_payload) {
+                    Ok(trace) => {
+                        tracing::debug!(
+                            target: "manytier",
+                            event = "remote_trace_received",
+                            peer = %format_args!(
+                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                source[0], source[1], source[2], source[3], source[4]
+                            ),
+                            data_len = trace.data.len(),
+                            "received REMOTE_TRACE"
+                        );
+                        self.actions.push(NodeAction::RemoteTraceReceived {
+                            origin: source,
+                            data: trace.data,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "manytier",
+                            event = "remote_trace_decode_failed",
+                            error = %e,
+                            "failed to decode REMOTE_TRACE"
+                        );
+                    }
+                }
+            }
+            Some(Verb::PathNegotiationRequest) => {
+                match PathNegotiationRequestPayload::deserialize(verb_payload) {
+                    Ok(pnr) => {
+                        tracing::debug!(
+                            target: "manytier",
+                            event = "path_negotiation_received",
+                            peer = %format_args!(
+                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                source[0], source[1], source[2], source[3], source[4]
+                            ),
+                            utility = pnr.utility,
+                            "received PATH_NEGOTIATION_REQUEST"
+                        );
+                        self.actions.push(NodeAction::PathNegotiationReceived {
+                            origin: source,
+                            utility: pnr.utility,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "manytier",
+                            event = "path_negotiation_decode_failed",
+                            error = %e,
+                            "failed to decode PATH_NEGOTIATION_REQUEST"
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::trace!(
+                    target: "manytier",
+                    event = "unknown_verb",
+                    verb_id,
+                    "unknown verb ID"
+                );
             }
         }
 
@@ -1155,33 +1326,33 @@ impl Node {
         }
 
         // Send OK(WHOIS) for known identities
-        if !known_identities.is_empty() {
-            if self.topology.get_peer(&source).is_some() {
-                if let Some(secret) = self.shared_secret_for_peer(&source) {
-                    let ok = zerotier_protocol::verbs::ok::OkPayload {
-                        in_re_verb: zerotier_protocol::verb::Verb::Whois,
-                        in_re_packet_id,
-                        sub_payload: zerotier_protocol::verbs::ok::OkSubPayload::Whois {
-                            identities: known_identities,
-                        },
-                    };
+        if !known_identities.is_empty()
+            && self.topology.get_peer(&source).is_some()
+        {
+            if let Some(secret) = self.shared_secret_for_peer(&source) {
+                let ok = zerotier_protocol::verbs::ok::OkPayload {
+                    in_re_verb: zerotier_protocol::verb::Verb::Whois,
+                    in_re_packet_id,
+                    sub_payload: zerotier_protocol::verbs::ok::OkSubPayload::Whois {
+                        identities: known_identities,
+                    },
+                };
 
-                    let mut buf = [0u8; 2048];
-                    buf[0..8].copy_from_slice(&now_ms.to_be_bytes());
-                    buf[8..13].copy_from_slice(&source);
-                    buf[13..18].copy_from_slice(self.identity.address.as_bytes());
-                    buf[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
-                    buf[19..27].copy_from_slice(&[0u8; 8]);
-                    buf[27] = zerotier_protocol::verb::Verb::Ok.to_byte();
+                let mut buf = [0u8; 2048];
+                buf[0..8].copy_from_slice(&now_ms.to_be_bytes());
+                buf[8..13].copy_from_slice(&source);
+                buf[13..18].copy_from_slice(self.identity.address.as_bytes());
+                buf[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+                buf[19..27].copy_from_slice(&[0u8; 8]);
+                buf[27] = zerotier_protocol::verb::Verb::Ok.to_byte();
 
-                    if let Ok(payload_len) = ok.serialize(&mut buf[28..]) {
-                        let total_len = 28 + payload_len;
-                        if salsa::armor_packet(&secret, &mut buf[..total_len], true).is_ok() {
-                            self.actions.push(NodeAction::SendTo {
-                                data: buf[..total_len].to_vec(),
-                                address: from,
-                            });
-                        }
+                if let Ok(payload_len) = ok.serialize(&mut buf[28..]) {
+                    let total_len = 28 + payload_len;
+                    if salsa::armor_packet(&secret, &mut buf[..total_len], true).is_ok() {
+                        self.actions.push(NodeAction::SendTo {
+                            data: buf[..total_len].to_vec(),
+                            address: from,
+                        });
                     }
                 }
             }
@@ -1977,10 +2148,10 @@ impl Node {
             .iter_mut()
             .filter_map(|net| {
                 let is_refresh = net.our_com.is_some();
-                if !net.our_com_refresh_due(now_ms) {
-                    if !net.pending_config_request {
-                        return None;
-                    }
+                if !net.our_com_refresh_due(now_ms)
+                    && !net.pending_config_request
+                {
+                    return None;
                 }
                 net.pending_config_request = true;
                 if net.last_config_request != 0
@@ -2017,7 +2188,7 @@ impl Node {
                 let peer_active = self
                     .topology
                     .get_peer(ctrl_addr)
-                    .map_or(false, |p| matches!(p.state, PeerState::Active { .. }));
+                    .is_some_and(|p| matches!(p.state, PeerState::Active { .. }));
                 if !peer_active {
                     tracing::debug!(
                         target: "manytier",
@@ -2088,6 +2259,7 @@ impl Node {
 
         // 7. Periodically advertise and gather multicast membership.
         let mut due_likes: Vec<(usize, u64, Vec<[u8; 5]>)> = Vec::new();
+        #[allow(clippy::type_complexity)]
         let mut due_gathers: Vec<(usize, u64, Vec<[u8; 5]>, Vec<MulticastGroupKey>)> = Vec::new();
         for (index, net) in self.networks.iter().enumerate() {
             let local_groups = self
@@ -2518,6 +2690,7 @@ fn manytier_network_config_request_os_arch() -> &'static str {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn peer_directory_from_dict_data(
     dict_data: &[u8],
     network_id: u64,

@@ -8,8 +8,8 @@ pub async fn run(auth_token: &str, port: u16) -> anyhow::Result<()> {
     let body = client.get("/peer").await?;
     let peers: Vec<serde_json::Value> = serde_json::from_str(&body)?;
     println!(
-        "{:<12} {:<8} {:<8} {}",
-        "ADDRESS", "ROLE", "LATENCY", "PATHS"
+        "{:<12} {:<8} {:<8} PATHS",
+        "ADDRESS", "ROLE", "LATENCY",
     );
     for peer in &peers {
         let address = peer["address"].as_str().unwrap_or("");

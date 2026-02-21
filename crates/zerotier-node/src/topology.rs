@@ -22,6 +22,12 @@ pub struct Topology {
     pub pending_whois: BTreeMap<[u8; 5], (u64, u64)>,
 }
 
+impl Default for Topology {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Topology {
     /// Create a new empty topology.
     pub fn new() -> Self {
@@ -113,9 +119,9 @@ impl Topology {
     /// Add or update a peer from a learned identity.
     pub fn add_peer(&mut self, identity: Identity) {
         let addr_bytes = *identity.address.as_bytes();
-        if !self.peers.contains_key(&addr_bytes) {
-            self.peers.insert(addr_bytes, Peer::new(identity, false));
-        }
+        self.peers
+            .entry(addr_bytes)
+            .or_insert_with(|| Peer::new(identity, false));
     }
 }
 

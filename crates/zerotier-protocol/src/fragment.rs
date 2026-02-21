@@ -123,7 +123,7 @@ pub fn fragment_packet(packet: &[u8], mtu: usize) -> Option<Vec<Vec<u8>>> {
         return None;
     }
 
-    let total_fragments = (packet.len() + max_payload - 1) / max_payload;
+    let total_fragments = packet.len().div_ceil(max_payload);
     if total_fragments == 0 || total_fragments > ZT_MAX_PACKET_FRAGMENTS {
         return None;
     }

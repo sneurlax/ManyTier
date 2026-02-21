@@ -14,6 +14,12 @@ use zerotier_protocol::verbs::network_config::{
 use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
 use zerotier_protocol::verbs::push_direct::{DirectPath, PushDirectPathsPayload};
 use zerotier_protocol::verbs::rendezvous::RendezvousPayload;
+use zerotier_protocol::verbs::ack::AckPayload;
+use zerotier_protocol::verbs::nop::NopPayload;
+use zerotier_protocol::verbs::path_negotiation::PathNegotiationRequestPayload;
+use zerotier_protocol::verbs::qos::{QosMeasurementPayload, QosRecord};
+use zerotier_protocol::verbs::remote_trace::RemoteTracePayload;
+use zerotier_protocol::verbs::user_message::UserMessagePayload;
 use zerotier_protocol::verbs::whois::{WhoisRequest, WhoisResponse};
 
 fn make_bytes(seed: u64, len: usize) -> Vec<u8> {
@@ -364,5 +370,73 @@ fn protocol_roundtrips_cover_all_payload_codecs() {
             whois_response_parsed.identities.len(),
             whois_response.identities.len()
         );
+
+        // NOP: empty payload roundtrip
+        let nop = NopPayload;
+        let mut nop_buf = [0u8; 64];
+        let nop_len = nop.serialize(&mut nop_buf);
+        assert_eq!(nop_len, 0);
+        let nop_parsed = NopPayload::deserialize(&nop_buf[..nop_len]).unwrap();
+        assert_eq!(nop_parsed, nop);
+
+        // ACK: 4-byte u32 roundtrip
+        let ack = AckPayload {
+            bytes_acked: seed as u32,
+        };
+        let mut ack_buf = [0u8; 64];
+        let ack_len = ack.serialize(&mut ack_buf);
+        assert_eq!(ack_len, 4);
+        let ack_parsed = AckPayload::deserialize(&ack_buf[..ack_len]).unwrap();
+        assert_eq!(ack_parsed, ack);
+
+        // QosMeasurement: repeated 10-byte record roundtrip
+        let qos_records: Vec<QosRecord> = (0..(seed as usize % 5))
+            .map(|i| QosRecord {
+                packet_id: seed.wrapping_add(i as u64),
+                sojourn_time: (seed as u16).wrapping_add(i as u16),
+            })
+            .collect();
+        let qos = QosMeasurementPayload {
+            records: qos_records,
+        };
+        let mut qos_buf = [0u8; 256];
+        let qos_len = qos.serialize(&mut qos_buf);
+        assert_eq!(qos_len, qos.records.len() * 10);
+        let qos_parsed = QosMeasurementPayload::deserialize(&qos_buf[..qos_len]).unwrap();
+        assert_eq!(qos_parsed, qos);
+
+        // UserMessage: 8-byte type_id + variable data roundtrip
+        let user_msg = UserMessagePayload {
+            type_id: seed ^ 0xCAFE,
+            data: make_bytes(seed ^ 0xBEEF, (seed as usize % 32) + 1),
+        };
+        let mut user_msg_buf = [0u8; 256];
+        let user_msg_len = user_msg.serialize(&mut user_msg_buf);
+        assert_eq!(user_msg_len, 8 + user_msg.data.len());
+        let user_msg_parsed =
+            UserMessagePayload::deserialize(&user_msg_buf[..user_msg_len]).unwrap();
+        assert_eq!(user_msg_parsed, user_msg);
+
+        // RemoteTrace: variable-length opaque bytes roundtrip
+        let remote_trace = RemoteTracePayload {
+            data: make_bytes(seed ^ 0xDEAD, (seed as usize % 48) + 1),
+        };
+        let mut remote_trace_buf = [0u8; 256];
+        let remote_trace_len = remote_trace.serialize(&mut remote_trace_buf);
+        assert_eq!(remote_trace_len, remote_trace.data.len());
+        let remote_trace_parsed =
+            RemoteTracePayload::deserialize(&remote_trace_buf[..remote_trace_len]).unwrap();
+        assert_eq!(remote_trace_parsed, remote_trace);
+
+        // PathNegotiationRequest: 2-byte i16 roundtrip
+        let path_neg = PathNegotiationRequestPayload {
+            utility: (seed as i16).wrapping_mul(7),
+        };
+        let mut path_neg_buf = [0u8; 64];
+        let path_neg_len = path_neg.serialize(&mut path_neg_buf);
+        assert_eq!(path_neg_len, 2);
+        let path_neg_parsed =
+            PathNegotiationRequestPayload::deserialize(&path_neg_buf[..path_neg_len]).unwrap();
+        assert_eq!(path_neg_parsed, path_neg);
     }
 }

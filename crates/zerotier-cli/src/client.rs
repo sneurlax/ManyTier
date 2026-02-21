@@ -24,6 +24,7 @@ impl ApiClient {
     }
 
     /// Load auth token from an authtoken.secret file.
+    #[allow(dead_code)]
     pub fn from_authtoken_file(path: &str, port: u16) -> anyhow::Result<Self> {
         let token = std::fs::read_to_string(path)?.trim().to_string();
         Ok(Self::new(token, port))

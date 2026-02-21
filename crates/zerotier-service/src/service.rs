@@ -112,7 +112,7 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
     let planet_data = load_planet(&data_storage).await?;
 
     // 3. Create Node (identity is moved into node)
-    let initial_packet_id = (clock.now_wall_ms() & 0x0000_FFFF_FFFF_FFFF) as u64;
+    let initial_packet_id = clock.now_wall_ms() & 0x0000_FFFF_FFFF_FFFF;
     let node = Node::new(identity, &planet_data, initial_packet_id)
         .map_err(|e| anyhow::anyhow!("failed to create node: {e}"))?;
     let node = Arc::new(Mutex::new(node));
@@ -226,7 +226,7 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
                             // Opt-in raw HELLO packet dump, used to debug official interop.
                             // We keep this very narrow to avoid ballooning artifacts in normal runs.
                             if let Some(ref dump_dir) = udp_dump_dir {
-                                dump_hello_if_match(dump_dir, "rx", &header, &from, now, &buf[..n]);
+                                dump_hello_if_match(dump_dir, "rx", header, &from, now, &buf[..n]);
                             }
                         } else {
                             tracing::info!(
@@ -404,7 +404,7 @@ async fn execute_actions(
                 // Opt-in tx HELLO dump, mirrors the rx dump under
                 // `MANYTIER_DUMP_UDP=1`.
                 if let Some(dump_dir) = udp_dump_dir {
-                    dump_hello_if_match(dump_dir, "tx", &header, address, now_ms, data);
+                    dump_hello_if_match(dump_dir, "tx", header, address, now_ms, data);
                 }
             } else {
                 tracing::info!(

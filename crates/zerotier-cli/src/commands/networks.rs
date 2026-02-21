@@ -8,8 +8,8 @@ pub async fn run(auth_token: &str, port: u16) -> anyhow::Result<()> {
     let body = client.get("/network").await?;
     let networks: Vec<serde_json::Value> = serde_json::from_str(&body)?;
     println!(
-        "{:<18} {:<10} {:<24} {}",
-        "NETWORK", "STATUS", "MAC", "ADDRESSES"
+        "{:<18} {:<10} {:<24} ADDRESSES",
+        "NETWORK", "STATUS", "MAC",
     );
     for net in &networks {
         let id = net["id"].as_str().unwrap_or("");

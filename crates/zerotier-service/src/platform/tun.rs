@@ -45,7 +45,7 @@ impl TunDevice for NativeTun {
     async fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.ensure_halves()?;
         let reader = self.reader.get().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "TUN reader unavailable")
+            std::io::Error::other("TUN reader unavailable")
         })?;
         let mut reader = reader.lock().await;
         reader.read(buf).await
@@ -54,7 +54,7 @@ impl TunDevice for NativeTun {
     async fn write(&self, data: &[u8]) -> Result<usize, Self::Error> {
         self.ensure_halves()?;
         let writer = self.writer.get().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "TUN writer unavailable")
+            std::io::Error::other("TUN writer unavailable")
         })?;
         let mut writer = writer.lock().await;
         writer.write(data).await
@@ -70,17 +70,14 @@ impl TunDevice for NativeTun {
 
     async fn set_ip(&self, addr: IpAddr, prefix_len: u8) -> Result<(), Self::Error> {
         let mut control = self.control.lock().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::Other, "TUN control lock poisoned")
+            std::io::Error::other("TUN control lock poisoned")
         })?;
         let device = control.as_mut().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "cannot configure TUN after I/O has started",
-            )
+            std::io::Error::other("cannot configure TUN after I/O has started")
         })?;
         device.as_mut().set_address(addr)?;
 
-        if let IpAddr::V4(_) = addr {
+        if addr.is_ipv4() {
             let mask = if prefix_len == 0 {
                 0
             } else {
@@ -122,16 +119,16 @@ impl TunDevice for NativeTun {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 // "RTNETLINK answers: File exists" means route already exists -- not an error
                 if !stderr.contains("File exists") {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("ip route add failed: {}", stderr.trim()),
-                    ));
+                    return Err(std::io::Error::other(format!(
+                        "ip route add failed: {}",
+                        stderr.trim()
+                    )));
                 }
             }
             Ok(())
         })
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
     }
 }
 
@@ -143,12 +140,12 @@ impl NativeTun {
         }
 
         let mut control = self.control.lock().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::Other, "TUN control lock poisoned")
+            std::io::Error::other("TUN control lock poisoned")
         })?;
 
         if self.reader.get().is_none() || self.writer.get().is_none() {
             let device = control.take().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "TUN runtime already taken")
+                std::io::Error::other("TUN runtime already taken")
             })?;
             let (reader, writer) = tokio::io::split(device);
             let _ = self.reader.set(tokio::sync::Mutex::new(reader));

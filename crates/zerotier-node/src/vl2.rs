@@ -240,7 +240,7 @@ pub fn handle_multicast_gather(
 
     let ok = OkPayload {
         in_re_verb: Verb::MulticastGather,
-        in_re_packet_id: in_re_packet_id,
+        in_re_packet_id,
         sub_payload: OkSubPayload::Generic { data: response },
     };
     let mut payload = vec![0u8; 9 + response_len];

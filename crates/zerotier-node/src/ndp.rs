@@ -54,8 +54,8 @@ pub fn icmpv6_checksum(src: &[u8; 16], dst: &[u8; 16], icmpv6_body: &[u8]) -> u1
 
     // Pseudo-header: payload length (4 bytes, upper layer length)
     let len = icmpv6_body.len() as u32;
-    sum += (len >> 16) as u32;
-    sum += (len & 0xFFFF) as u32;
+    sum += len >> 16;
+    sum += len & 0xFFFF;
 
     // Pseudo-header: next header = 58 (ICMPv6)
     sum += IPV6_NEXT_HEADER_ICMPV6 as u32;

@@ -156,11 +156,7 @@ fn peer_com_agrees_with(ours: &CertificateOfMembership, theirs: &CertificateOfMe
         match theirs.qualifiers.iter().find(|oq| oq.id == our_q.id) {
             None => return false,
             Some(other_q) => {
-                let delta = if our_q.value > other_q.value {
-                    our_q.value - other_q.value
-                } else {
-                    other_q.value - our_q.value
-                };
+                let delta = our_q.value.abs_diff(other_q.value);
                 if delta > our_q.max_delta {
                     return false;
                 }
@@ -177,11 +173,7 @@ pub fn com_agrees_with(ours: &CertificateOfMembership, theirs: &CertificateOfMem
         match theirs.qualifiers.iter().find(|oq| oq.id == our_q.id) {
             None => return false,
             Some(other_q) => {
-                let delta = if our_q.value > other_q.value {
-                    our_q.value - other_q.value
-                } else {
-                    other_q.value - our_q.value
-                };
+                let delta = our_q.value.abs_diff(other_q.value);
                 if delta > our_q.max_delta {
                     return false;
                 }
