@@ -931,7 +931,7 @@ fn build_verb_packet<P: VerbPayloadSerialize>(
     our_identity: &zerotier_crypto::identity::Identity,
     dest_address: &[u8; 5],
     verb: zerotier_protocol::verb::Verb,
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8; 48],
     now_ms: u64,
     payload: &P,
     buf: &mut [u8],

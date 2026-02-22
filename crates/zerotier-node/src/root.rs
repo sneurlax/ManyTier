@@ -58,7 +58,7 @@ impl RootManager {
         dest_address: &[u8; 5],
         dest_physical: core::net::SocketAddr,
         now_ms: u64,
-        shared_secret: &[u8; 32],
+        shared_secret: &[u8; 48],
         buf: &mut [u8],
         planet_world_id: u64,
         planet_world_timestamp: u64,
@@ -142,7 +142,7 @@ impl RootManager {
         our_identity: &Identity,
         dest_address: &[u8; 5],
         addresses: &[[u8; 5]],
-        shared_secret: &[u8; 32],
+        shared_secret: &[u8; 48],
         now_ms: u64,
         buf: &mut [u8],
     ) -> Result<(usize, u64), ProtocolError> {
@@ -193,7 +193,7 @@ impl RootManager {
         dest_address: &[u8; 5],
         in_re_packet_id: u64,
         timestamp_echo: u64,
-        shared_secret: &[u8; 32],
+        shared_secret: &[u8; 48],
         now_ms: u64,
         use_unmangled_null: bool,
         buf: &mut [u8],
@@ -255,7 +255,7 @@ impl RootManager {
         dest_address: &[u8; 5],
         target_peer_address: &[u8; 5],
         target_physical: InetAddress,
-        shared_secret: &[u8; 32],
+        shared_secret: &[u8; 48],
         now_ms: u64,
         buf: &mut [u8],
     ) -> Result<usize, ProtocolError> {
@@ -308,8 +308,8 @@ mod tests {
         }
     }
 
-    fn test_shared_secret() -> [u8; 32] {
-        let mut s = [0u8; 32];
+    fn test_shared_secret() -> [u8; 48] {
+        let mut s = [0u8; 48];
         for (i, b) in s.iter_mut().enumerate() {
             *b = (i as u8).wrapping_mul(7).wrapping_add(0x42);
         }

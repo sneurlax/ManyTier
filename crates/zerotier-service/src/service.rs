@@ -459,7 +459,7 @@ fn build_encrypted_verb_packet(
     dest_address: &[u8; 5],
     verb: Verb,
     payload: &[u8],
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8; 48],
     compress: bool,
 ) -> Option<Vec<u8>> {
     use zerotier_protocol::constants::{
@@ -491,7 +491,7 @@ fn build_network_config_response_packets(
     request_packet_id: u64,
     network_id: u64,
     dict_data: &[u8],
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8; 48],
 ) -> Option<Vec<Vec<u8>>> {
     let our_address = *node.identity.address.as_bytes();
     let total_length = u32::try_from(dict_data.len()).ok()?;

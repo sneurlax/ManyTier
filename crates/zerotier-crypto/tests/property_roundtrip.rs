@@ -12,9 +12,9 @@ fn make_bytes(seed: u64, len: usize) -> Vec<u8> {
     out
 }
 
-fn make_packet(seed: u64, payload_len: usize) -> (Vec<u8>, [u8; 32]) {
+fn make_packet(seed: u64, payload_len: usize) -> (Vec<u8>, [u8; 48]) {
     let payload = make_bytes(seed, payload_len);
-    let secret: [u8; 32] = make_bytes(seed ^ 0xfeed_beef, 32).try_into().unwrap();
+    let secret: [u8; 48] = make_bytes(seed ^ 0xfeed_beef, 48).try_into().unwrap();
     let mut packet = vec![0u8; 28 + payload.len()];
     packet[0..8].copy_from_slice(&seed.to_be_bytes());
     packet[8..13].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee]);

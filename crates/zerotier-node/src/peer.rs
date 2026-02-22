@@ -27,7 +27,7 @@ pub enum PeerState {
     },
     /// Active session with shared secret.
     Active {
-        shared_secret: [u8; 32],
+        shared_secret: [u8; 48],
         latency_ms: u32,
         last_receive: u64,
         last_send: u64,
@@ -175,7 +175,7 @@ impl Peer {
     }
 
     /// Get shared secret if session is active.
-    pub fn shared_secret(&self) -> Option<&[u8; 32]> {
+    pub fn shared_secret(&self) -> Option<&[u8; 48]> {
         match &self.state {
             PeerState::Active { shared_secret, .. } => Some(shared_secret),
             _ => None,
@@ -281,7 +281,7 @@ mod tests {
     fn needs_ping_when_active_and_overdue() {
         let mut peer = stub_peer();
         peer.state = PeerState::Active {
-            shared_secret: [0u8; 32],
+            shared_secret: [0u8; 48],
             latency_ms: 10,
             last_receive: 1000,
             last_send: 1000,
@@ -306,7 +306,7 @@ mod tests {
     fn is_stale_when_no_recent_activity() {
         let mut peer = stub_peer();
         peer.state = PeerState::Active {
-            shared_secret: [0u8; 32],
+            shared_secret: [0u8; 48],
             latency_ms: 10,
             last_receive: 1000,
             last_send: 1000,
@@ -340,7 +340,7 @@ mod tests {
     fn mark_stale_transitions_active_to_stale() {
         let mut peer = stub_peer();
         peer.state = PeerState::Active {
-            shared_secret: [0u8; 32],
+            shared_secret: [0u8; 48],
             latency_ms: 10,
             last_receive: 5000,
             last_send: 5000,

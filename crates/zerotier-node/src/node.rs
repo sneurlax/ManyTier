@@ -481,7 +481,7 @@ impl Node {
     ///
     /// Initial HELLO and OK(HELLO) packets are authenticated before the peer
     /// transitions to `Active`, so callers cannot rely on `PeerState` alone.
-    pub fn shared_secret_for_peer(&self, address: &[u8; 5]) -> Option<[u8; 32]> {
+    pub fn shared_secret_for_peer(&self, address: &[u8; 5]) -> Option<[u8; 48]> {
         let peer = self.topology.get_peer(address)?;
         if let Some(secret) = peer.shared_secret() {
             return Some(*secret);
@@ -1210,7 +1210,7 @@ impl Node {
                                 let root_phys = path.address;
                                 let hello_secret = self
                                     .shared_secret_for_peer(&addr_bytes)
-                                    .unwrap_or([0u8; 32]);
+                                    .unwrap_or([0u8; 48]);
                                 // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
                                 let planet_id = self
                                     .topology
@@ -1649,7 +1649,7 @@ impl Node {
             if self.identity.secret.is_some() {
                 let hello_secret = self
                     .shared_secret_for_peer(&rendezvous.peer_address)
-                    .unwrap_or([0u8; 32]);
+                    .unwrap_or([0u8; 48]);
                 // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
                 let planet_id = self
                     .topology
@@ -1932,7 +1932,7 @@ impl Node {
         for (addr, phys_addr) in &ping_targets {
             // Always use the DH-derived shared secret for HELLO armoring.
             // The official controller verifies the MAC using key_agree(sender_pubkey, ctrl_privkey).
-            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 48]);
             // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
             let planet_id = self
                 .topology
@@ -1988,7 +1988,7 @@ impl Node {
             // Some older notes suggested a null-key first-contact HELLO for roots, but in
             // practice this causes `zerotier-one` to drop our HELLO in the localhost
             // controller harness, resulting in zero replies and no config assignment.
-            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 48]);
             // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
             let planet_id = self
                 .topology
@@ -2033,7 +2033,7 @@ impl Node {
 
         // 5. Reconnect stale peers with exponential HELLO backoff.
         for (addr, phys_addr) in &reconnect_targets {
-            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 48]);
             // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
             let planet_id = self
                 .topology
@@ -2092,7 +2092,7 @@ impl Node {
 
         for (addr, phys_addr) in &root_reconnect {
             // Always use the DH-derived shared secret for HELLO armoring.
-            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 32]);
+            let hello_secret = self.shared_secret_for_peer(addr).unwrap_or([0u8; 48]);
             // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
             let planet_id = self
                 .topology
@@ -2401,7 +2401,7 @@ impl Node {
 
         // Build HELLO for each root
         for (root_addr, phys_addr) in root_info {
-            let hello_secret = self.shared_secret_for_peer(&root_addr).unwrap_or([0u8; 32]);
+            let hello_secret = self.shared_secret_for_peer(&root_addr).unwrap_or([0u8; 48]);
             // See ZeroTierOne 1.14.2 node/Peer.cpp:430-431
             let planet_id = self
                 .topology
@@ -2837,7 +2837,7 @@ mod tests {
         node: &mut Node,
         peer_id: Identity,
         socket: SocketAddr,
-        shared_secret: [u8; 32],
+        shared_secret: [u8; 48],
     ) -> [u8; 5] {
         let peer_address = *peer_id.address.as_bytes();
         node.topology.add_peer(peer_id);
@@ -2905,7 +2905,7 @@ mod tests {
         }
     }
 
-    fn dearmor_for_test(data: &[u8], shared_secret: &[u8; 32]) -> Vec<u8> {
+    fn dearmor_for_test(data: &[u8], shared_secret: &[u8; 48]) -> Vec<u8> {
         let mut packet = data.to_vec();
         salsa::dearmor_packet(shared_secret, &mut packet).unwrap();
         packet
@@ -2917,7 +2917,7 @@ mod tests {
         dest_address: &[u8; 5],
         verb: Verb,
         payload: &[u8],
-        shared_secret: &[u8; 32],
+        shared_secret: &[u8; 48],
     ) -> Vec<u8> {
         let compressed_payload = lz4_flex::block::compress(payload);
         let mut packet = vec![0u8; ZT_PACKET_IDX_PAYLOAD + compressed_payload.len()];
@@ -3043,7 +3043,7 @@ mod tests {
         let peer = node.topology.get_peer_mut(&peer_addr).unwrap();
         peer.add_path("10.0.0.42:9993".parse().unwrap(), true, 1000);
         peer.state = PeerState::Active {
-            shared_secret: [0u8; 32],
+            shared_secret: [0u8; 48],
             latency_ms: 10,
             last_receive: 1000,
             last_send: 1000,
@@ -3070,7 +3070,7 @@ mod tests {
         let peer = node.topology.get_peer_mut(&peer_addr).unwrap();
         peer.add_path("10.0.0.42:9993".parse().unwrap(), true, 1000);
         peer.state = PeerState::Active {
-            shared_secret: [0u8; 32],
+            shared_secret: [0u8; 48],
             latency_ms: 10,
             last_receive: 1000,
             last_send: 1000,
@@ -3162,7 +3162,7 @@ mod tests {
             &mut node,
             controller,
             "10.0.0.55:9993".parse().unwrap(),
-            [0x44; 32],
+            [0x44; 48],
         );
 
         let second = node.tick(1001);
@@ -3184,7 +3184,7 @@ mod tests {
 
         let controller = test_identity(0x55);
         let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
-        let shared_secret = [0x11; 32];
+        let shared_secret = [0x11; 48];
         let controller_address =
             add_active_peer(&mut node, controller, controller_socket, shared_secret);
         let network_id = network_id_for_controller(controller_address);
@@ -3261,7 +3261,7 @@ mod tests {
 
         let controller = test_identity(0x55);
         let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
-        let shared_secret = [0x11; 32];
+        let shared_secret = [0x11; 48];
         let controller_address =
             add_active_peer(&mut node, controller, controller_socket, shared_secret);
         let network_id = network_id_for_controller(controller_address);
@@ -3348,7 +3348,7 @@ mod tests {
 
         let controller = test_identity(0x55);
         let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
-        let shared_secret = [0x11; 32];
+        let shared_secret = [0x11; 48];
         let controller_address =
             add_active_peer(&mut node, controller, controller_socket, shared_secret);
         let network_id = network_id_for_controller(controller_address);
@@ -3380,7 +3380,7 @@ mod tests {
 
         let controller = test_identity(0x55);
         let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
-        let shared_secret = [0x11; 32];
+        let shared_secret = [0x11; 48];
         let controller_address =
             add_active_peer(&mut node, controller, controller_socket, shared_secret);
         let network_id = network_id_for_controller(controller_address);
@@ -3450,7 +3450,7 @@ mod tests {
 
         let controller = test_identity(0x55);
         let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
-        let shared_secret = [0x11; 32];
+        let shared_secret = [0x11; 48];
         let controller_address =
             add_active_peer(&mut node, controller, controller_socket, shared_secret);
 
@@ -3523,7 +3523,7 @@ mod tests {
             node.identity.address.as_bytes(),
             Verb::RemoteTrace,
             &[0xaa, 0xbb, 0xcc],
-            &[0x11; 32],
+            &[0x11; 48],
         )
         .expect("packet should build");
 
@@ -3653,7 +3653,7 @@ mod tests {
             &mut node,
             controller,
             "10.0.0.55:9993".parse().unwrap(),
-            [0x11; 32],
+            [0x11; 48],
         );
         let network_id = network_id_for_controller(controller_address);
         let mut membership = NetworkMembership::new(network_id, 2800);
@@ -3672,7 +3672,7 @@ mod tests {
             if *address != "10.0.0.55:9993".parse::<SocketAddr>().unwrap() {
                 return false;
             }
-            let packet = dearmor_for_test(data, &[0x11; 32]);
+            let packet = dearmor_for_test(data, &[0x11; 48]);
             (packet[27] & 0x7f) == Verb::NetworkConfigRequest.to_byte()
         });
 
@@ -3703,7 +3703,7 @@ mod tests {
             &mut node,
             peer,
             "10.0.0.42:9993".parse().unwrap(),
-            [0x22; 32],
+            [0x22; 48],
         );
         let network_id = 0xff00000000abcdef;
         let membership =
@@ -3717,7 +3717,7 @@ mod tests {
                 NodeAction::SendTo { data, address }
                     if *address == "10.0.0.42:9993".parse::<SocketAddr>().unwrap() =>
                 {
-                    Some(dearmor_for_test(data, &[0x22; 32]))
+                    Some(dearmor_for_test(data, &[0x22; 48]))
                 }
                 _ => None,
             })
@@ -3743,7 +3743,7 @@ mod tests {
         let mut node_a = Node::new(test_identity(0x01), &planet, 1).unwrap();
         let mut node_b = Node::new(test_identity(0x02), &planet, 1).unwrap();
 
-        let shared_secret = [0x33; 32];
+        let shared_secret = [0x33; 48];
         let node_a_socket: SocketAddr = "10.0.0.1:9993".parse().unwrap();
         let node_b_socket: SocketAddr = "10.0.0.2:9993".parse().unwrap();
         let node_a_address = *node_a.identity.address.as_bytes();
@@ -3887,7 +3887,7 @@ mod tests {
         let direct_addr: SocketAddr = "10.0.0.42:9993".parse().unwrap();
         peer.add_path(direct_addr, false, 1000); // relay path
         peer.state = PeerState::Active {
-            shared_secret: [0u8; 32],
+            shared_secret: [0u8; 48],
             latency_ms: 10,
             last_receive: 1000,
             last_send: 1000,
@@ -3990,7 +3990,7 @@ mod tests {
         }
     }
 
-    fn plan_17_11_build_hello_env(seed: u64) -> (Identity, Identity, [u8; 32], Vec<u8>) {
+    fn plan_17_11_build_hello_env(seed: u64) -> (Identity, Identity, [u8; 48], Vec<u8>) {
         let mut rng = XorShift17_11(seed);
         let client = Identity::generate(&mut rng).unwrap();
         let controller = Identity::generate(&mut rng).unwrap();

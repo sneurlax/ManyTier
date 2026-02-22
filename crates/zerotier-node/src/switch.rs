@@ -109,7 +109,7 @@ mod tests {
         let mut peer = Peer::new(id, false);
         peer.add_path("10.0.0.1:9993".parse().unwrap(), true, 1000);
         peer.state = PeerState::Active {
-            shared_secret: [0u8; 32],
+            shared_secret: [0u8; 48],
             latency_ms: 10,
             last_receive: 1000,
             last_send: 1000,

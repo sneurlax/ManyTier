@@ -347,7 +347,7 @@ fn decrypt_official_hello_encrypted_section() {
     // The official code might encrypt from the planet info section, not just the moon count.
     // Possible starts: 119 (before planet world_id), 135 (after planet info)
     // Also try null key
-    let null_key = [0u8; 32];
+    let null_key = [0u8; 48];
     for (key_label, key) in [("shared_secret", &shared_secret), ("null", &null_key)] {
         for encrypted_start in [119usize, 135] {
             let encrypted_len = packet_len - encrypted_start;

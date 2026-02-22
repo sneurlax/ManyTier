@@ -31,7 +31,7 @@ pub(crate) fn build_encrypted_verb_packet(
     dest_address: &[u8; 5],
     verb: Verb,
     payload: &[u8],
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8; 48],
 ) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; 28 + payload.len()];
 
@@ -55,7 +55,7 @@ fn build_ext_frame_packet(
     our_address: &[u8; 5],
     dest_address: &[u8; 5],
     ext: &ExtFramePayload<'_>,
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8; 48],
 ) -> Option<Vec<u8>> {
     let mut payload = vec![0u8; 23 + ext.payload.len()];
     let payload_len = ext.serialize(&mut payload);
@@ -751,7 +751,7 @@ mod tests {
         peer.add_path(stale_primary, true, 1000);
         peer.add_path(live_backup, false, 999_900);
         peer.state = PeerState::Active {
-            shared_secret: [0x55; 32],
+            shared_secret: [0x55; 48],
             latency_ms: 10,
             last_receive: 999_900,
             last_send: 999_900,

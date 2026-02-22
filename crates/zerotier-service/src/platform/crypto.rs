@@ -86,14 +86,14 @@ impl CryptoProvider for NativeCryptoProvider {
         packet: &mut [u8],
         encrypt_payload: bool,
     ) -> Result<(), Self::Error> {
-        let shared_secret: [u8; 32] = shared_secret
+        let shared_secret: [u8; 48] = shared_secret
             .try_into()
             .map_err(|_| CryptoError::InvalidKeyLength)?;
         zerotier_crypto::salsa::armor_packet(&shared_secret, packet, encrypt_payload)
     }
 
     fn decrypt_packet(&self, shared_secret: &[u8], packet: &mut [u8]) -> Result<bool, Self::Error> {
-        let shared_secret: [u8; 32] = shared_secret
+        let shared_secret: [u8; 48] = shared_secret
             .try_into()
             .map_err(|_| CryptoError::InvalidKeyLength)?;
         match zerotier_crypto::salsa::dearmor_packet(&shared_secret, packet) {

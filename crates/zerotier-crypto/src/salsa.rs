@@ -29,7 +29,7 @@ pub const PACKET_HEADER_LEN: usize = 27;
 /// - Byte 18: XOR with flags byte, hop count masked off (& 0xf8)
 /// - Bytes 19..21: XOR with packet size as little-endian u16
 /// - Bytes 21..32: unchanged from shared secret
-pub fn mangle_key(shared_secret: &[u8; 32], packet_header: &[u8], packet_size: usize) -> [u8; 32] {
+pub fn mangle_key(shared_secret: &[u8; 48], packet_header: &[u8], packet_size: usize) -> [u8; 32] {
     let mut key = [0u8; 32];
 
     // XOR first 18 bytes with packet bytes 0..18 (IV + dest + source)
@@ -75,7 +75,7 @@ fn extract_poly1305_key_and_advance(cipher: &mut Salsa12) -> [u8; 32] {
 /// 5. Compute Poly1305 MAC over (encrypted) payload
 /// 6. Store first 8 bytes of MAC tag at packet[19..27]
 pub fn armor_packet(
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8; 48],
     packet: &mut [u8],
     encrypt_payload: bool,
 ) -> Result<(), CryptoError> {
@@ -171,7 +171,7 @@ pub fn armor_packet_unmangled(
 /// 3. Generate Poly1305 one-time key
 /// 4. Verify MAC over encrypted payload -- if invalid, return error
 /// 5. Decrypt verb + payload at offset 27+
-pub fn dearmor_packet(shared_secret: &[u8; 32], packet: &mut [u8]) -> Result<(), CryptoError> {
+pub fn dearmor_packet(shared_secret: &[u8; 48], packet: &mut [u8]) -> Result<(), CryptoError> {
     if packet.len() < PACKET_MIN_LEN {
         return Err(CryptoError::InvalidFormat);
     }
@@ -230,7 +230,7 @@ pub fn dearmor_packet(shared_secret: &[u8; 32], packet: &mut [u8]) -> Result<(),
 /// garbage, triggering a silent `std::out_of_range` in the moon-list loop
 /// at node/IncomingPacket.cpp:489-497.
 pub fn crypt_packet_field(
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8; 48],
     packet: &mut [u8],
     start: usize,
     len: usize,
@@ -245,9 +245,10 @@ pub fn crypt_packet_field(
     nonce.copy_from_slice(&packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]);
     nonce[7] &= 0xf8;
 
-    // RAW shared secret as the Salsa20/12 key: no mangling.
+    // RAW shared secret (first 32 bytes) as the Salsa20/12 key: no mangling.
     // Keystream from offset 0: no 32-byte skip.
-    let mut cipher = Salsa12::new(shared_secret.into(), &nonce.into());
+    let key: [u8; 32] = shared_secret[..32].try_into().unwrap();
+    let mut cipher = Salsa12::new(&key.into(), &nonce.into());
     cipher.apply_keystream(&mut packet[start..start + len]);
     Ok(())
 }
@@ -283,8 +284,8 @@ mod tests {
         pkt
     }
 
-    fn test_shared_secret() -> [u8; 32] {
-        let mut secret = [0u8; 32];
+    fn test_shared_secret() -> [u8; 48] {
+        let mut secret = [0u8; 48];
         for (i, b) in secret.iter_mut().enumerate() {
             *b = (i as u8).wrapping_mul(7).wrapping_add(0x42);
         }
@@ -293,11 +294,13 @@ mod tests {
 
     #[test]
     fn dearmor_matches_official_ok_hello_capture() {
-        let shared_secret = [
+        let shared_secret_32 = [
             0x15, 0x79, 0x95, 0x8b, 0x95, 0x6d, 0xb9, 0x4d, 0x18, 0xfa, 0xb1, 0x0f, 0x13, 0x48,
             0xcc, 0x0d, 0x98, 0x7d, 0x26, 0xa1, 0x5d, 0x24, 0x88, 0x64, 0xaf, 0xe4, 0x29, 0x41,
             0xb0, 0xa2, 0xe4, 0x9f,
         ];
+        let mut shared_secret = [0u8; 48];
+        shared_secret[..32].copy_from_slice(&shared_secret_32);
         let mut packet = [
             0x5f, 0x49, 0x89, 0x44, 0xa5, 0xd8, 0x1d, 0x63, 0x0f, 0x7a, 0x0b, 0x04, 0x3f, 0x46,
             0xa5, 0xb4, 0xd1, 0xe8, 0x88, 0x9e, 0x32, 0x4a, 0x99, 0x7c, 0xa9, 0x8c, 0x83, 0x1e,
@@ -458,7 +461,8 @@ mod tests {
         let mut nonce = [0u8; 8];
         nonce.copy_from_slice(&pkt[0..8]);
         nonce[7] &= 0xf8;
-        let mut reference_cipher = Salsa12::new(&secret.into(), &nonce.into());
+        let ref_key: [u8; 32] = secret[..32].try_into().unwrap();
+        let mut reference_cipher = Salsa12::new(&ref_key.into(), &nonce.into());
         let mut recovered = ciphertext.clone();
         reference_cipher.apply_keystream(&mut recovered);
         assert_eq!(

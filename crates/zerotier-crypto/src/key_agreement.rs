@@ -8,17 +8,19 @@ use sha2::{Digest, Sha512};
 
 /// Perform X25519 Diffie-Hellman key agreement.
 ///
-/// Returns the first 32 bytes of `SHA-512(raw_x25519_shared_secret)`.
+/// Returns the first 48 bytes of `SHA-512(raw_x25519_shared_secret)`.
+/// This matches ZeroTier's `ZT_SYMMETRIC_KEY_SIZE` (48 bytes), providing
+/// enough key material for both Salsa20 (32 bytes) and AES-GMAC-SIV (48 bytes).
 /// Both parties will derive the same shared secret:
 /// `key_agree(a_secret, b_public) == key_agree(b_secret, a_public)`
 pub fn key_agree(
     our_secret: &x25519_dalek::StaticSecret,
     their_public: &x25519_dalek::PublicKey,
-) -> [u8; 32] {
+) -> [u8; 48] {
     let raw = our_secret.diffie_hellman(their_public).to_bytes();
     let digest = Sha512::digest(raw);
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&digest[..32]);
+    let mut result = [0u8; 48];
+    result.copy_from_slice(&digest[..48]);
     result
 }
 
@@ -64,6 +66,22 @@ mod tests {
         let raw = a_secret.diffie_hellman(&b_public).to_bytes();
         let derived = key_agree(&a_secret, &b_public);
 
-        assert_ne!(derived, raw);
+        assert_ne!(&derived[..32], &raw[..]);
+    }
+
+    #[test]
+    fn key_agree_returns_48_bytes_matching_sha512_prefix() {
+        use sha2::{Digest, Sha512};
+
+        let a_secret = StaticSecret::from([0x11u8; 32]);
+        let b_secret = StaticSecret::from([0x22u8; 32]);
+        let b_public = PublicKey::from(&b_secret);
+
+        let raw = a_secret.diffie_hellman(&b_public).to_bytes();
+        let full_digest = Sha512::digest(raw);
+
+        let derived = key_agree(&a_secret, &b_public);
+        assert_eq!(derived.len(), 48);
+        assert_eq!(&derived[..], &full_digest[..48]);
     }
 }
