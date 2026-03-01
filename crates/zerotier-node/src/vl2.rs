@@ -750,12 +750,7 @@ mod tests {
         let live_backup: SocketAddr = "10.0.0.11:9993".parse().unwrap();
         peer.add_path(stale_primary, true, 1000);
         peer.add_path(live_backup, false, 999_900);
-        peer.state = PeerState::Active {
-            shared_secret: [0x55; 48],
-            latency_ms: 10,
-            last_receive: 999_900,
-            last_send: 999_900,
-        };
+        peer.state = PeerState::new_active([0x55; 48], 10, 999_900, 999_900);
 
         let mut membership = NetworkMembership::new(network_id, 2800);
         membership.members.push(NetworkMember {

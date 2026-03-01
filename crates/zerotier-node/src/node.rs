@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use zerotier_crypto::aes_gmac_siv;
 use zerotier_crypto::identity::Identity;
 use zerotier_crypto::salsa;
 use zerotier_protocol::constants::*;
@@ -493,6 +494,12 @@ impl Node {
             &our_secret.dh,
             &their_dh_pubkey,
         ))
+    }
+
+    pub fn aes_keys_for_peer(&self, address: &[u8; 5]) -> Option<([u8; 32], [u8; 32])> {
+        let peer = self.topology.get_peer(address)?;
+        let (k0, k1) = peer.aes_keys()?;
+        Some((*k0, *k1))
     }
 
     fn queue_pending_encrypted_packet(
@@ -1024,6 +1031,14 @@ impl Node {
                 }
                 false
             }
+            CIPHER_SUITE_AES_GMAC_SIV => {
+                if let Some((k0, k1)) = self.aes_keys_for_peer(source) {
+                    let aad = build_aes_aad(data);
+                    return aes_gmac_siv::dearmor_packet(&k0, &k1, data, &aad)
+                        .unwrap_or(false);
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -1097,12 +1112,7 @@ impl Node {
             // Update peer state
             if let Some(peer) = self.topology.get_peer_mut(&source_addr_bytes) {
                 peer.add_path(from, true, now_ms);
-                peer.state = PeerState::Active {
-                    shared_secret,
-                    latency_ms: 0,
-                    last_receive: now_ms,
-                    last_send: now_ms,
-                };
+                peer.state = PeerState::new_active(shared_secret, 0, now_ms, now_ms);
             }
 
             tracing::info!(
@@ -1164,12 +1174,7 @@ impl Node {
                         let their_dh = x25519_dalek::PublicKey::from(peer.identity.public_key.dh);
                         let shared_secret =
                             zerotier_crypto::key_agreement::key_agree(&our_secret.dh, &their_dh);
-                        peer.state = PeerState::Active {
-                            shared_secret,
-                            latency_ms,
-                            last_receive: now_ms,
-                            last_send: now_ms,
-                        };
+                        peer.state = PeerState::new_active(shared_secret, latency_ms, now_ms, now_ms);
                     }
                     peer.add_path(from, true, now_ms);
 
@@ -2473,6 +2478,13 @@ fn decompress_packet(_packet: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+fn build_aes_aad(packet: &[u8]) -> [u8; 11] {
+    let mut aad = [0u8; 11];
+    aad.copy_from_slice(&packet[8..19]);
+    aad[10] &= 0xf8;
+    aad
+}
+
 fn apply_legacy_ip_assignments(net: &mut NetworkMembership, dict: &Dictionary) -> bool {
     let mut parsed_assignment = false;
 
@@ -2789,7 +2801,7 @@ mod tests {
     use zerotier_crypto::identity::{Address, PublicKey};
     use zerotier_crypto::salsa;
     use zerotier_protocol::constants::{
-        CIPHER_SUITE_C25519_POLY1305_SALSA2012, VERB_FLAG_COMPRESSED,
+        CIPHER_SUITE_AES_GMAC_SIV, CIPHER_SUITE_C25519_POLY1305_SALSA2012, VERB_FLAG_COMPRESSED,
     };
     use zerotier_protocol::inet_address::InetAddress;
     use zerotier_protocol::verbs::network_config::{
@@ -2843,12 +2855,7 @@ mod tests {
         node.topology.add_peer(peer_id);
         let peer = node.topology.get_peer_mut(&peer_address).unwrap();
         peer.add_path(socket, true, 1000);
-        peer.state = PeerState::Active {
-            shared_secret,
-            latency_ms: 10,
-            last_receive: 1000,
-            last_send: 1000,
-        };
+        peer.state = PeerState::new_active(shared_secret, 10, 1000, 1000);
         peer_address
     }
 
@@ -3042,12 +3049,7 @@ mod tests {
         node.topology.add_peer(peer_id);
         let peer = node.topology.get_peer_mut(&peer_addr).unwrap();
         peer.add_path("10.0.0.42:9993".parse().unwrap(), true, 1000);
-        peer.state = PeerState::Active {
-            shared_secret: [0u8; 48],
-            latency_ms: 10,
-            last_receive: 1000,
-            last_send: 1000,
-        };
+        peer.state = PeerState::new_active([0u8; 48], 10, 1000, 1000);
 
         // Tick at time when peer needs ping (60s later)
         let actions = node.tick(1000 + ZT_PEER_PING_PERIOD);
@@ -3069,12 +3071,7 @@ mod tests {
         node.topology.add_peer(peer_id);
         let peer = node.topology.get_peer_mut(&peer_addr).unwrap();
         peer.add_path("10.0.0.42:9993".parse().unwrap(), true, 1000);
-        peer.state = PeerState::Active {
-            shared_secret: [0u8; 48],
-            latency_ms: 10,
-            last_receive: 1000,
-            last_send: 1000,
-        };
+        peer.state = PeerState::new_active([0u8; 48], 10, 1000, 1000);
 
         // Tick at time when peer is stale (500s later)
         let _ = node.tick(1000 + ZT_PEER_ACTIVITY_TIMEOUT);
@@ -3886,12 +3883,7 @@ mod tests {
         let peer = node.topology.get_peer_mut(&peer_addr).unwrap();
         let direct_addr: SocketAddr = "10.0.0.42:9993".parse().unwrap();
         peer.add_path(direct_addr, false, 1000); // relay path
-        peer.state = PeerState::Active {
-            shared_secret: [0u8; 48],
-            latency_ms: 10,
-            last_receive: 1000,
-            last_send: 1000,
-        };
+        peer.state = PeerState::new_active([0u8; 48], 10, 1000, 1000);
 
         // Simulate promote_path directly
         let peer = node.topology.get_peer_mut(&peer_addr).unwrap();
@@ -4093,5 +4085,101 @@ mod tests {
                 peer.state
             );
         }
+    }
+
+    #[test]
+    fn cipher_suite_3_roundtrip() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id.clone(), &planet, 1).unwrap();
+
+        let peer_id = test_identity(0x42);
+        let shared_secret = [0xABu8; 48];
+        let peer_address =
+            add_active_peer(&mut node, peer_id, "10.0.0.42:9993".parse().unwrap(), shared_secret);
+
+        let k0_full = zerotier_crypto::kbkdf::derive_k0(&shared_secret);
+        let k1_full = zerotier_crypto::kbkdf::derive_k1(&shared_secret);
+        let mut k0 = [0u8; 32];
+        let mut k1 = [0u8; 32];
+        k0.copy_from_slice(&k0_full[..32]);
+        k1.copy_from_slice(&k1_full[..32]);
+
+        let our_address = *id.address.as_bytes();
+        let payload = b"hello world payload data";
+        let mut packet = vec![0u8; 28 + payload.len()];
+        packet[0..8].copy_from_slice(&42u64.to_be_bytes());
+        packet[8..13].copy_from_slice(&our_address);
+        packet[13..18].copy_from_slice(&peer_address);
+        packet[18] = CIPHER_SUITE_AES_GMAC_SIV << 3;
+        packet[27] = Verb::Frame.to_byte();
+        packet[28..].copy_from_slice(payload);
+
+        let original_payload = packet[28..].to_vec();
+
+        let aad = build_aes_aad(&packet);
+        aes_gmac_siv::armor_packet(&k0, &k1, &mut packet, &aad).unwrap();
+
+        assert_ne!(&packet[28..], &original_payload[..], "payload must be encrypted");
+
+        let ok = node.dearmor(&mut packet, &peer_address, CIPHER_SUITE_AES_GMAC_SIV, Verb::Frame.to_byte());
+        assert!(ok, "dearmor with cipher suite 3 must succeed");
+        assert_eq!(&packet[28..], &original_payload[..], "payload must be decrypted correctly");
+    }
+
+    #[test]
+    fn cipher_suite_1_regression_with_48_byte_secret() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id.clone(), &planet, 1).unwrap();
+
+        let peer_id = test_identity(0x42);
+        let shared_secret = [0xCDu8; 48];
+        let peer_address =
+            add_active_peer(&mut node, peer_id, "10.0.0.42:9993".parse().unwrap(), shared_secret);
+
+        let our_address = *id.address.as_bytes();
+        let payload = b"salsa20 regression test";
+        let mut packet = vec![0u8; 28 + payload.len()];
+        packet[0..8].copy_from_slice(&99u64.to_be_bytes());
+        packet[8..13].copy_from_slice(&our_address);
+        packet[13..18].copy_from_slice(&peer_address);
+        packet[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+        packet[27] = Verb::Frame.to_byte();
+        packet[28..].copy_from_slice(payload);
+
+        let original_payload = packet[28..].to_vec();
+        salsa::armor_packet(&shared_secret, &mut packet, true).unwrap();
+
+        let ok = node.dearmor(&mut packet, &peer_address, CIPHER_SUITE_C25519_POLY1305_SALSA2012, Verb::Frame.to_byte());
+        assert!(ok, "Salsa20 dearmor must still work with 48-byte secrets");
+        assert_eq!(&packet[28..], &original_payload[..], "Salsa20 payload must decrypt correctly");
+    }
+
+    #[test]
+    fn mixed_cipher_suites_fail() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id.clone(), &planet, 1).unwrap();
+
+        let peer_id = test_identity(0x42);
+        let shared_secret = [0xEFu8; 48];
+        let peer_address =
+            add_active_peer(&mut node, peer_id, "10.0.0.42:9993".parse().unwrap(), shared_secret);
+
+        let our_address = *id.address.as_bytes();
+        let payload = b"cross-suite test data";
+        let mut packet = vec![0u8; 28 + payload.len()];
+        packet[0..8].copy_from_slice(&77u64.to_be_bytes());
+        packet[8..13].copy_from_slice(&our_address);
+        packet[13..18].copy_from_slice(&peer_address);
+        packet[18] = CIPHER_SUITE_C25519_POLY1305_SALSA2012 << 3;
+        packet[27] = Verb::Frame.to_byte();
+        packet[28..].copy_from_slice(payload);
+
+        salsa::armor_packet(&shared_secret, &mut packet, true).unwrap();
+
+        let ok = node.dearmor(&mut packet, &peer_address, CIPHER_SUITE_AES_GMAC_SIV, Verb::Frame.to_byte());
+        assert!(!ok, "dearmoring suite-1-armored packet with suite 3 must fail");
     }
 }

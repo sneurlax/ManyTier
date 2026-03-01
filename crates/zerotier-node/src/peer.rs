@@ -28,6 +28,8 @@ pub enum PeerState {
     /// Active session with shared secret.
     Active {
         shared_secret: [u8; 48],
+        k0: [u8; 32],
+        k1: [u8; 32],
         latency_ms: u32,
         last_receive: u64,
         last_send: u64,
@@ -38,6 +40,31 @@ pub enum PeerState {
         retry_backoff_ms: u64,
         next_retry_at: u64,
     },
+}
+
+impl PeerState {
+    /// Create an Active state with KBKDF-derived K0/K1 keys.
+    pub fn new_active(
+        shared_secret: [u8; 48],
+        latency_ms: u32,
+        last_receive: u64,
+        last_send: u64,
+    ) -> Self {
+        let k0_full = zerotier_crypto::kbkdf::derive_k0(&shared_secret);
+        let k1_full = zerotier_crypto::kbkdf::derive_k1(&shared_secret);
+        let mut k0 = [0u8; 32];
+        let mut k1 = [0u8; 32];
+        k0.copy_from_slice(&k0_full[..32]);
+        k1.copy_from_slice(&k1_full[..32]);
+        PeerState::Active {
+            shared_secret,
+            k0,
+            k1,
+            latency_ms,
+            last_receive,
+            last_send,
+        }
+    }
 }
 
 /// A remote ZeroTier peer.
@@ -69,12 +96,7 @@ impl Peer {
     ) {
         let their_dh_pubkey = x25519_dalek::PublicKey::from(self.identity.public_key.dh);
         let shared_secret = zerotier_crypto::key_agreement::key_agree(our_secret, &their_dh_pubkey);
-        self.state = PeerState::Active {
-            shared_secret,
-            latency_ms,
-            last_receive: now_ms,
-            last_send: now_ms,
-        };
+        self.state = PeerState::new_active(shared_secret, latency_ms, now_ms, now_ms);
     }
 
     /// Get the best path for sending (prefer direct, lowest latency).
@@ -182,6 +204,14 @@ impl Peer {
         }
     }
 
+    /// Get KBKDF-derived AES keys (K0, K1) if session is active.
+    pub fn aes_keys(&self) -> Option<(&[u8; 32], &[u8; 32])> {
+        match &self.state {
+            PeerState::Active { k0, k1, .. } => Some((k0, k1)),
+            _ => None,
+        }
+    }
+
     /// Promote a relay path to direct when we receive a direct packet.
     /// Relay-first, promote on direct packet arrival.
     pub fn promote_path(&mut self, addr: SocketAddr, now_ms: u64) {
@@ -280,12 +310,7 @@ mod tests {
     #[test]
     fn needs_ping_when_active_and_overdue() {
         let mut peer = stub_peer();
-        peer.state = PeerState::Active {
-            shared_secret: [0u8; 48],
-            latency_ms: 10,
-            last_receive: 1000,
-            last_send: 1000,
-        };
+        peer.state = PeerState::new_active([0u8; 48], 10, 1000, 1000);
         assert!(!peer.needs_ping(1000 + ZT_PEER_PING_PERIOD - 1));
         assert!(peer.needs_ping(1000 + ZT_PEER_PING_PERIOD));
     }
@@ -305,12 +330,7 @@ mod tests {
     #[test]
     fn is_stale_when_no_recent_activity() {
         let mut peer = stub_peer();
-        peer.state = PeerState::Active {
-            shared_secret: [0u8; 48],
-            latency_ms: 10,
-            last_receive: 1000,
-            last_send: 1000,
-        };
+        peer.state = PeerState::new_active([0u8; 48], 10, 1000, 1000);
         assert!(!peer.is_stale(1000 + ZT_PEER_ACTIVITY_TIMEOUT - 1));
         assert!(peer.is_stale(1000 + ZT_PEER_ACTIVITY_TIMEOUT));
     }
@@ -339,12 +359,7 @@ mod tests {
     #[test]
     fn mark_stale_transitions_active_to_stale() {
         let mut peer = stub_peer();
-        peer.state = PeerState::Active {
-            shared_secret: [0u8; 48],
-            latency_ms: 10,
-            last_receive: 5000,
-            last_send: 5000,
-        };
+        peer.state = PeerState::new_active([0u8; 48], 10, 5000, 5000);
         peer.mark_stale(600_000);
         match peer.state {
             PeerState::Stale {
