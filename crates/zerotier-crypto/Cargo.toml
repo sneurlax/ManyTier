@@ -19,3 +19,5 @@ rand_core = { workspace = true }
 zeroize = { workspace = true }
 cipher = { workspace = true }
 universal-hash = { workspace = true }
+aes = { workspace = true }
+ghash = { workspace = true }

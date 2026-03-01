@@ -19,6 +19,8 @@ pub enum CryptoError {
     SignatureError,
     /// Key agreement produced an invalid result.
     KeyAgreementError,
+    /// Packet is too short for the requested operation.
+    TooShort,
 }
 
 impl core::fmt::Display for CryptoError {
@@ -33,6 +35,7 @@ impl core::fmt::Display for CryptoError {
             CryptoError::EncryptionError => "encryption error",
             CryptoError::SignatureError => "signature error",
             CryptoError::KeyAgreementError => "key agreement error",
+            CryptoError::TooShort => "packet too short",
         };
         f.write_str(message)
     }
