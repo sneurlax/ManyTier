@@ -161,6 +161,7 @@ struct PendingEncryptedPacket {
 }
 
 // ZeroTierOne 1.14.2 uses a 1432-byte physical MTU for packet buffers.
+#[cfg(feature = "native")]
 const ZT_PACKET_DECOMPRESS_CAPACITY: usize = ZT_MAX_PACKET_FRAGMENTS * 1432;
 const ZT_PENDING_ENCRYPTED_PACKET_LIMIT: usize = 32;
 const ZT_PENDING_ENCRYPTED_PACKET_TTL_MS: u64 = 30_000;
