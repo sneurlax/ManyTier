@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn packet_encryption_roundtrips() {
         let provider = NativeCryptoProvider;
-        let shared_secret = [0x42u8; 32];
+        let shared_secret = [0x42u8; 48];
         let mut packet = [0u8; 64];
         packet[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         packet[8..13].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
