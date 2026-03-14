@@ -17,10 +17,7 @@ impl RemoteTracePayload {
 
     pub fn deserialize(data: &[u8]) -> Result<Self, ProtocolError> {
         if data.is_empty() {
-            return Err(ProtocolError::TooShort {
-                need: 1,
-                got: 0,
-            });
+            return Err(ProtocolError::TooShort { need: 1, got: 0 });
         }
         Ok(RemoteTracePayload {
             data: data.to_vec(),
@@ -47,9 +44,7 @@ mod tests {
 
     #[test]
     fn remote_trace_single_byte() {
-        let payload = RemoteTracePayload {
-            data: vec![0xFF],
-        };
+        let payload = RemoteTracePayload { data: vec![0xFF] };
         let mut buf = [0u8; 64];
         let n = payload.serialize(&mut buf);
         assert_eq!(n, 1);

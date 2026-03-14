@@ -3,8 +3,8 @@ use std::io;
 use std::path::Path;
 
 use etherparse::{SlicedPacket, TransportSlice};
-use pcap_file::DataLink;
 use pcap_file::pcap::PcapReader;
+use pcap_file::DataLink;
 use zerotier_protocol::header::PacketHeader;
 use zerotier_protocol::verb::Verb;
 use zerotier_protocol::verbs::hello::HelloPayload;
@@ -13,7 +13,7 @@ use zerotier_protocol::verbs::network_config::{
 };
 use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
 use zerotier_protocol::verbs::whois::WhoisRequest;
-use zerotier_protocol::{FragmentHeader, is_fragment};
+use zerotier_protocol::{is_fragment, FragmentHeader};
 
 const ZT_PORT: u16 = 9993;
 

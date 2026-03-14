@@ -1,3 +1,6 @@
+// Shared test-support module: not every including test binary uses every item.
+#![allow(dead_code)]
+
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io;

@@ -1,6 +1,7 @@
 use zerotier_crypto::identity::{Address, Identity, PublicKey};
 use zerotier_protocol::inet_address::InetAddress;
 use zerotier_protocol::verb::Verb;
+use zerotier_protocol::verbs::ack::AckPayload;
 use zerotier_protocol::verbs::error::{ErrorCode, ErrorPayload};
 use zerotier_protocol::verbs::frame::{ExtFramePayload, FramePayload};
 use zerotier_protocol::verbs::hello::HelloPayload;
@@ -11,14 +12,13 @@ use zerotier_protocol::verbs::network_config::{
     CertificateOfMembership, ComQualifier, NetworkConfigPayload, NetworkConfigRequestPayload,
     NetworkCredentialsPayload,
 };
-use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
-use zerotier_protocol::verbs::push_direct::{DirectPath, PushDirectPathsPayload};
-use zerotier_protocol::verbs::rendezvous::RendezvousPayload;
-use zerotier_protocol::verbs::ack::AckPayload;
 use zerotier_protocol::verbs::nop::NopPayload;
+use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
 use zerotier_protocol::verbs::path_negotiation::PathNegotiationRequestPayload;
+use zerotier_protocol::verbs::push_direct::{DirectPath, PushDirectPathsPayload};
 use zerotier_protocol::verbs::qos::{QosMeasurementPayload, QosRecord};
 use zerotier_protocol::verbs::remote_trace::RemoteTracePayload;
+use zerotier_protocol::verbs::rendezvous::RendezvousPayload;
 use zerotier_protocol::verbs::user_message::UserMessagePayload;
 use zerotier_protocol::verbs::whois::{WhoisRequest, WhoisResponse};
 
@@ -101,7 +101,7 @@ fn protocol_roundtrips_cover_all_payload_codecs() {
     for seed in 0..32u64 {
         let payload = make_bytes(seed ^ 0x99, (seed as usize * 17) % 96);
         let identity = identity_from_seed(seed);
-        let identities = vec![identity_from_seed(seed), identity_from_seed(seed + 1)];
+        let identities = [identity_from_seed(seed), identity_from_seed(seed + 1)];
         let inet_address = inet_address_from_seed(seed);
 
         let error = ErrorPayload {

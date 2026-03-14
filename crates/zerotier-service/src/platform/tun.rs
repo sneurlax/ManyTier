@@ -44,18 +44,20 @@ impl TunDevice for NativeTun {
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.ensure_halves()?;
-        let reader = self.reader.get().ok_or_else(|| {
-            std::io::Error::other("TUN reader unavailable")
-        })?;
+        let reader = self
+            .reader
+            .get()
+            .ok_or_else(|| std::io::Error::other("TUN reader unavailable"))?;
         let mut reader = reader.lock().await;
         reader.read(buf).await
     }
 
     async fn write(&self, data: &[u8]) -> Result<usize, Self::Error> {
         self.ensure_halves()?;
-        let writer = self.writer.get().ok_or_else(|| {
-            std::io::Error::other("TUN writer unavailable")
-        })?;
+        let writer = self
+            .writer
+            .get()
+            .ok_or_else(|| std::io::Error::other("TUN writer unavailable"))?;
         let mut writer = writer.lock().await;
         writer.write(data).await
     }
@@ -69,12 +71,13 @@ impl TunDevice for NativeTun {
     }
 
     async fn set_ip(&self, addr: IpAddr, prefix_len: u8) -> Result<(), Self::Error> {
-        let mut control = self.control.lock().map_err(|_| {
-            std::io::Error::other("TUN control lock poisoned")
-        })?;
-        let device = control.as_mut().ok_or_else(|| {
-            std::io::Error::other("cannot configure TUN after I/O has started")
-        })?;
+        let mut control = self
+            .control
+            .lock()
+            .map_err(|_| std::io::Error::other("TUN control lock poisoned"))?;
+        let device = control
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("cannot configure TUN after I/O has started"))?;
         device.as_mut().set_address(addr)?;
 
         if addr.is_ipv4() {
@@ -139,14 +142,15 @@ impl NativeTun {
             return Ok(());
         }
 
-        let mut control = self.control.lock().map_err(|_| {
-            std::io::Error::other("TUN control lock poisoned")
-        })?;
+        let mut control = self
+            .control
+            .lock()
+            .map_err(|_| std::io::Error::other("TUN control lock poisoned"))?;
 
         if self.reader.get().is_none() || self.writer.get().is_none() {
-            let device = control.take().ok_or_else(|| {
-                std::io::Error::other("TUN runtime already taken")
-            })?;
+            let device = control
+                .take()
+                .ok_or_else(|| std::io::Error::other("TUN runtime already taken"))?;
             let (reader, writer) = tokio::io::split(device);
             let _ = self.reader.set(tokio::sync::Mutex::new(reader));
             let _ = self.writer.set(tokio::sync::Mutex::new(writer));

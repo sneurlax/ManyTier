@@ -18,16 +18,16 @@ use zerotier_protocol::constants::*;
 use zerotier_protocol::fragment::ReassemblyBuffer;
 use zerotier_protocol::inet_address::InetAddress;
 use zerotier_protocol::verb::Verb;
+use zerotier_protocol::verbs::ack::AckPayload;
 use zerotier_protocol::verbs::hello::{HelloPayload, MANYTIER_ADVERTISED_PROTOCOL_VERSION};
 use zerotier_protocol::verbs::network_config::{
     CertificateOfMembership, NetworkConfigPayload, NetworkCredentialsPayload,
 };
 use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
-use zerotier_protocol::verbs::rendezvous::RendezvousPayload;
-use zerotier_protocol::verbs::ack::AckPayload;
 use zerotier_protocol::verbs::path_negotiation::PathNegotiationRequestPayload;
 use zerotier_protocol::verbs::qos::QosMeasurementPayload;
 use zerotier_protocol::verbs::remote_trace::RemoteTracePayload;
+use zerotier_protocol::verbs::rendezvous::RendezvousPayload;
 use zerotier_protocol::verbs::user_message::UserMessagePayload;
 use zerotier_protocol::verbs::whois::WhoisRequest;
 use zerotier_protocol::{is_fragment, FragmentHeader, PacketHeader, ProtocolError};
@@ -93,15 +93,9 @@ pub enum NodeAction {
         data: Vec<u8>,
     },
     /// A REMOTE_TRACE (verb 0x15) was received.
-    RemoteTraceReceived {
-        origin: [u8; 5],
-        data: Vec<u8>,
-    },
+    RemoteTraceReceived { origin: [u8; 5], data: Vec<u8> },
     /// A PATH_NEGOTIATION_REQUEST (verb 0x16) was received.
-    PathNegotiationReceived {
-        origin: [u8; 5],
-        utility: i16,
-    },
+    PathNegotiationReceived { origin: [u8; 5], utility: i16 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -861,112 +855,104 @@ impl Node {
                     "received NOP"
                 );
             }
-            Some(Verb::Ack) => {
-                match AckPayload::deserialize(verb_payload) {
-                    Ok(ack) => {
-                        tracing::debug!(
-                            target: "manytier",
-                            event = "ack_received",
-                            peer = %format_args!(
-                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
-                                source[0], source[1], source[2], source[3], source[4]
-                            ),
-                            bytes_acked = ack.bytes_acked,
-                            "received ACK"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "manytier",
-                            event = "ack_decode_failed",
-                            error = %e,
-                            "failed to decode ACK"
-                        );
-                    }
+            Some(Verb::Ack) => match AckPayload::deserialize(verb_payload) {
+                Ok(ack) => {
+                    tracing::debug!(
+                        target: "manytier",
+                        event = "ack_received",
+                        peer = %format_args!(
+                            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            source[0], source[1], source[2], source[3], source[4]
+                        ),
+                        bytes_acked = ack.bytes_acked,
+                        "received ACK"
+                    );
                 }
-            }
-            Some(Verb::QosMeasurement) => {
-                match QosMeasurementPayload::deserialize(verb_payload) {
-                    Ok(qos) => {
-                        tracing::debug!(
-                            target: "manytier",
-                            event = "qos_received",
-                            peer = %format_args!(
-                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
-                                source[0], source[1], source[2], source[3], source[4]
-                            ),
-                            record_count = qos.records.len(),
-                            "received QoS measurement"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "manytier",
-                            event = "qos_decode_failed",
-                            error = %e,
-                            "failed to decode QoS measurement"
-                        );
-                    }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "manytier",
+                        event = "ack_decode_failed",
+                        error = %e,
+                        "failed to decode ACK"
+                    );
                 }
-            }
-            Some(Verb::UserMessage) => {
-                match UserMessagePayload::deserialize(verb_payload) {
-                    Ok(msg) => {
-                        tracing::debug!(
-                            target: "manytier",
-                            event = "user_message_received",
-                            peer = %format_args!(
-                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
-                                source[0], source[1], source[2], source[3], source[4]
-                            ),
-                            type_id = msg.type_id,
-                            data_len = msg.data.len(),
-                            "received USER_MESSAGE"
-                        );
-                        self.actions.push(NodeAction::UserMessageReceived {
-                            origin: source,
-                            type_id: msg.type_id,
-                            data: msg.data,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "manytier",
-                            event = "user_message_decode_failed",
-                            error = %e,
-                            "failed to decode USER_MESSAGE"
-                        );
-                    }
+            },
+            Some(Verb::QosMeasurement) => match QosMeasurementPayload::deserialize(verb_payload) {
+                Ok(qos) => {
+                    tracing::debug!(
+                        target: "manytier",
+                        event = "qos_received",
+                        peer = %format_args!(
+                            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            source[0], source[1], source[2], source[3], source[4]
+                        ),
+                        record_count = qos.records.len(),
+                        "received QoS measurement"
+                    );
                 }
-            }
-            Some(Verb::RemoteTrace) => {
-                match RemoteTracePayload::deserialize(verb_payload) {
-                    Ok(trace) => {
-                        tracing::debug!(
-                            target: "manytier",
-                            event = "remote_trace_received",
-                            peer = %format_args!(
-                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
-                                source[0], source[1], source[2], source[3], source[4]
-                            ),
-                            data_len = trace.data.len(),
-                            "received REMOTE_TRACE"
-                        );
-                        self.actions.push(NodeAction::RemoteTraceReceived {
-                            origin: source,
-                            data: trace.data,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "manytier",
-                            event = "remote_trace_decode_failed",
-                            error = %e,
-                            "failed to decode REMOTE_TRACE"
-                        );
-                    }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "manytier",
+                        event = "qos_decode_failed",
+                        error = %e,
+                        "failed to decode QoS measurement"
+                    );
                 }
-            }
+            },
+            Some(Verb::UserMessage) => match UserMessagePayload::deserialize(verb_payload) {
+                Ok(msg) => {
+                    tracing::debug!(
+                        target: "manytier",
+                        event = "user_message_received",
+                        peer = %format_args!(
+                            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            source[0], source[1], source[2], source[3], source[4]
+                        ),
+                        type_id = msg.type_id,
+                        data_len = msg.data.len(),
+                        "received USER_MESSAGE"
+                    );
+                    self.actions.push(NodeAction::UserMessageReceived {
+                        origin: source,
+                        type_id: msg.type_id,
+                        data: msg.data,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "manytier",
+                        event = "user_message_decode_failed",
+                        error = %e,
+                        "failed to decode USER_MESSAGE"
+                    );
+                }
+            },
+            Some(Verb::RemoteTrace) => match RemoteTracePayload::deserialize(verb_payload) {
+                Ok(trace) => {
+                    tracing::debug!(
+                        target: "manytier",
+                        event = "remote_trace_received",
+                        peer = %format_args!(
+                            "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                            source[0], source[1], source[2], source[3], source[4]
+                        ),
+                        data_len = trace.data.len(),
+                        "received REMOTE_TRACE"
+                    );
+                    self.actions.push(NodeAction::RemoteTraceReceived {
+                        origin: source,
+                        data: trace.data,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "manytier",
+                        event = "remote_trace_decode_failed",
+                        error = %e,
+                        "failed to decode REMOTE_TRACE"
+                    );
+                }
+            },
             Some(Verb::PathNegotiationRequest) => {
                 match PathNegotiationRequestPayload::deserialize(verb_payload) {
                     Ok(pnr) => {
@@ -1035,8 +1021,7 @@ impl Node {
             CIPHER_SUITE_AES_GMAC_SIV => {
                 if let Some((k0, k1)) = self.aes_keys_for_peer(source) {
                     let aad = build_aes_aad(data);
-                    return aes_gmac_siv::dearmor_packet(&k0, &k1, data, &aad)
-                        .unwrap_or(false);
+                    return aes_gmac_siv::dearmor_packet(&k0, &k1, data, &aad).unwrap_or(false);
                 }
                 false
             }
@@ -1175,7 +1160,8 @@ impl Node {
                         let their_dh = x25519_dalek::PublicKey::from(peer.identity.public_key.dh);
                         let shared_secret =
                             zerotier_crypto::key_agreement::key_agree(&our_secret.dh, &their_dh);
-                        peer.state = PeerState::new_active(shared_secret, latency_ms, now_ms, now_ms);
+                        peer.state =
+                            PeerState::new_active(shared_secret, latency_ms, now_ms, now_ms);
                     }
                     peer.add_path(from, true, now_ms);
 
@@ -1332,9 +1318,7 @@ impl Node {
         }
 
         // Send OK(WHOIS) for known identities
-        if !known_identities.is_empty()
-            && self.topology.get_peer(&source).is_some()
-        {
+        if !known_identities.is_empty() && self.topology.get_peer(&source).is_some() {
             if let Some(secret) = self.shared_secret_for_peer(&source) {
                 let ok = zerotier_protocol::verbs::ok::OkPayload {
                     in_re_verb: zerotier_protocol::verb::Verb::Whois,
@@ -2154,9 +2138,7 @@ impl Node {
             .iter_mut()
             .filter_map(|net| {
                 let is_refresh = net.our_com.is_some();
-                if !net.our_com_refresh_due(now_ms)
-                    && !net.pending_config_request
-                {
+                if !net.our_com_refresh_due(now_ms) && !net.pending_config_request {
                     return None;
                 }
                 net.pending_config_request = true;
@@ -3536,7 +3518,7 @@ mod tests {
 
     #[test]
     fn whois_response_replays_pending_encrypted_packet_from_root() {
-        let mut rng = XorShift17_11(0x18_10_0001);
+        let mut rng = XorShift17_11(0x1810_0001);
         let id = Identity::generate(&mut rng).unwrap();
         let planet = make_synthetic_planet();
         let mut node = Node::new(id, &planet, 1).unwrap();
@@ -3600,7 +3582,9 @@ mod tests {
             },
         };
         let mut ok_buf = [0u8; 512];
-        let ok_len = ok.serialize(&mut ok_buf).expect("OK payload should serialize");
+        let ok_len = ok
+            .serialize(&mut ok_buf)
+            .expect("OK payload should serialize");
         let mut ok_packet = crate::vl2::build_encrypted_verb_packet(
             0x2122_2324_2526_2728,
             &root_addr,
@@ -4096,8 +4080,12 @@ mod tests {
 
         let peer_id = test_identity(0x42);
         let shared_secret = [0xABu8; 48];
-        let peer_address =
-            add_active_peer(&mut node, peer_id, "10.0.0.42:9993".parse().unwrap(), shared_secret);
+        let peer_address = add_active_peer(
+            &mut node,
+            peer_id,
+            "10.0.0.42:9993".parse().unwrap(),
+            shared_secret,
+        );
 
         let k0_full = zerotier_crypto::kbkdf::derive_k0(&shared_secret);
         let k1_full = zerotier_crypto::kbkdf::derive_k1(&shared_secret);
@@ -4121,11 +4109,24 @@ mod tests {
         let aad = build_aes_aad(&packet);
         aes_gmac_siv::armor_packet(&k0, &k1, &mut packet, &aad).unwrap();
 
-        assert_ne!(&packet[28..], &original_payload[..], "payload must be encrypted");
+        assert_ne!(
+            &packet[28..],
+            &original_payload[..],
+            "payload must be encrypted"
+        );
 
-        let ok = node.dearmor(&mut packet, &peer_address, CIPHER_SUITE_AES_GMAC_SIV, Verb::Frame.to_byte());
+        let ok = node.dearmor(
+            &mut packet,
+            &peer_address,
+            CIPHER_SUITE_AES_GMAC_SIV,
+            Verb::Frame.to_byte(),
+        );
         assert!(ok, "dearmor with cipher suite 3 must succeed");
-        assert_eq!(&packet[28..], &original_payload[..], "payload must be decrypted correctly");
+        assert_eq!(
+            &packet[28..],
+            &original_payload[..],
+            "payload must be decrypted correctly"
+        );
     }
 
     #[test]
@@ -4136,8 +4137,12 @@ mod tests {
 
         let peer_id = test_identity(0x42);
         let shared_secret = [0xCDu8; 48];
-        let peer_address =
-            add_active_peer(&mut node, peer_id, "10.0.0.42:9993".parse().unwrap(), shared_secret);
+        let peer_address = add_active_peer(
+            &mut node,
+            peer_id,
+            "10.0.0.42:9993".parse().unwrap(),
+            shared_secret,
+        );
 
         let our_address = *id.address.as_bytes();
         let payload = b"salsa20 regression test";
@@ -4152,9 +4157,18 @@ mod tests {
         let original_payload = packet[28..].to_vec();
         salsa::armor_packet(&shared_secret, &mut packet, true).unwrap();
 
-        let ok = node.dearmor(&mut packet, &peer_address, CIPHER_SUITE_C25519_POLY1305_SALSA2012, Verb::Frame.to_byte());
+        let ok = node.dearmor(
+            &mut packet,
+            &peer_address,
+            CIPHER_SUITE_C25519_POLY1305_SALSA2012,
+            Verb::Frame.to_byte(),
+        );
         assert!(ok, "Salsa20 dearmor must still work with 48-byte secrets");
-        assert_eq!(&packet[28..], &original_payload[..], "Salsa20 payload must decrypt correctly");
+        assert_eq!(
+            &packet[28..],
+            &original_payload[..],
+            "Salsa20 payload must decrypt correctly"
+        );
     }
 
     #[test]
@@ -4165,8 +4179,12 @@ mod tests {
 
         let peer_id = test_identity(0x42);
         let shared_secret = [0xEFu8; 48];
-        let peer_address =
-            add_active_peer(&mut node, peer_id, "10.0.0.42:9993".parse().unwrap(), shared_secret);
+        let peer_address = add_active_peer(
+            &mut node,
+            peer_id,
+            "10.0.0.42:9993".parse().unwrap(),
+            shared_secret,
+        );
 
         let our_address = *id.address.as_bytes();
         let payload = b"cross-suite test data";
@@ -4180,7 +4198,15 @@ mod tests {
 
         salsa::armor_packet(&shared_secret, &mut packet, true).unwrap();
 
-        let ok = node.dearmor(&mut packet, &peer_address, CIPHER_SUITE_AES_GMAC_SIV, Verb::Frame.to_byte());
-        assert!(!ok, "dearmoring suite-1-armored packet with suite 3 must fail");
+        let ok = node.dearmor(
+            &mut packet,
+            &peer_address,
+            CIPHER_SUITE_AES_GMAC_SIV,
+            Verb::Frame.to_byte(),
+        );
+        assert!(
+            !ok,
+            "dearmoring suite-1-armored packet with suite 3 must fail"
+        );
     }
 }

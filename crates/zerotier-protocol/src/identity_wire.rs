@@ -150,9 +150,7 @@ mod tests {
         // Set secret_len to 64 (simulating a secret key follows)
         buf[70] = 64;
         // Fill 64 bytes of "secret"
-        for i in 71..135 {
-            buf[i] = 0xAA;
-        }
+        buf[71..135].fill(0xAA);
         let (parsed, consumed) = deserialize_identity(&buf[..135]).unwrap();
         assert_eq!(consumed, 71 + 64);
         assert_eq!(parsed.address, id.address);

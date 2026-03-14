@@ -220,6 +220,7 @@ pub fn generate_test_config(
 /// Generate a config file and write it to disk, returning the JSON string.
 ///
 /// This is the convenience wrapper called from shadow-node setup.
+#[allow(dead_code)] // used by a subset of the test binaries that include this module
 pub fn generate_test_config_to_file(
     controller_signing_key: &ed25519_dalek::SigningKey,
     controller_address: &[u8; 5],

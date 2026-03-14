@@ -25,8 +25,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use etherparse::PacketBuilder;
-use pcap_file::DataLink;
 use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+use pcap_file::DataLink;
 use serde::{Deserialize, Serialize};
 
 const SHADOW_BIN: &str = "shadow";
@@ -461,7 +461,7 @@ fn run_shadow_capture(config: &str, work_dir: &Path) -> ShadowRunResult {
     }
 
     let output = Command::new(SHADOW_BIN)
-        .arg(&temp_config.file_name().unwrap())
+        .arg(temp_config.file_name().unwrap())
         .current_dir(work_dir)
         .output()
         .expect("Failed to execute shadow - is it installed?");
@@ -2630,6 +2630,7 @@ fn render_capture_status(label: &str, capture: &CapturedCommandArtifact) -> Stri
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_tool_parity_report(
     report_path: &Path,
     title: &str,
@@ -2675,7 +2676,7 @@ fn strip_ansi_escape_sequences(text: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' && matches!(chars.peek(), Some('[')) {
             let _ = chars.next();
-            while let Some(code) = chars.next() {
+            for code in chars.by_ref() {
                 if ('@'..='~').contains(&code) {
                     break;
                 }
@@ -2715,6 +2716,7 @@ fn read_manytier_address(data_dir: &Path) -> Option<[u8; 5]> {
 ///
 /// This is used in the host-assisted fallback scenario where ManyTier needs to
 /// reach a local controller/root without the default official planet roots.
+#[allow(dead_code)] // used by a subset of the test binaries that include this harness
 fn build_moon_for_localhost(
     artifact_root: &Path,
     controller_identity_str: &str,
@@ -2945,6 +2947,7 @@ fn write_signed_localhost_planet(
 ///
 /// Copies the planet file into the data dir as `planet.bin` so the service
 /// can locate it at startup, then launches the service host-natively.
+#[allow(dead_code)] // used by a subset of the test binaries that include this harness
 fn run_manytier_with_planet(
     work_dir: &Path,
     label: &str,
@@ -3550,7 +3553,7 @@ fn setup_shadow_data_planet_sim(work_dir: &Path) {
     for i in 1..=10 {
         let peer_name = format!("peer{}", i);
         let peer_id_str = std::fs::read_to_string(data_dir.join(format!("{}.identity", peer_name)))
-            .expect(&format!("failed to read {} identity", peer_name));
+            .unwrap_or_else(|_| panic!("failed to read {} identity", peer_name));
         let peer_addr_hex = peer_id_str.trim().split(':').next().unwrap().to_string();
         let peer_addr = parse_hex_address(&peer_addr_hex);
         peer_addrs.push((peer_addr, peer_addr_hex));
@@ -3580,7 +3583,7 @@ fn setup_shadow_data_planet_sim(work_dir: &Path) {
 
     for i in 1..=10 {
         std::fs::write(data_dir.join(format!("net-peer{}.json", i)), &config_json)
-            .expect(&format!("failed to write net-peer{}.json", i));
+            .unwrap_or_else(|_| panic!("failed to write net-peer{}.json", i));
     }
 
     eprintln!(
@@ -3710,10 +3713,7 @@ pub mod tests {
 
         assert!(categories.contains(&"interface discovery incomplete after refresh".to_string()));
         assert!(categories.contains(&"ping stimulation failed after refresh".to_string()));
-        assert!(
-            categories
-                .contains(&"data-plane evidence still missing after refresh".to_string())
-        );
+        assert!(categories.contains(&"data-plane evidence still missing after refresh".to_string()));
     }
 
     #[test]
@@ -4679,8 +4679,8 @@ pub mod tests {
             .expect("failed to create controller stderr log");
 
         let mut controller_child = Command::new(&zt_one_bin)
-            .args(["-U", &controller_layout.home_dir.to_str().unwrap()])
-            .current_dir(&workspace_root(&work_dir))
+            .args(["-U", controller_layout.home_dir.to_str().unwrap()])
+            .current_dir(workspace_root(&work_dir))
             .stdout(Stdio::from(controller_stdout_file))
             .stderr(Stdio::from(controller_stderr_file))
             .spawn()
@@ -4920,24 +4920,25 @@ pub mod tests {
             &zt_one_bin,
             &controller_layout.home_dir,
         );
-        let official_controller_api_parity =
-            match (network_id_str.as_deref(), client_addr.as_ref()) {
-                (Some(network_id), Some(member_addr)) => Some(capture_controller_api_parity_artifacts(
-                    &controller_layout.artifact_root,
-                    zt_api_port,
-                    &authtoken,
-                    network_id,
-                    &hex_encode_address(member_addr),
-                )),
-                _ => None,
-            };
+        let official_controller_api_parity = match (network_id_str.as_deref(), client_addr.as_ref())
+        {
+            (Some(network_id), Some(member_addr)) => Some(capture_controller_api_parity_artifacts(
+                &controller_layout.artifact_root,
+                zt_api_port,
+                &authtoken,
+                network_id,
+                &hex_encode_address(member_addr),
+            )),
+            _ => None,
+        };
 
         if let Some(network_id) = network_id_str.as_deref() {
             let phase_report_root = phase_artifact_root(&work_dir, &shadow_test_dir);
             let client_status_online = client_tool_parity
                 .as_ref()
                 .map(|artifacts| {
-                    artifacts.status_cli.success && artifacts.status_cli.stdout.contains("online: true")
+                    artifacts.status_cli.success
+                        && artifacts.status_cli.stdout.contains("online: true")
                 })
                 .unwrap_or(false);
             let client_listnetworks_matches = client_tool_parity
@@ -5057,7 +5058,10 @@ pub mod tests {
             ]);
             if let Some(artifacts) = official_controller_api_parity.as_ref() {
                 capture_lines.extend([
-                    render_capture_status("Official controller GET /controller/network", &artifacts.network),
+                    render_capture_status(
+                        "Official controller GET /controller/network",
+                        &artifacts.network,
+                    ),
                     render_capture_status(
                         "Official controller GET /controller/network/.../member",
                         &artifacts.member,
@@ -6213,8 +6217,8 @@ pub mod tests {
             .expect("failed to create official stderr log");
 
         let mut official_child = Command::new(&zt_one_bin)
-            .args(["-U", &official_layout.home_dir.to_str().unwrap()])
-            .current_dir(&workspace_root(&work_dir))
+            .args(["-U", official_layout.home_dir.to_str().unwrap()])
+            .current_dir(workspace_root(&work_dir))
             .stdout(Stdio::from(official_stdout_file))
             .stderr(Stdio::from(official_stderr_file))
             .spawn()
@@ -6829,23 +6833,22 @@ pub mod tests {
                 token,
             )
         });
-        let manytier_controller_api_parity =
-            match (
-                network_id_str.as_deref(),
-                controller_authtoken.as_deref(),
-                official_node_addr.as_ref(),
-            ) {
-                (Some(network_id), Some(token), Some(member_addr)) => {
-                    Some(capture_controller_api_parity_artifacts(
-                        &controller_process.layout.artifact_root,
-                        CONTROLLER_API_PORT,
-                        token,
-                        network_id,
-                        &hex_encode_address(member_addr),
-                    ))
-                }
-                _ => None,
-            };
+        let manytier_controller_api_parity = match (
+            network_id_str.as_deref(),
+            controller_authtoken.as_deref(),
+            official_node_addr.as_ref(),
+        ) {
+            (Some(network_id), Some(token), Some(member_addr)) => {
+                Some(capture_controller_api_parity_artifacts(
+                    &controller_process.layout.artifact_root,
+                    CONTROLLER_API_PORT,
+                    token,
+                    network_id,
+                    &hex_encode_address(member_addr),
+                ))
+            }
+            _ => None,
+        };
 
         if let Some(network_id) = network_id_str.as_deref() {
             let phase_report_root = phase_artifact_root(&work_dir, &shadow_test_dir);
@@ -6856,8 +6859,14 @@ pub mod tests {
                 .as_deref()
                 .map(|assigned_ipv4| {
                     official_tool_parity.listnetworks_cli.success
-                        && official_tool_parity.listnetworks_cli.stdout.contains(network_id)
-                        && official_tool_parity.listnetworks_cli.stdout.contains(assigned_ipv4)
+                        && official_tool_parity
+                            .listnetworks_cli
+                            .stdout
+                            .contains(network_id)
+                        && official_tool_parity
+                            .listnetworks_cli
+                            .stdout
+                            .contains(assigned_ipv4)
                 })
                 .unwrap_or(false);
             let official_peers_success = official_tool_parity.peers_cli.success;
@@ -6963,7 +6972,10 @@ pub mod tests {
                     ),
                     render_capture_status("ManyTier controller GET /status", &artifacts.status_api),
                     render_capture_status("ManyTier controller GET /peer", &artifacts.peers_api),
-                    render_capture_status("ManyTier controller GET /network", &artifacts.network_api),
+                    render_capture_status(
+                        "ManyTier controller GET /network",
+                        &artifacts.network_api,
+                    ),
                 ]);
             } else {
                 capture_lines.push(
@@ -6973,7 +6985,10 @@ pub mod tests {
             }
             if let Some(artifacts) = manytier_controller_api_parity.as_ref() {
                 capture_lines.extend([
-                    render_capture_status("ManyTier controller GET /controller/network", &artifacts.network),
+                    render_capture_status(
+                        "ManyTier controller GET /controller/network",
+                        &artifacts.network,
+                    ),
                     render_capture_status(
                         "ManyTier controller GET /controller/network/.../member",
                         &artifacts.member,

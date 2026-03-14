@@ -116,6 +116,7 @@ fn test_official_root_hello_exchange() {
     let mut got_response = false;
 
     for action in &actions {
+        #[allow(clippy::single_match)]
         match action {
             NodeAction::SendTo { data, address } => {
                 eprintln!("Sending HELLO ({} bytes) to {}", data.len(), address);

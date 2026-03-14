@@ -7,10 +7,7 @@ pub async fn run(auth_token: &str, port: u16) -> anyhow::Result<()> {
     let client = ApiClient::new(auth_token.to_string(), port);
     let body = client.get("/peer").await?;
     let peers: Vec<serde_json::Value> = serde_json::from_str(&body)?;
-    println!(
-        "{:<12} {:<8} {:<8} PATHS",
-        "ADDRESS", "ROLE", "LATENCY",
-    );
+    println!("{:<12} {:<8} {:<8} PATHS", "ADDRESS", "ROLE", "LATENCY",);
     for peer in &peers {
         let address = peer["address"].as_str().unwrap_or("");
         let role = peer["role"].as_str().unwrap_or("LEAF");

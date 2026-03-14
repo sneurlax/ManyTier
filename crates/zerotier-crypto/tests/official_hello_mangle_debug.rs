@@ -1,3 +1,7 @@
+// Brute-force MAC-variant debug harness; the parameter sweeps intentionally
+// take one argument per axis.
+#![allow(clippy::too_many_arguments)]
+
 use std::fs;
 
 use cipher::{KeyIvInit, StreamCipher};
@@ -324,7 +328,7 @@ fn decrypt_official_hello_encrypted_section() {
     let official_identity_public_path = std::env::var("MANYTIER_DEBUG_OFFICIAL_IDENTITY_PUBLIC")
         .expect("set MANYTIER_DEBUG_OFFICIAL_IDENTITY_PUBLIC to official identity.public");
 
-    let mut packet = fs::read(packet_path).expect("failed to read packet");
+    let packet = fs::read(packet_path).expect("failed to read packet");
     let packet_len = packet.len();
 
     let our_id_s = fs::read_to_string(our_identity_secret_path).expect("read identity.secret");

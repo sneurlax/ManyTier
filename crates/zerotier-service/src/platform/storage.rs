@@ -47,9 +47,9 @@ fn collect_keys(dir: &Path, root: &Path, keys: &mut Vec<String>) -> std::io::Res
         if entry.file_type()?.is_dir() {
             collect_keys(&path, root, keys)?;
         } else if entry.file_type()?.is_file() {
-            let relative = path.strip_prefix(root).map_err(|_| {
-                std::io::Error::other("failed to relativize storage key")
-            })?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| std::io::Error::other("failed to relativize storage key"))?;
             keys.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }

@@ -3,7 +3,10 @@ use aes::Aes256;
 use ghash::{universal_hash::UniversalHash, GHash};
 
 use crate::error::CryptoError;
-use crate::salsa::{PACKET_IV_LEN, PACKET_IV_OFFSET, PACKET_MAC_LEN, PACKET_MAC_OFFSET, PACKET_MIN_LEN, PACKET_VERB_OFFSET};
+use crate::salsa::{
+    PACKET_IV_LEN, PACKET_IV_OFFSET, PACKET_MAC_LEN, PACKET_MAC_OFFSET, PACKET_MIN_LEN,
+    PACKET_VERB_OFFSET,
+};
 
 /// AES-CTR encryption with manual 32-bit-only counter increment.
 /// The counter occupies the least-significant 32 bits of `nonce_counter`
@@ -19,7 +22,12 @@ fn aes_ctr_encrypt(cipher: &Aes256, nonce_counter: &mut [u8; 16], data: &mut [u8
         }
 
         // Increment only the least-significant 32 bits (big-endian at bytes 12..16)
-        let ctr = u32::from_be_bytes([nonce_counter[12], nonce_counter[13], nonce_counter[14], nonce_counter[15]]);
+        let ctr = u32::from_be_bytes([
+            nonce_counter[12],
+            nonce_counter[13],
+            nonce_counter[14],
+            nonce_counter[15],
+        ]);
         let new_ctr = ctr.wrapping_add(1);
         nonce_counter[12..16].copy_from_slice(&new_ctr.to_be_bytes());
     }
@@ -108,7 +116,12 @@ fn feed_padded(ghash: &mut GHash, data: &[u8]) {
 ///
 /// K0: first 32 bytes of KBKDF output: used for GMAC authentication
 /// K1: first 32 bytes of separate KBKDF output: used for AES-ECB tag and AES-CTR payload
-pub fn armor_packet(k0: &[u8; 32], k1: &[u8; 32], packet: &mut [u8], aad: &[u8]) -> Result<(), CryptoError> {
+pub fn armor_packet(
+    k0: &[u8; 32],
+    k1: &[u8; 32],
+    packet: &mut [u8],
+    aad: &[u8],
+) -> Result<(), CryptoError> {
     if packet.len() < PACKET_MIN_LEN {
         return Err(CryptoError::TooShort);
     }
@@ -138,8 +151,10 @@ pub fn armor_packet(k0: &[u8; 32], k1: &[u8; 32], packet: &mut [u8], aad: &[u8])
     let encrypted_tag: [u8; 16] = aes_block.into();
 
     // Store encrypted IV and MAC back into packet header
-    packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN].copy_from_slice(&encrypted_tag[0..8]);
-    packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN].copy_from_slice(&encrypted_tag[8..16]);
+    packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]
+        .copy_from_slice(&encrypted_tag[0..8]);
+    packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN]
+        .copy_from_slice(&encrypted_tag[8..16]);
 
     // Build CTR nonce from the encrypted IV:
     // [encrypted_IV(8) | 0x00 0x00 0x00 0x00 | 0x00 0x00 0x00 0x00]
@@ -161,7 +176,12 @@ pub fn armor_packet(k0: &[u8; 32], k1: &[u8; 32], packet: &mut [u8], aad: &[u8])
 /// AES-GMAC-SIV decrypt (single-pass): ZeroTier cipher suite 3.
 ///
 /// Returns Ok(true) if MAC is valid, Ok(false) if MAC mismatch.
-pub fn dearmor_packet(k0: &[u8; 32], k1: &[u8; 32], packet: &mut [u8], aad: &[u8]) -> Result<bool, CryptoError> {
+pub fn dearmor_packet(
+    k0: &[u8; 32],
+    k1: &[u8; 32],
+    packet: &mut [u8],
+    aad: &[u8],
+) -> Result<bool, CryptoError> {
     if packet.len() < PACKET_MIN_LEN {
         return Err(CryptoError::TooShort);
     }
@@ -171,8 +191,10 @@ pub fn dearmor_packet(k0: &[u8; 32], k1: &[u8; 32], packet: &mut [u8], aad: &[u8
 
     // Read encrypted [IV(8) | MAC(8)] from packet header
     let mut encrypted_tag = [0u8; 16];
-    encrypted_tag[0..8].copy_from_slice(&packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]);
-    encrypted_tag[8..16].copy_from_slice(&packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN]);
+    encrypted_tag[0..8]
+        .copy_from_slice(&packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]);
+    encrypted_tag[8..16]
+        .copy_from_slice(&packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN]);
 
     // AES-ECB decrypt to recover [original_IV | original_MAC]
     let k1_cipher = Aes256::new(k1.into());
@@ -233,36 +255,41 @@ mod tests {
     }
 
     const TEST_K0: [u8; 32] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D,
+        0x1E, 0x1F,
     ];
 
     const TEST_K1: [u8; 32] = [
-        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
-        0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
-        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
-        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E,
+        0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D,
+        0x3E, 0x3F,
     ];
 
     #[test]
     fn roundtrip_basic() {
-        let payload = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-                       0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                       0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10];
+        let payload = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+        ];
         let mut packet = make_test_packet(&payload);
         let original = packet.clone();
         let aad = &[];
 
         armor_packet(&TEST_K0, &TEST_K1, &mut packet, aad).unwrap();
         // Ciphertext should differ from plaintext
-        assert_ne!(&packet[PACKET_VERB_OFFSET..], &original[PACKET_VERB_OFFSET..]);
+        assert_ne!(
+            &packet[PACKET_VERB_OFFSET..],
+            &original[PACKET_VERB_OFFSET..]
+        );
 
         let valid = dearmor_packet(&TEST_K0, &TEST_K1, &mut packet, aad).unwrap();
         assert!(valid, "MAC should verify after roundtrip");
         // Payload (verb+data) should match original
-        assert_eq!(&packet[PACKET_VERB_OFFSET..], &original[PACKET_VERB_OFFSET..]);
+        assert_eq!(
+            &packet[PACKET_VERB_OFFSET..],
+            &original[PACKET_VERB_OFFSET..]
+        );
     }
 
     #[test]
@@ -275,7 +302,10 @@ mod tests {
         armor_packet(&TEST_K0, &TEST_K1, &mut packet, &aad).unwrap();
         let valid = dearmor_packet(&TEST_K0, &TEST_K1, &mut packet, &aad).unwrap();
         assert!(valid);
-        assert_eq!(&packet[PACKET_VERB_OFFSET..], &original[PACKET_VERB_OFFSET..]);
+        assert_eq!(
+            &packet[PACKET_VERB_OFFSET..],
+            &original[PACKET_VERB_OFFSET..]
+        );
     }
 
     #[test]
@@ -288,7 +318,10 @@ mod tests {
         armor_packet(&TEST_K0, &TEST_K1, &mut packet, aad).unwrap();
         let valid = dearmor_packet(&TEST_K0, &TEST_K1, &mut packet, aad).unwrap();
         assert!(valid);
-        assert_eq!(&packet[PACKET_VERB_OFFSET..], &original[PACKET_VERB_OFFSET..]);
+        assert_eq!(
+            &packet[PACKET_VERB_OFFSET..],
+            &original[PACKET_VERB_OFFSET..]
+        );
     }
 
     #[test]
@@ -300,7 +333,10 @@ mod tests {
         armor_packet(&TEST_K0, &TEST_K1, &mut packet, aad).unwrap();
         let valid = dearmor_packet(&TEST_K0, &TEST_K1, &mut packet, aad).unwrap();
         assert!(valid);
-        assert_eq!(&packet[PACKET_VERB_OFFSET..], &original[PACKET_VERB_OFFSET..]);
+        assert_eq!(
+            &packet[PACKET_VERB_OFFSET..],
+            &original[PACKET_VERB_OFFSET..]
+        );
     }
 
     #[test]
@@ -341,7 +377,10 @@ mod tests {
 
         armor_packet(&TEST_K0, &TEST_K1, &mut packet1, aad).unwrap();
         armor_packet(&TEST_K0, &TEST_K1, &mut packet2, aad).unwrap();
-        assert_eq!(packet1, packet2, "Same keys + IV + plaintext must produce same ciphertext");
+        assert_eq!(
+            packet1, packet2,
+            "Same keys + IV + plaintext must produce same ciphertext"
+        );
     }
 
     #[test]
@@ -387,6 +426,9 @@ mod tests {
         armor_packet(&TEST_K0, &TEST_K1, &mut packet, &aad).unwrap();
         let valid = dearmor_packet(&TEST_K0, &TEST_K1, &mut packet, &aad).unwrap();
         assert!(valid);
-        assert_eq!(&packet[PACKET_VERB_OFFSET..], &original[PACKET_VERB_OFFSET..]);
+        assert_eq!(
+            &packet[PACKET_VERB_OFFSET..],
+            &original[PACKET_VERB_OFFSET..]
+        );
     }
 }

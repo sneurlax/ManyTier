@@ -1255,7 +1255,11 @@ async fn execute_actions(transport: &zerotier_service::NativeTransport, actions:
                     "NETWORK_CONFIG received and applied"
                 );
             }
-            NodeAction::UserMessageReceived { origin, type_id, data } => {
+            NodeAction::UserMessageReceived {
+                origin,
+                type_id,
+                data,
+            } => {
                 tracing::debug!(
                     origin = %format!("{:02x}{:02x}{:02x}{:02x}{:02x}",
                         origin[0], origin[1], origin[2], origin[3], origin[4]),

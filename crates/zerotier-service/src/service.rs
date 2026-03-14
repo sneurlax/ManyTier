@@ -993,6 +993,67 @@ async fn load_or_generate_identity(
     }
 }
 
+/// Load planet file from native storage, or use the embedded default.
+async fn load_planet(storage: &NativeStorage) -> anyhow::Result<Vec<u8>> {
+    for key in ["planet.bin", "planet"] {
+        if let Some(data) = storage.load(key).await? {
+            tracing::info!(planet_key = key, "loaded planet from native storage");
+            return Ok(data);
+        }
+    }
+
+    tracing::info!("using embedded default planet");
+    Ok(DEFAULT_PLANET.to_vec())
+}
+
+/// Load or generate an authentication token for the REST API.
+async fn load_or_generate_auth_token(storage: &NativeStorage, key: &str) -> anyhow::Result<String> {
+    if let Some(token) = storage.load(key).await? {
+        let token = String::from_utf8(token)
+            .map_err(|_| anyhow::anyhow!("stored auth token is not valid UTF-8"))?;
+        Ok(token.trim().to_string())
+    } else {
+        let mut random_bytes = [0u8; 24];
+        getrandom::getrandom(&mut random_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to get random bytes: {:?}", e))?;
+        let token: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        storage.store(key, token.as_bytes()).await?;
+        tracing::info!(
+            auth_token_key = key,
+            "generated auth token in native storage"
+        );
+        Ok(token)
+    }
+}
+
+/// Wrapper to bridge getrandom 0.4 -> rand_core 0.6 CryptoRng for Identity::generate.
+struct GetrandomRng;
+
+impl rand_core::RngCore for GetrandomRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut buf = [0u8; 4];
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
+        u32::from_le_bytes(buf)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut buf = [0u8; 8];
+        getrandom::getrandom(&mut buf).expect("getrandom failed");
+        u64::from_le_bytes(buf)
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        getrandom::getrandom(dest).expect("getrandom failed");
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        getrandom::getrandom(dest).map_err(|_| {
+            rand_core::Error::from(
+                core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap(),
+            )
+        })
+    }
+}
+
+impl rand_core::CryptoRng for GetrandomRng {}
+
 #[cfg(test)]
 mod tests {
     use super::{managed_ips_from_dict_data, managed_routes_from_dict_data, tun_name_for_network};
@@ -1055,64 +1116,3 @@ mod tests {
         assert_eq!(routes, vec![("10.147.20.0/24".to_string(), None)]);
     }
 }
-
-/// Load planet file from native storage, or use the embedded default.
-async fn load_planet(storage: &NativeStorage) -> anyhow::Result<Vec<u8>> {
-    for key in ["planet.bin", "planet"] {
-        if let Some(data) = storage.load(key).await? {
-            tracing::info!(planet_key = key, "loaded planet from native storage");
-            return Ok(data);
-        }
-    }
-
-    tracing::info!("using embedded default planet");
-    Ok(DEFAULT_PLANET.to_vec())
-}
-
-/// Load or generate an authentication token for the REST API.
-async fn load_or_generate_auth_token(storage: &NativeStorage, key: &str) -> anyhow::Result<String> {
-    if let Some(token) = storage.load(key).await? {
-        let token = String::from_utf8(token)
-            .map_err(|_| anyhow::anyhow!("stored auth token is not valid UTF-8"))?;
-        Ok(token.trim().to_string())
-    } else {
-        let mut random_bytes = [0u8; 24];
-        getrandom::getrandom(&mut random_bytes)
-            .map_err(|e| anyhow::anyhow!("failed to get random bytes: {:?}", e))?;
-        let token: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        storage.store(key, token.as_bytes()).await?;
-        tracing::info!(
-            auth_token_key = key,
-            "generated auth token in native storage"
-        );
-        Ok(token)
-    }
-}
-
-/// Wrapper to bridge getrandom 0.4 -> rand_core 0.6 CryptoRng for Identity::generate.
-struct GetrandomRng;
-
-impl rand_core::RngCore for GetrandomRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut buf = [0u8; 4];
-        getrandom::getrandom(&mut buf).expect("getrandom failed");
-        u32::from_le_bytes(buf)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut buf = [0u8; 8];
-        getrandom::getrandom(&mut buf).expect("getrandom failed");
-        u64::from_le_bytes(buf)
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        getrandom::getrandom(dest).expect("getrandom failed");
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        getrandom::getrandom(dest).map_err(|_| {
-            rand_core::Error::from(
-                core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap(),
-            )
-        })
-    }
-}
-
-impl rand_core::CryptoRng for GetrandomRng {}
