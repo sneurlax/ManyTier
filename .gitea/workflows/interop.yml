@@ -1,0 +1,72 @@
+name: Self-Hosted Interop Lane
+
+# Manual-dispatch only. This lane drives the privileged self-hosted
+# ManyTier <-> official zerotier-one harness and therefore needs a
+# host-mode act_runner (label: zt-privileged) with /dev/net/tun,
+# Docker access, and the packages installed by
+# tests/shadow/provision-portable-self-hosted-runner.sh.
+# The hosted-official lane is NOT
+# run here by policy: it requires an interactive authorization checkpoint.
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Which validation lane to run"
+        required: true
+        default: "privileged-docker"
+        type: choice
+        options:
+          - privileged-docker
+          - tool-parity
+          - portable-refresh-m2o
+          - portable-refresh-o2m
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  interop:
+    name: Interop (${{ inputs.lane }})
+    runs-on: zt-privileged
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight
+        run: ./tests/shadow/preflight-self-hosted-official.sh || true
+
+      - name: Run lane
+        run: |
+          set -euo pipefail
+          case "${{ inputs.lane }}" in
+            privileged-docker)
+              ./tests/shadow/run-privileged-live-docker.sh
+              ;;
+            tool-parity)
+              ./tests/shadow/run-self-hosted-tool-parity.sh
+              ;;
+            portable-refresh-m2o)
+              MANYTIER_PORTABLE_REFRESH_ARTIFACT_ROOT=tests/shadow/artifacts/verify-28-01 \
+              ./tests/shadow/run-portable-self-hosted-refresh.sh \
+                --baseline-json tests/shadow/artifacts/verify-27-01-workstation/self-hosted-environment-report.json \
+                --direction manytier-client-official-controller
+              ;;
+            portable-refresh-o2m)
+              MANYTIER_PORTABLE_REFRESH_ARTIFACT_ROOT=tests/shadow/artifacts/verify-28-02 \
+              ./tests/shadow/run-portable-self-hosted-refresh.sh \
+                --baseline-json tests/shadow/artifacts/verify-27-01-workstation/self-hosted-environment-report.json \
+                --direction official-client-manytier-controller
+              ;;
+          esac
+
+      - name: Collect artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: interop-artifacts-${{ inputs.lane }}
+          path: tests/shadow/artifacts/
+          retention-days: 30
+
+      - name: Cleanup workspace
+        if: always()
+        run: ./tests/shadow/cleanup-validation-workspace.sh || true
