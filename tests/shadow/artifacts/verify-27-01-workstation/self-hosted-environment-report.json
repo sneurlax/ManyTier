@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-04-15T15:50:16Z",
+  "artifact_root": "/home/user/src/manytier/manytier/tests/shadow/artifacts/verify-27-01-workstation",
+  "host": {
+    "label": "user-Z690-E-Ubuntu-24.04",
+    "os": "Ubuntu 24.04.4 LTS"
+  },
+  "current_shell": {
+    "status": "blocked",
+    "note": "[FAIL] Unable to create a dummy tun device required by the privileged lane.",
+    "probe_log": "/home/user/src/manytier/manytier/tests/shadow/artifacts/verify-27-01-workstation/current-shell-probe.log"
+  },
+  "docker": {
+    "available": true,
+    "version": "Docker version 28.2.2, build 28.2.2-0ubuntu1~24.04.1"
+  },
+  "system_official_binary": {
+    "path": "/usr/sbin/zerotier-one",
+    "version": "1.16.1",
+    "supported": true
+  },
+  "fixture_binaries": [
+    {
+      "label": "default",
+      "path": "/home/user/src/manytier/manytier/tests/fixtures/zerotier-one",
+      "version": "1.14.2"
+    },
+    {
+      "label": "1.14.2",
+      "path": "/home/user/src/manytier/manytier/tests/fixtures/zerotier-one-1.14.2",
+      "version": "1.14.2"
+    },
+    {
+      "label": "1.16.1",
+      "path": "/home/user/src/manytier/manytier/tests/fixtures/zerotier-one-1.16.1",
+      "version": "1.16.1"
+    }
+  ],
+  "recommendation": {
+    "environment_shape": "privileged-docker",
+    "official_binary_path": "/usr/sbin/zerotier-one",
+    "official_binary_version": "1.16.1",
+    "official_binary_source": "system",
+    "reason": "The current shell fails the TUN probe, but Docker is available for the privileged wrapper."
+  },
+  "cargo": {
+    "path": "/home/user/.cargo/bin/cargo",
+    "version": "cargo 1.94.0 (85eff7c80 2026-01-15)"
+  },
+  "shadow_binary": {
+    "path": "/home/user/.local/bin/shadow",
+    "version": "Shadow 3.2.0: 404d301dd 2026-02-12--12:31:15"
+  },
+  "policy": "Hosted official-network execution remains out of scope for v1.7."
+}
