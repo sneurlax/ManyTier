@@ -1,12 +1,13 @@
 name: Self-Hosted Interop Lane
 
-# Manual-dispatch only. This lane drives the privileged self-hosted
-# ManyTier <-> official zerotier-one harness and therefore needs a
-# host-mode act_runner (label: zt-privileged) with /dev/net/tun,
-# Docker access, and the packages installed by
-# tests/shadow/provision-portable-self-hosted-runner.sh.
-# The hosted-official lane is NOT
-# run here by policy: it requires an interactive authorization checkpoint.
+# Manual-dispatch only. Runs host-mode on the Hetzner box (runner label
+# zt-privileged) with /dev/net/tun,
+# CAP_NET_ADMIN, and Docker. Following the house pattern for host-mode
+# jobs, this uses the fixed checkout at /srv/manytier instead of
+# actions/checkout (node-based actions are unreliable in host mode).
+# Artifacts stay on the server under /srv/manytier/tests/shadow/artifacts/.
+# The hosted-official lane is NOT run here by policy: it requires an
+# interactive authorization checkpoint.
 on:
   workflow_dispatch:
     inputs:
@@ -21,23 +22,24 @@ on:
           - portable-refresh-m2o
           - portable-refresh-o2m
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   interop:
     name: Interop (${{ inputs.lane }})
     runs-on: zt-privileged
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Preflight
-        run: ./tests/shadow/preflight-self-hosted-official.sh || true
+      - name: Sync /srv/manytier to workflow commit
+        run: |
+          set -euo pipefail
+          cd /srv/manytier
+          git fetch origin
+          git checkout --detach "$GITHUB_SHA"
 
       - name: Run lane
         run: |
           set -euo pipefail
+          cd /srv/manytier
+          export MANYTIER_ZEROTIER_ONE_BIN=/usr/sbin/zerotier-one
           case "${{ inputs.lane }}" in
             privileged-docker)
               ./tests/shadow/run-privileged-live-docker.sh
@@ -59,14 +61,6 @@ jobs:
               ;;
           esac
 
-      - name: Collect artifacts
+      - name: List produced artifacts
         if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: interop-artifacts-${{ inputs.lane }}
-          path: tests/shadow/artifacts/
-          retention-days: 30
-
-      - name: Cleanup workspace
-        if: always()
-        run: ./tests/shadow/cleanup-validation-workspace.sh || true
+        run: ls -la /srv/manytier/tests/shadow/artifacts/ || true
