@@ -2178,6 +2178,37 @@ impl Node {
                     .get_peer(ctrl_addr)
                     .is_some_and(|p| matches!(p.state, PeerState::Active { .. }));
                 if !peer_active {
+                    // A hosted/remote controller is not in our planet or moons, so
+                    // nothing else ever resolves its identity. Request WHOIS via the
+                    // roots here; the OK(WHOIS) handler then sends a relayed HELLO,
+                    // and once the session is Active the NCR goes out on a later tick.
+                    const CONTROLLER_WHOIS_RETRY_INTERVAL_MS: u64 = 10_000;
+                    let whois_due = match self.topology.pending_whois.get(ctrl_addr) {
+                        Some((sent_ms, _)) => {
+                            now_ms.saturating_sub(*sent_ms) >= CONTROLLER_WHOIS_RETRY_INTERVAL_MS
+                        }
+                        None => true,
+                    };
+                    if whois_due {
+                        self.topology.pending_whois.insert(*ctrl_addr, (now_ms, 0));
+                        tracing::info!(
+                            target: "manytier",
+                            event = "controller_whois_requested",
+                            network_id = %format_args!("{:016x}", network_id),
+                            controller = %format_args!(
+                                "{:02x}{:02x}{:02x}{:02x}{:02x}",
+                                ctrl_addr[0],
+                                ctrl_addr[1],
+                                ctrl_addr[2],
+                                ctrl_addr[3],
+                                ctrl_addr[4]
+                            ),
+                            "requesting WHOIS for controller before NETWORK_CONFIG_REQUEST"
+                        );
+                        self.actions.push(NodeAction::WhoisNeeded {
+                            addresses: vec![*ctrl_addr],
+                        });
+                    }
                     tracing::debug!(
                         target: "manytier",
                         event = "ncr_deferred_no_session",
@@ -3153,6 +3184,49 @@ mod tests {
             has_config_request,
             "queued request should send as soon as controller becomes reachable: {:?}",
             second
+        );
+    }
+
+    #[test]
+    fn join_with_unknown_controller_requests_whois_via_roots() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        // Hosted-network shape: the controller is NOT a root and its identity
+        // is unknown; only the planet roots are reachable.
+        let controller = test_identity(0x55);
+        let controller_address = *controller.address.as_bytes();
+        let network_id = network_id_for_controller(controller_address);
+        node.join_network(NetworkMembership::new(network_id, 2800));
+
+        let whois_for_controller = |actions: &[NodeAction]| {
+            actions.iter().any(|action| {
+                matches!(action, NodeAction::WhoisNeeded { addresses } if addresses.contains(&controller_address))
+            })
+        };
+
+        let first = node.tick(1000);
+        assert!(
+            whois_for_controller(&first),
+            "joining a network with an unknown controller must request WHOIS: {:?}",
+            first
+        );
+
+        // Within the retry interval the WHOIS must not be re-emitted.
+        let second = node.tick(2000);
+        assert!(
+            !whois_for_controller(&second),
+            "controller WHOIS should be rate-limited: {:?}",
+            second
+        );
+
+        // After the retry interval elapses it is requested again.
+        let third = node.tick(13_000);
+        assert!(
+            whois_for_controller(&third),
+            "controller WHOIS should retry after the interval: {:?}",
+            third
         );
     }
 
