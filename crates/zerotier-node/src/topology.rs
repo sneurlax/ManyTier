@@ -91,6 +91,35 @@ impl Topology {
         self.moons.push(moon);
     }
 
+    /// Unload a moon by world ID, removing its roots from the root set.
+    ///
+    /// Roots that also appear in the planet or another loaded moon are kept.
+    /// Peer entries are left in place: an established session is still valid
+    /// even if the peer is no longer treated as a root. Returns `true` if a
+    /// moon with the given ID was loaded.
+    pub fn unload_moon(&mut self, moon_id: u64) -> bool {
+        let Some(index) = self.moons.iter().position(|m| m.id == moon_id) else {
+            return false;
+        };
+        let moon = self.moons.remove(index);
+        for root in &moon.roots {
+            let addr_bytes = *root.identity.address.as_bytes();
+            let still_a_root = self.planet.as_ref().is_some_and(|p| {
+                p.roots
+                    .iter()
+                    .any(|r| r.identity.address.as_bytes() == &addr_bytes)
+            }) || self.moons.iter().any(|m| {
+                m.roots
+                    .iter()
+                    .any(|r| r.identity.address.as_bytes() == &addr_bytes)
+            });
+            if !still_a_root {
+                self.roots.retain(|addr| addr != &addr_bytes);
+            }
+        }
+        true
+    }
+
     /// Get a peer by address.
     pub fn get_peer(&self, address: &[u8; 5]) -> Option<&Peer> {
         self.peers.get(address)
@@ -218,5 +247,45 @@ mod tests {
         topo.add_peer(build_test_identity(0x01));
         assert_eq!(topo.peers.len(), 1);
         assert!(topo.get_peer(&addr).is_some());
+    }
+
+    #[test]
+    fn load_and_unload_moon_roundtrips() {
+        let mut topo = Topology::new();
+        topo.load_planet(stub_world());
+        let planet_roots = topo.roots.len();
+
+        let moon_root = build_test_identity(0x99);
+        let moon_root_addr = *moon_root.address.as_bytes();
+        let moon = World {
+            world_type: WorldType::Moon,
+            id: 0x0000_a0b1_c2d3_0099,
+            timestamp: 2000000,
+            signing_key: [0xCC; 64],
+            signature: [0xDD; 96],
+            roots: alloc::vec![WorldRoot {
+                identity: moon_root,
+                endpoints: alloc::vec![InetAddress::V4 {
+                    ip: [10, 0, 0, 9],
+                    port: 9993,
+                }],
+            }],
+            dict_data: Some(alloc::vec![]),
+        };
+
+        topo.load_moon(moon);
+        assert_eq!(topo.moons.len(), 1);
+        assert_eq!(topo.roots.len(), planet_roots + 1);
+        assert!(topo.roots.contains(&moon_root_addr));
+
+        assert!(topo.unload_moon(0x0000_a0b1_c2d3_0099));
+        assert_eq!(topo.moons.len(), 0);
+        assert_eq!(topo.roots.len(), planet_roots);
+        assert!(!topo.roots.contains(&moon_root_addr));
+        // Peer entry survives unload; only root status is dropped.
+        assert!(topo.get_peer(&moon_root_addr).is_some());
+
+        // Unknown moon IDs report false.
+        assert!(!topo.unload_moon(0xdead_beef));
     }
 }

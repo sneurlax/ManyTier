@@ -20,5 +20,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zerotier-crypto = { workspace = true }
 zerotier-service = { path = "../zerotier-service" }
+zerotier-node = { workspace = true, features = ["native"] }
+zerotier-protocol = { workspace = true }
 getrandom = { version = "0.2" }
 rand_core = { workspace = true }

@@ -19,7 +19,7 @@ use zerotier_protocol::inet_address::InetAddress;
 use zerotier_protocol::verb::Verb;
 use zerotier_protocol::verbs::network_config::NetworkConfigPayload;
 use zerotier_protocol::verbs::ok::{OkPayload, OkSubPayload};
-use zerotier_protocol::world::DEFAULT_PLANET;
+use zerotier_protocol::world::{World, WorldType, DEFAULT_PLANET};
 
 /// Write a single UDP datagram to `dump_dir` iff it is a HELLO verb, using the
 /// shared `{dir}-hello-*.bin` filename scheme. This helper is shared between
@@ -113,8 +113,20 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
 
     // 3. Create Node (identity is moved into node)
     let initial_packet_id = clock.now_wall_ms() & 0x0000_FFFF_FFFF_FFFF;
-    let node = Node::new(identity, &planet_data, initial_packet_id)
+    let mut node = Node::new(identity, &planet_data, initial_packet_id)
         .map_err(|e| anyhow::anyhow!("failed to create node: {e}"))?;
+
+    // 3.5 Load moons from {data-dir}/moons.d/ so their roots join the
+    // topology before bootstrap HELLOs go out.
+    for moon in load_moons(&config.data_dir) {
+        tracing::info!(
+            moon = %format!("{:016x}", moon.id),
+            roots = moon.roots.len(),
+            "loaded moon from moons.d"
+        );
+        node.topology.load_moon(moon);
+    }
+
     let node = Arc::new(Mutex::new(node));
 
     // 4. Generate or load authtoken.secret
@@ -156,6 +168,7 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
         node: node.clone(),
         auth_token,
         controller: controller.clone(),
+        data_dir: config.data_dir.clone(),
     });
     let router = api::build_router(state);
     let api_bind_addr = format!("127.0.0.1:{}", config.api_port);
@@ -1004,6 +1017,38 @@ async fn load_planet(storage: &NativeStorage) -> anyhow::Result<Vec<u8>> {
 
     tracing::info!("using embedded default planet");
     Ok(DEFAULT_PLANET.to_vec())
+}
+
+/// Load all parseable moon worlds from `{data_dir}/moons.d/*.moon`.
+///
+/// Files that fail to parse or are not moon-type worlds are skipped with a
+/// warning rather than failing service startup.
+fn load_moons(data_dir: &str) -> Vec<World> {
+    let moons_dir = PathBuf::from(data_dir).join("moons.d");
+    let Ok(entries) = std::fs::read_dir(&moons_dir) else {
+        return Vec::new();
+    };
+    let mut moons = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("moon") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            tracing::warn!(file = %path.display(), "failed to read moon file");
+            continue;
+        };
+        match World::deserialize(&bytes) {
+            Ok(world) if world.world_type == WorldType::Moon => moons.push(world),
+            Ok(_) => {
+                tracing::warn!(file = %path.display(), "skipping non-moon world in moons.d");
+            }
+            Err(e) => {
+                tracing::warn!(file = %path.display(), error = ?e, "failed to parse moon file");
+            }
+        }
+    }
+    moons
 }
 
 /// Load or generate an authentication token for the REST API.

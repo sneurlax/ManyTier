@@ -47,6 +47,11 @@ enum Commands {
         #[command(subcommand)]
         action: IdentityAction,
     },
+    /// Moon (custom root) file management
+    Moon {
+        #[command(subcommand)]
+        action: MoonAction,
+    },
     /// Add a custom root server (moon)
     Orbit {
         /// Moon ID
@@ -89,6 +94,28 @@ enum IdentityAction {
     Show,
 }
 
+#[derive(Subcommand)]
+enum MoonAction {
+    /// Generate a signed .moon world file from a secret identity (offline)
+    Generate {
+        /// Path to identity.secret of the moon's root node
+        #[arg(long)]
+        identity: String,
+
+        /// Stable public endpoint of the root, ip:port (repeatable)
+        #[arg(long = "endpoint", required = true)]
+        endpoints: Vec<String>,
+
+        /// Output file (default: <moon-id>.moon)
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Override the moon world ID (16-char hex; default: root address)
+        #[arg(long)]
+        moon_id: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
@@ -123,6 +150,19 @@ async fn main() -> anyhow::Result<()> {
         Commands::Identity { action } => match action {
             IdentityAction::Generate => commands::identity::generate()?,
             IdentityAction::Show => commands::identity::show()?,
+        },
+        Commands::Moon { action } => match action {
+            MoonAction::Generate {
+                identity,
+                endpoints,
+                output,
+                moon_id,
+            } => commands::moon::generate(
+                &identity,
+                &endpoints,
+                output.as_deref(),
+                moon_id.as_deref(),
+            )?,
         },
         Commands::Orbit { moon_id } => {
             commands::orbit::run(&auth_token, cli.port, &moon_id, true).await?

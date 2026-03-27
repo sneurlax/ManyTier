@@ -1,6 +1,7 @@
 pub mod identity;
 pub mod join;
 pub mod leave;
+pub mod moon;
 pub mod networks;
 pub mod orbit;
 pub mod peers;

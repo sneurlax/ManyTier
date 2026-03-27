@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 
 pub mod auth;
 pub mod controller;
+pub mod moon;
 pub mod network;
 pub mod peer;
 pub mod status;
@@ -23,6 +24,8 @@ pub struct AppState {
     pub auth_token: String,
     pub controller:
         Option<Arc<Mutex<zerotier_node::controller::engine::Controller<SqliteStorage>>>>,
+    /// Service data directory; the moon handlers read `{data_dir}/moons.d/`.
+    pub data_dir: String,
 }
 
 /// Build the axum router with all service API routes and auth middleware.
@@ -44,6 +47,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/network/:id",
             axum::routing::post(network::join_network).delete(network::leave_network),
+        )
+        .route("/moon", axum::routing::get(moon::list_moons))
+        .route(
+            "/moon/:id",
+            axum::routing::post(moon::orbit_moon).delete(moon::deorbit_moon),
         )
         .nest("/controller", controller::controller_routes())
         .layer(middleware::from_fn_with_state(
