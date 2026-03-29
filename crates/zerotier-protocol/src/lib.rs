@@ -1,3 +1,10 @@
+//! ZeroTier V1 wire-format types and protocol definitions.
+//!
+//! `no_std` parsing and serialization for the V1 protocol: packet and
+//! fragment headers, verb payloads, dictionary encoding, identity wire
+//! format, `InetAddress` serialization, and world (planet/moon) files.
+//! All layouts are byte-for-byte compatible with official ZeroTier.
+
 #![no_std]
 
 extern crate alloc;

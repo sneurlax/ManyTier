@@ -1,3 +1,11 @@
+//! Cryptographic primitives for the ZeroTier V1 protocol.
+//!
+//! Pure-Rust, `no_std` implementations of everything the wire format needs:
+//! C25519/Ed25519 identities with proof-of-work generation and validation,
+//! X25519 key agreement, Salsa20/12 packet armoring with Poly1305 MACs,
+//! AES-GMAC-SIV, and the KBKDF/memory-hard helpers used by identity PoW.
+//! All constructions match official ZeroTier byte for byte.
+
 #![no_std]
 
 extern crate alloc;

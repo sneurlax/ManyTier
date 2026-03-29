@@ -4,8 +4,13 @@ members = ["crates/*", "tests/shadow/shadow-node"]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.85.1"
 license = "MIT"
+repository = "https://git.manymath.com/sneurlax/manytier"
+homepage = "https://manytier.manymath.com"
+readme = "README.md"
+keywords = ["zerotier", "vpn", "networking", "p2p", "wasm"]
+categories = ["network-programming"]
 
 [workspace.dependencies]
 # Crypto: all no_std, WASM compatible

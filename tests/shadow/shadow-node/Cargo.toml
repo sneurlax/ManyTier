@@ -2,6 +2,8 @@
 name = "shadow-node"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+publish = false
 
 [[bin]]
 name = "shadow-node"
