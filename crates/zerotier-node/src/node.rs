@@ -1041,11 +1041,11 @@ impl Node {
             Err(_) => return,
         };
 
-        // HELLO MAC verification using DH-derived shared secret.
+        // Strict HELLO MAC verification using the DH-derived shared secret.
         // The DH key agreement between x25519_dalek and official ZeroTier C25519
-        // produces byte-identical shared secrets (verified by the
-        // cross_identity_hello_mac_verifies test). The prior "accept anyway"
-        // bypass was a carry-over from interop debugging and has been removed.
+        // produces byte-identical shared secrets (locked by the
+        // cross_identity_hello_mac_verifies test); a HELLO whose Poly1305 MAC
+        // does not verify is dropped unconditionally.
         if let Some(ref our_secret) = self.identity.secret {
             let shared_secret = zerotier_crypto::key_agreement::key_agree(
                 &our_secret.dh,
@@ -3999,7 +3999,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Strict HELLO MAC verification (bypass removal).
+    // Strict HELLO MAC verification.
     // ---------------------------------------------------------------
     // Tests:
     //  1. handle_hello_valid_mac_adds_active_peer: a well-formed HELLO
@@ -4007,8 +4007,7 @@ mod tests {
     //     peer to PeerState::Active on the controller side.
     //  2. handle_hello_tampered_mac_is_dropped: flipping a MAC byte
     //     causes handle_hello to drop the packet: the peer is NOT
-    //     promoted to Active (this test FAILED under the pre-17-11
-    //     bypass, which logged and accepted anyway).
+    //     promoted to Active.
     //  3. handle_hello_without_local_secret_drops: when the receiving
     //     Node has no identity secret, the HELLO is dropped (no peer
     //     added, no Active state).
@@ -4041,7 +4040,7 @@ mod tests {
         }
     }
 
-    fn plan_17_11_build_hello_env(seed: u64) -> (Identity, Identity, [u8; 48], Vec<u8>) {
+    fn build_hello_verification_env(seed: u64) -> (Identity, Identity, [u8; 48], Vec<u8>) {
         let mut rng = XorShift17_11(seed);
         let client = Identity::generate(&mut rng).unwrap();
         let controller = Identity::generate(&mut rng).unwrap();
@@ -4069,7 +4068,7 @@ mod tests {
 
     #[test]
     fn handle_hello_valid_mac_adds_active_peer() {
-        let (client, controller, _shared, hello_bytes) = plan_17_11_build_hello_env(42);
+        let (client, controller, _shared, hello_bytes) = build_hello_verification_env(42);
 
         let planet = make_synthetic_planet();
         let mut node = Node::new(controller, &planet, 1).unwrap();
@@ -4092,7 +4091,7 @@ mod tests {
 
     #[test]
     fn handle_hello_tampered_mac_is_dropped() {
-        let (client, controller, _shared, hello_bytes) = plan_17_11_build_hello_env(43);
+        let (client, controller, _shared, hello_bytes) = build_hello_verification_env(43);
 
         let planet = make_synthetic_planet();
         let mut node = Node::new(controller, &planet, 1).unwrap();
@@ -4106,12 +4105,11 @@ mod tests {
         node.receive_packet(&mut data, from, 2000);
 
         // Strict MAC verification MUST drop this HELLO: no peer promoted
-        // to Active. (Under the pre-17-11 bypass, the peer was promoted
-        // to Active anyway: that is the regression this test guards.)
+        // to Active.
         if let Some(peer) = node.topology.get_peer(&client_addr) {
             assert!(
                 !matches!(peer.state, PeerState::Active { .. }),
-                "peer must NOT be Active after a tampered HELLO MAC (bypass removed), got {:?}",
+                "peer must NOT be Active after a tampered HELLO MAC, got {:?}",
                 peer.state
             );
         }
@@ -4119,7 +4117,7 @@ mod tests {
 
     #[test]
     fn handle_hello_without_local_secret_drops() {
-        let (client, controller, _shared, hello_bytes) = plan_17_11_build_hello_env(44);
+        let (client, controller, _shared, hello_bytes) = build_hello_verification_env(44);
 
         // Strip the controller's secret so the DH verification path has
         // nothing to verify against; strict behavior is to drop.

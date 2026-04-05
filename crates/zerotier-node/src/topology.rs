@@ -130,12 +130,15 @@ impl Topology {
         self.peers.get_mut(address)
     }
 
-    /// Get a root peer for relaying/WHOIS (first available with paths).
+    /// Get a root peer for relaying/WHOIS.
+    ///
+    /// Returns the first known root; latency-based root selection is
+    /// out of scope for V1.
     pub fn get_root(&self) -> Option<&Peer> {
         self.roots
             .iter()
             .filter_map(|addr| self.peers.get(addr))
-            .next() // TODO: select best root by latency
+            .next()
     }
 
     /// Get a mutable reference to a root peer.
