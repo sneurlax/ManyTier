@@ -159,6 +159,11 @@ struct PendingEncryptedPacket {
 const ZT_PACKET_DECOMPRESS_CAPACITY: usize = ZT_MAX_PACKET_FRAGMENTS * 1432;
 const ZT_PENDING_ENCRYPTED_PACKET_LIMIT: usize = 32;
 const ZT_PENDING_ENCRYPTED_PACKET_TTL_MS: u64 = 30_000;
+/// Upper bound on an assembled NETWORK_CONFIG dictionary. Real-world configs
+/// (rules, routes, tags/capabilities) are at most tens of KB; this caps the
+/// `total_length` field an untrusted peer can supply before we allocate
+/// buffers for it, preventing a multi-GB allocation from one crafted chunk.
+const ZT_MAX_NETWORK_CONFIG_SIZE: usize = 1_048_576;
 
 /// The main ZeroTier VL1 node engine.
 pub struct Node {
@@ -1519,6 +1524,17 @@ impl Node {
                 chunk_len,
                 total_length,
                 "NETWORK_CONFIG chunk exceeded assembled dictionary bounds"
+            );
+            return None;
+        }
+        if total_length > ZT_MAX_NETWORK_CONFIG_SIZE {
+            tracing::warn!(
+                target: "manytier",
+                event = "network_config_total_length_rejected",
+                network_id = %format_args!("{:016x}", nc.network_id),
+                total_length,
+                max_allowed = ZT_MAX_NETWORK_CONFIG_SIZE,
+                "NETWORK_CONFIG declared total_length exceeds the maximum allowed size"
             );
             return None;
         }
@@ -3381,6 +3397,125 @@ mod tests {
             Some(Ipv4Addr::new(192, 168, 192, 11))
         );
         assert!(!network.pending_config_request);
+    }
+
+    fn chunk_payload(
+        network_id: u64,
+        config_update_id: u64,
+        total_length: u32,
+        chunk_index: u32,
+        dict_data: Vec<u8>,
+    ) -> NetworkConfigPayload {
+        NetworkConfigPayload {
+            network_id,
+            dict_data,
+            flags: Some(0),
+            config_update_id: Some(config_update_id),
+            total_length: Some(total_length),
+            chunk_index: Some(chunk_index),
+            signature_type: Some(0),
+            signature: Some(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn assemble_network_config_rejects_oversized_total_length() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let oversized = ZT_MAX_NETWORK_CONFIG_SIZE as u32 + 1;
+        let result = node.assemble_network_config(chunk_payload(
+            0x1234_5678_9abc_def0,
+            1,
+            oversized,
+            0,
+            vec![0u8; 4],
+        ));
+
+        assert!(result.is_none());
+        assert!(node.pending_network_configs.is_empty());
+    }
+
+    #[test]
+    fn assemble_network_config_rejects_zero_total_length() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let result =
+            node.assemble_network_config(chunk_payload(0x1234_5678_9abc_def0, 1, 0, 0, Vec::new()));
+
+        assert!(result.is_none());
+        assert!(node.pending_network_configs.is_empty());
+    }
+
+    #[test]
+    fn assemble_network_config_rejects_chunk_exceeding_total_length() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let result = node.assemble_network_config(chunk_payload(
+            0x1234_5678_9abc_def0,
+            1,
+            10,
+            8,
+            vec![0u8; 4],
+        ));
+
+        assert!(result.is_none());
+        assert!(node.pending_network_configs.is_empty());
+    }
+
+    #[test]
+    fn assemble_network_config_reassembles_out_of_order_chunks() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+        let network_id = 0x1234_5678_9abc_def0;
+        let data: Vec<u8> = (0u8..10).collect();
+
+        let first =
+            node.assemble_network_config(chunk_payload(network_id, 1, 10, 5, data[5..10].to_vec()));
+        assert!(first.is_none());
+        assert_eq!(node.pending_network_configs.len(), 1);
+
+        let second =
+            node.assemble_network_config(chunk_payload(network_id, 1, 10, 0, data[0..5].to_vec()));
+        let assembled = second.expect("chunks should reassemble once complete");
+        assert_eq!(assembled.dict_data, data);
+        assert!(node.pending_network_configs.is_empty());
+    }
+
+    #[test]
+    fn assemble_network_config_duplicate_chunk_does_not_overcount() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+        let network_id = 0x1234_5678_9abc_def0;
+        let data: Vec<u8> = (0u8..10).collect();
+
+        // Send the first half twice before completing with the second half.
+        for _ in 0..2 {
+            let result = node.assemble_network_config(chunk_payload(
+                network_id,
+                1,
+                10,
+                0,
+                data[0..5].to_vec(),
+            ));
+            assert!(result.is_none());
+        }
+        assert_eq!(
+            node.pending_network_configs[0].received_bytes, 5,
+            "re-receiving the same bytes must not inflate received_bytes"
+        );
+
+        let completed = node
+            .assemble_network_config(chunk_payload(network_id, 1, 10, 5, data[5..10].to_vec()))
+            .expect("chunks should reassemble once complete");
+        assert_eq!(completed.dict_data, data);
     }
 
     #[test]
