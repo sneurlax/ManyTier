@@ -7052,7 +7052,8 @@ pub mod tests {
                  Evidence origin: {}. \
                  EXPLICIT COMPROMISE: no Shadow-native PCAP coverage for official zerotier-one \
                  (Shadow netlink incompatibility). \
-                 DEFERRED: restoring full official-in-Shadow coverage is a future todo. \
+                 WON'T-FIX: restoring full official-in-Shadow coverage is blocked on Shadow's \
+                 own netlink-groups support, not ManyTier code. \
                  This is the strongest bounded host-native alternative available.",
                 EVIDENCE_HOST_NATIVE
             ),
@@ -7117,7 +7118,7 @@ pub mod tests {
         let extra_context = format!(
             "direction: official->ManyTier-controller\n\
              execution_lane: {}\n\
-             compromise: host-native-fallback (no Shadow-native PCAP; deferred todo for future phase)\n\
+             compromise: host-native-fallback (no Shadow-native PCAP; won't-fix upstream Shadow limitation)\n\
              controller_addr={}\n\
              controller_udp_port={}\n\
              official_client_addr={}\n\
@@ -7296,7 +7297,7 @@ pub mod tests {
              Execution lane: {}\n\
              Evidence origin: {}\n\
              Evidence compromise: host-native-fallback (no Shadow-native PCAP)\n\
-             Deferred: full official-in-Shadow coverage is a future todo\n\
+             Won't-fix: full official-in-Shadow coverage is blocked on Shadow's own netlink-groups support\n\
              TUN/TAP available: {}\n\
              Join/config-request evidence found: {}\n\
              Official assigned IPv4: {}\n\
@@ -7379,7 +7380,7 @@ pub mod tests {
              - ManyTier->official-controller: see test_manytier_joins_official_controller_fallback\n\
              - official->ManyTier-controller: this test\n\
              - Both directions use host-native-fallback evidence (explicit compromise)\n\
-             - Deferred: full Shadow-native coverage for official zerotier-one is a future todo"
+             - Won't-fix: full Shadow-native coverage for official zerotier-one is blocked on Shadow itself"
         );
 
         if let (Some(network_id), Some(token), Some(member_addr)) = (
