@@ -193,4 +193,20 @@ mod tests {
         let parsed = WhoisResponse::deserialize(&[]).unwrap();
         assert!(parsed.identities.is_empty());
     }
+
+    #[test]
+    fn whois_response_rejects_trailing_garbage() {
+        let id = stub_identity_with_addr([0xa0, 0xb1, 0xc2, 0xd3, 0xe4]);
+        let resp = WhoisResponse {
+            identities: alloc::vec![id],
+        };
+        let mut buf = [0u8; 256];
+        let n = resp.serialize(&mut buf);
+
+        // Append a handful of bytes that don't form a complete identity.
+        let mut data = alloc::vec::Vec::from(&buf[..n]);
+        data.extend_from_slice(&[0xff, 0xee, 0xdd]);
+
+        assert!(WhoisResponse::deserialize(&data).is_err());
+    }
 }

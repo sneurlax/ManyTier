@@ -127,4 +127,26 @@ mod tests {
     fn rendezvous_too_short() {
         assert!(RendezvousPayload::deserialize(&[0; 7]).is_err());
     }
+
+    #[test]
+    fn rendezvous_invalid_addr_len() {
+        // Header-length bytes present, but addr_len (byte 7) is neither 0, 6, nor 18.
+        let mut data = [0u8; 26];
+        data[7] = 12;
+        assert!(matches!(
+            RendezvousPayload::deserialize(&data),
+            Err(ProtocolError::InvalidPacket)
+        ));
+    }
+
+    #[test]
+    fn rendezvous_addr_len_exceeds_available_bytes() {
+        // addr_len claims a V4 address (6 bytes) follows, but only 3 bytes remain.
+        let mut data = [0u8; 11];
+        data[7] = 6;
+        assert!(matches!(
+            RendezvousPayload::deserialize(&data),
+            Err(ProtocolError::TooShort { need: 14, got: 11 })
+        ));
+    }
 }

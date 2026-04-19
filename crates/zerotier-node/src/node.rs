@@ -3691,6 +3691,106 @@ mod tests {
     }
 
     #[test]
+    fn receive_whois_mixed_known_and_unknown_addresses_answers_and_requests() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 48];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+
+        let unknown_address: [u8; 5] = [0x99, 0x88, 0x77, 0x66, 0x55];
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(node.identity.address.as_bytes());
+        payload.extend_from_slice(&unknown_address);
+
+        let packet_id = 0x2122_2324_2526_2728;
+        let mut packet = crate::vl2::build_encrypted_verb_packet(
+            packet_id,
+            &controller_address,
+            node.identity.address.as_bytes(),
+            Verb::Whois,
+            &payload,
+            &shared_secret,
+        )
+        .unwrap();
+
+        let actions = node.receive_packet(&mut packet, controller_socket, 2000);
+
+        let whois_needed = actions
+            .iter()
+            .find_map(|action| match action {
+                NodeAction::WhoisNeeded { addresses } => Some(addresses.clone()),
+                _ => None,
+            })
+            .expect("expected WhoisNeeded for the unknown address");
+        assert_eq!(whois_needed, alloc::vec![unknown_address]);
+
+        let response = actions
+            .into_iter()
+            .find_map(|action| match action {
+                NodeAction::SendTo { data, address } if address == controller_socket => Some(data),
+                _ => None,
+            })
+            .expect("expected OK(WHOIS) response for the known (self) address");
+
+        let packet = dearmor_for_test(&response, &shared_secret);
+        let ok = OkPayload::deserialize(&packet[28..]).expect("OK payload should parse");
+        match ok.sub_payload {
+            OkSubPayload::Whois { identities } => {
+                assert_eq!(identities.len(), 1);
+                assert_eq!(identities[0].address, node.identity.address);
+            }
+            other => panic!("expected WHOIS identities, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn receive_whois_with_no_addresses_emits_no_actions() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 48];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+
+        // Empty WHOIS request payload: no addresses to look up.
+        let payload: Vec<u8> = Vec::new();
+
+        let packet_id = 0x3132_3334_3536_3738;
+        let mut packet = crate::vl2::build_encrypted_verb_packet(
+            packet_id,
+            &controller_address,
+            node.identity.address.as_bytes(),
+            Verb::Whois,
+            &payload,
+            &shared_secret,
+        )
+        .unwrap();
+
+        let actions = node.receive_packet(&mut packet, controller_socket, 2000);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, NodeAction::WhoisNeeded { .. })),
+            "empty WHOIS request must not trigger a WhoisNeeded action"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, NodeAction::SendTo { .. })),
+            "empty WHOIS request must not trigger an OK(WHOIS) response"
+        );
+    }
+
+    #[test]
     fn encrypted_packet_from_unknown_source_via_root_requests_whois() {
         let id = test_identity(0x24);
         let planet = make_synthetic_planet();

@@ -142,6 +142,35 @@ mod tests {
     }
 
     #[test]
+    fn route_known_peer_with_only_relay_path_uses_root() {
+        let mut topo = Topology::new();
+        let id = make_identity(0x01);
+        let addr_bytes = *id.address.as_bytes();
+        let mut peer = Peer::new(id, false);
+        // Peer is known, but its only recorded path is non-direct (e.g. learned
+        // via a relayed HELLO), so it must not be treated as directly reachable.
+        peer.add_path("10.0.0.1:9993".parse().unwrap(), false, 1000);
+        peer.state = PeerState::new_active([0u8; 48], 10, 1000, 1000);
+        topo.peers.insert(addr_bytes, peer);
+
+        let root_id = make_identity(0xe0);
+        let root_addr = *root_id.address.as_bytes();
+        let mut root = Peer::new(root_id, true);
+        root.add_path("10.0.0.99:9993".parse().unwrap(), true, 1000);
+        topo.peers.insert(root_addr, root);
+        topo.roots.push(root_addr);
+
+        let decision = Switch::route(&topo, &addr_bytes, 1000);
+        assert_eq!(
+            decision,
+            RouteDecision::Relay {
+                root_address: "10.0.0.99:9993".parse().unwrap(),
+                dest_zt_address: addr_bytes,
+            }
+        );
+    }
+
+    #[test]
     fn route_no_root_drops() {
         let topo = Topology::new();
         let unknown_addr = [0x11, 0x22, 0x33, 0x44, 0x55];
