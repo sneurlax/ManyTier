@@ -18,6 +18,10 @@ path = "../crates/zerotier-protocol"
 [dependencies.zerotier-crypto]
 path = "../crates/zerotier-crypto"
 
+[dependencies.zerotier-node]
+path = "../crates/zerotier-node"
+default-features = false
+
 [[bin]]
 name = "packet_parser"
 path = "fuzz_targets/packet_parser.rs"
@@ -42,6 +46,13 @@ bench = false
 [[bin]]
 name = "fragment_packet"
 path = "fuzz_targets/fragment_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dictionary_parser"
+path = "fuzz_targets/dictionary_parser.rs"
 test = false
 doc = false
 bench = false
