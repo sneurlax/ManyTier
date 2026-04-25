@@ -3055,6 +3055,30 @@ mod tests {
     }
 
     #[test]
+    fn receive_packet_not_for_us_at_max_hops_is_dropped() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        // Same relay-eligible packet as `receive_packet_not_for_us_relays`, but
+        // already at the max hop count -- must be dropped, not forwarded again.
+        let mut pkt = [0u8; 64];
+        pkt[0..8].copy_from_slice(&1000u64.to_be_bytes()); // IV
+        pkt[8..13].copy_from_slice(&[0xff, 0xfe, 0xfd, 0xfc, 0xfb]); // dest = not us
+        pkt[13..18].copy_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55]); // source
+        pkt[18] = zerotier_protocol::constants::ZT_RELAY_MAX_HOPS; // already at max
+        pkt[27] = 0x01; // verb = HELLO
+
+        let from: SocketAddr = "10.0.0.1:9993".parse().unwrap();
+        let actions = node.receive_packet(&mut pkt, from, 1000);
+
+        assert!(
+            actions.is_empty(),
+            "a relayed packet already at max hops must be dropped, not forwarded: {actions:?}"
+        );
+    }
+
+    #[test]
     fn tick_returns_empty_initially() {
         let id = test_identity(0x01);
         let planet = make_synthetic_planet();
