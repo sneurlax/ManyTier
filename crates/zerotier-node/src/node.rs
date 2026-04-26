@@ -1441,8 +1441,28 @@ impl Node {
     }
 
     fn handle_network_config(&mut self, data: &[u8], _from: SocketAddr, _now_ms: u64) {
+        let source = match PacketHeader::from_bytes(data) {
+            Some(hdr) => hdr.source_address(),
+            None => return,
+        };
         let payload_data = if data.len() > 28 { &data[28..] } else { return };
         if let Ok(nc) = NetworkConfigPayload::deserialize(payload_data) {
+            // Reject configs from anyone but the network's structural controller
+            // (upstream ZeroTier derives the controller's address from the top 40
+            // bits of the network ID). Without this check, any peer with an
+            // established session could push a spoofed NETWORK_CONFIG for any
+            // network this node has joined.
+            if source != controller_address_from_network_id(nc.network_id) {
+                tracing::warn!(
+                    target: "manytier",
+                    event = "network_config_from_non_controller_rejected",
+                    network_id = %format_args!("{:016x}", nc.network_id),
+                    source = %format_args!("{:02x}{:02x}{:02x}{:02x}{:02x}",
+                        source[0], source[1], source[2], source[3], source[4]),
+                    "NETWORK_CONFIG sender does not match the network's controller address"
+                );
+                return;
+            }
             self.apply_received_network_config(nc);
         }
     }
@@ -3345,6 +3365,122 @@ mod tests {
             Some(Ipv4Addr::new(192, 168, 192, 10))
         );
         assert!(!network.pending_config_request);
+    }
+
+    fn build_network_config_packet(
+        packet_id: u64,
+        network_id: u64,
+        dest: &[u8; 5],
+        source: &[u8; 5],
+        shared_secret: &[u8; 48],
+        mtu: u16,
+    ) -> Vec<u8> {
+        let mut dict = Dictionary::new();
+        dict.add_int("mtu", mtu as u64);
+
+        let config = NetworkConfigPayload {
+            network_id,
+            dict_data: dict.serialize(),
+            flags: None,
+            config_update_id: None,
+            total_length: None,
+            chunk_index: None,
+            signature_type: None,
+            signature: None,
+        };
+        let mut config_buf = [0u8; 512];
+        let config_len = config.serialize(&mut config_buf);
+
+        crate::vl2::build_encrypted_verb_packet(
+            packet_id,
+            source,
+            dest,
+            Verb::NetworkConfig,
+            &config_buf[..config_len],
+            shared_secret,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn handle_network_config_from_controller_is_applied() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 48];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+        let network_id = network_id_for_controller(controller_address);
+        node.join_network(NetworkMembership::new(network_id, 2800));
+
+        let mut packet = build_network_config_packet(
+            0x2122_2324_2526_2728,
+            network_id,
+            node.identity.address.as_bytes(),
+            &controller_address,
+            &shared_secret,
+            1400,
+        );
+
+        let actions = node.receive_packet(&mut packet, controller_socket, 2000);
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                NodeAction::NetworkConfigured { network_id: configured, .. }
+                    if *configured == network_id
+            )),
+            "a NETWORK_CONFIG from the real controller must be applied"
+        );
+        assert_eq!(node.find_network(network_id).unwrap().mtu, 1400);
+    }
+
+    #[test]
+    fn handle_network_config_from_non_controller_is_rejected() {
+        let id = test_identity(0x01);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(id, &planet, 1).unwrap();
+
+        let controller = test_identity(0x55);
+        let controller_socket: SocketAddr = "10.0.0.55:9993".parse().unwrap();
+        let shared_secret = [0x11; 48];
+        let controller_address =
+            add_active_peer(&mut node, controller, controller_socket, shared_secret);
+        let network_id = network_id_for_controller(controller_address);
+        node.join_network(NetworkMembership::new(network_id, 2800));
+
+        // A different peer, NOT the network's controller, also has an active
+        // session with this node and attempts to push a spoofed NETWORK_CONFIG.
+        let impostor = test_identity(0x77);
+        let impostor_socket: SocketAddr = "10.0.0.77:9993".parse().unwrap();
+        let impostor_secret = [0x22; 48];
+        let impostor_address =
+            add_active_peer(&mut node, impostor, impostor_socket, impostor_secret);
+        assert_ne!(impostor_address, controller_address);
+
+        let mut packet = build_network_config_packet(
+            0x3132_3334_3536_3738,
+            network_id,
+            node.identity.address.as_bytes(),
+            &impostor_address,
+            &impostor_secret,
+            9000, // a different MTU than any legitimate config, to detect misapplication
+        );
+
+        let actions = node.receive_packet(&mut packet, impostor_socket, 2000);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, NodeAction::NetworkConfigured { .. })),
+            "a NETWORK_CONFIG from a non-controller peer must be rejected, not applied"
+        );
+        assert_ne!(
+            node.find_network(network_id).unwrap().mtu,
+            9000,
+            "the spoofed MTU must not have been applied"
+        );
     }
 
     #[test]
