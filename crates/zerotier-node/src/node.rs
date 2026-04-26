@@ -1082,6 +1082,21 @@ impl Node {
             return;
         }
 
+        // The claimed address must be the PoW-derived address of the
+        // claimed public key: otherwise a peer could pair any public key with
+        // any address of its choosing, breaking address-uniqueness guarantees
+        // (WHOIS answers, COM address binding, etc.) that a valid MAC alone
+        // does not establish.
+        if !hello.identity.validate_address() {
+            tracing::debug!(
+                target: "manytier",
+                event = "hello_address_validation_failed",
+                packet_id,
+                "HELLO identity address does not match its public key: dropping"
+            );
+            return;
+        }
+
         let source_addr_bytes = *hello.identity.address.as_bytes();
 
         // Add or update the peer
