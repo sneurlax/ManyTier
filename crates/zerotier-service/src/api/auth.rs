@@ -38,7 +38,22 @@ pub async fn auth_middleware(
     let provided = header_token.or(query_token);
 
     match provided {
-        Some(t) if t == state.auth_token => Ok(next.run(req).await),
+        Some(t) if constant_time_eq(t.as_bytes(), state.auth_token.as_bytes()) => {
+            Ok(next.run(req).await)
+        }
         _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+/// Compare two byte strings in constant time (no early exit on mismatch),
+/// to avoid leaking the auth token via a timing side channel.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
