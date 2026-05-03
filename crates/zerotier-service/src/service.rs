@@ -112,7 +112,13 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
     let planet_data = load_planet(&data_storage).await?;
 
     // 3. Create Node (identity is moved into node)
-    let initial_packet_id = clock.now_wall_ms() & 0x0000_FFFF_FFFF_FFFF;
+    // Seed the packet-ID counter from a CSPRNG, not wall-clock time: a
+    // wall-clock seed could collide with IDs already used under a still-live
+    // shared secret if the process restarts and the peer's session survives.
+    let mut seed_bytes = [0u8; 8];
+    getrandom::getrandom(&mut seed_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to get random bytes for packet-id seed: {e:?}"))?;
+    let initial_packet_id = u64::from_le_bytes(seed_bytes) & 0x0000_FFFF_FFFF_FFFF;
     let mut node = Node::new(identity, &planet_data, initial_packet_id)
         .map_err(|e| anyhow::anyhow!("failed to create node: {e}"))?;
 
