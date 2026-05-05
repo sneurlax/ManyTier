@@ -7,6 +7,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::net::SocketAddr;
+use zeroize::ZeroizeOnDrop;
 use zerotier_crypto::identity::Identity;
 use zerotier_protocol::{ZT_PATH_HELLO_RATE_LIMIT, ZT_PEER_ACTIVITY_TIMEOUT, ZT_PEER_PING_PERIOD};
 
@@ -15,7 +16,7 @@ use crate::path::Path;
 pub const HELLO_RETRY_BACKOFF_MAX_MS: u64 = 30_000;
 
 /// State machine for a peer's session lifecycle.
-#[derive(Debug)]
+#[derive(ZeroizeOnDrop)]
 pub enum PeerState {
     /// Known identity but no session yet.
     Unknown,
@@ -40,6 +41,48 @@ pub enum PeerState {
         retry_backoff_ms: u64,
         next_retry_at: u64,
     },
+}
+
+impl core::fmt::Debug for PeerState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PeerState::Unknown => f.write_str("Unknown"),
+            PeerState::HelloSent {
+                sent_at,
+                packet_id,
+                retry_backoff_ms,
+            } => f
+                .debug_struct("HelloSent")
+                .field("sent_at", sent_at)
+                .field("packet_id", packet_id)
+                .field("retry_backoff_ms", retry_backoff_ms)
+                .finish(),
+            PeerState::Active {
+                latency_ms,
+                last_receive,
+                last_send,
+                ..
+            } => f
+                .debug_struct("Active")
+                .field("shared_secret", &"[REDACTED]")
+                .field("k0", &"[REDACTED]")
+                .field("k1", &"[REDACTED]")
+                .field("latency_ms", latency_ms)
+                .field("last_receive", last_receive)
+                .field("last_send", last_send)
+                .finish(),
+            PeerState::Stale {
+                last_active,
+                retry_backoff_ms,
+                next_retry_at,
+            } => f
+                .debug_struct("Stale")
+                .field("last_active", last_active)
+                .field("retry_backoff_ms", retry_backoff_ms)
+                .field("next_retry_at", next_retry_at)
+                .finish(),
+        }
+    }
 }
 
 impl PeerState {

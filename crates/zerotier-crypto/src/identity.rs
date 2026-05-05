@@ -150,10 +150,10 @@ impl SecretKey {
 
 impl Drop for SecretKey {
     fn drop(&mut self) {
-        // StaticSecret and SigningKey handle their own zeroization via
-        // their Drop impls. No additional action needed here.
-        // This explicit Drop exists as documentation that we've considered
-        // secure cleanup of key material.
+        // StaticSecret and SigningKey zeroize themselves on drop because
+        // x25519-dalek/ed25519-dalek are built with their "zeroize" feature
+        // enabled (see the workspace Cargo.toml). No additional action needed
+        // here; this explicit Drop exists as documentation of that reliance.
     }
 }
 
