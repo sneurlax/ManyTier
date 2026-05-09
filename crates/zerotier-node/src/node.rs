@@ -1203,6 +1203,14 @@ impl Node {
             OkSubPayload::Whois { identities } => {
                 // Add learned identities to topology and initiate HELLO
                 for id in identities {
+                    if !id.validate_address() {
+                        tracing::debug!(
+                            target: "manytier",
+                            event = "whois_address_validation_failed",
+                            "WHOIS-resolved identity address does not match its public key: dropping"
+                        );
+                        continue;
+                    }
                     let addr_bytes = *id.address.as_bytes();
                     tracing::info!(
                         target: "manytier",
