@@ -332,6 +332,26 @@ impl World {
 
         pos
     }
+
+    /// Verify this world's signature against the Ed25519 verifying key it
+    /// embeds in `signing_key[32..64]`.
+    ///
+    /// This proves the world file is internally self-consistent (the
+    /// signature matches the embedded signing key over the signed portion)
+    /// and hasn't been corrupted or substituted in transit: it does not by
+    /// itself prove the embedded key is one the operator has chosen to trust
+    /// (that requires out-of-band key pinning, which is a separate concern).
+    pub fn verify_signature(&self) -> Result<(), ProtocolError> {
+        let verifying_key_bytes: [u8; 32] = self.signing_key[32..64]
+            .try_into()
+            .map_err(|_| ProtocolError::InvalidPacket)?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&verifying_key_bytes)
+            .map_err(|_| ProtocolError::InvalidPacket)?;
+        let mut buf = [0u8; 4096];
+        let len = self.signed_portion(&mut buf);
+        zerotier_crypto::signing::verify(&verifying_key, &buf[..len], &self.signature)
+            .map_err(ProtocolError::CryptoError)
+    }
 }
 
 #[cfg(test)]

@@ -117,7 +117,7 @@ pub fn handle_frame(
     };
 
     // Verify sender's COM
-    let has_valid_com = has_peer_com(network, sender_address);
+    let has_valid_com = has_peer_com(node, network.network_id, sender_address);
     if !has_valid_com {
         // No valid COM -- would send ERROR_NEED_MEMBERSHIP_CERTIFICATE in a full impl.
         // For now, just drop.
@@ -159,7 +159,7 @@ pub fn handle_ext_frame(
     };
 
     // Verify sender's COM
-    let has_valid_com = has_peer_com(network, sender_address);
+    let has_valid_com = has_peer_com(node, network.network_id, sender_address);
     if !has_valid_com {
         // No valid COM -- would send ERROR_NEED_MEMBERSHIP_CERTIFICATE
         return;
@@ -302,7 +302,7 @@ pub fn handle_multicast_frame(
     };
 
     // Verify sender's COM
-    let has_valid_com = has_peer_com(network, sender_address);
+    let has_valid_com = has_peer_com(node, network.network_id, sender_address);
     if !has_valid_com {
         return;
     }
@@ -504,18 +504,33 @@ pub fn process_outbound_frame(
 }
 
 /// Check if a peer has a valid COM stored in the network's peer_coms list,
-/// and if so verify it against our own COM.
-fn has_peer_com(network: &crate::network::NetworkMembership, peer_address: &[u8; 5]) -> bool {
+/// and if so verify it against our own COM and the network's actual
+/// controller signing key (resolved via `node`'s topology).
+fn has_peer_com(node: &Node, network_id: u64, peer_address: &[u8; 5]) -> bool {
+    let network = match node.find_network(network_id) {
+        Some(n) => n,
+        None => return false,
+    };
     // Find the peer's COM in the network's stored COMs
-    if let Some((_, peer_com)) = network
+    let peer_com = match network
         .peer_coms
         .iter()
         .find(|(addr, _)| addr == peer_address)
     {
-        network.verify_peer_com(peer_address, peer_com)
-    } else {
-        false
-    }
+        Some((_, com)) => com,
+        None => return false,
+    };
+    let controller_address = crate::node::controller_address_from_network_id(network_id);
+    let controller_verifying_key = node
+        .topology
+        .get_peer(&controller_address)
+        .and_then(|p| ed25519_dalek::VerifyingKey::from_bytes(&p.identity.public_key.signing).ok());
+    network.verify_peer_com(
+        peer_address,
+        peer_com,
+        &controller_address,
+        controller_verifying_key.as_ref(),
+    )
 }
 
 #[cfg(test)]
@@ -530,50 +545,56 @@ mod tests {
     use core::net::{Ipv4Addr, SocketAddr};
     use zerotier_crypto::identity::{Address, Identity, PublicKey};
     use zerotier_protocol::inet_address::InetAddress;
-    use zerotier_protocol::verbs::network_config::{CertificateOfMembership, ComQualifier};
-    use zerotier_protocol::world::{World, WorldRoot, WorldType};
+    use zerotier_protocol::world::WorldRoot;
 
-    fn make_network_with_com(network_id: u64) -> NetworkMembership {
+    /// Build a Node with a joined network whose `our_com` is signed by a real
+    /// Ed25519 key, and register that key's identity as the network's
+    /// resolved controller peer -- matching what `has_peer_com` needs to
+    /// verify a peer's COM signature.
+    fn make_node_with_com(network_id: u64) -> (Node, ed25519_dalek::SigningKey, [u8; 5]) {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x55; 32]);
+        let planet = make_synthetic_planet();
+        let mut node = Node::new(test_identity(0x01), &planet, 1).unwrap();
+
+        let controller_address = crate::node::controller_address_from_network_id(network_id);
+        let mut controller_pk_bytes = [0u8; 64];
+        controller_pk_bytes[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        let controller_identity = Identity {
+            address: Address::new(controller_address).unwrap(),
+            public_key: PublicKey::from_bytes(&controller_pk_bytes).unwrap(),
+            secret: None,
+        };
+        node.topology.add_peer(controller_identity);
+
+        let our_com = crate::controller::engine::build_signed_com(
+            &signing_key,
+            &controller_address,
+            network_id,
+            0,
+            1000,
+        );
         let mut net = NetworkMembership::new(network_id, 2800);
-        // Set up a COM for our node
-        net.our_com = Some(CertificateOfMembership {
-            issued_to: [0; 5],
-            qualifiers: vec![
-                ComQualifier {
-                    id: 0,
-                    value: 1000,
-                    max_delta: 100,
-                },
-                ComQualifier {
-                    id: 1,
-                    value: network_id,
-                    max_delta: 0,
-                },
-            ],
-            signer_address: [0; 5],
-            signature: [0; 96],
-        });
-        net
+        net.our_com = Some(our_com);
+        node.networks.push(net);
+
+        (node, signing_key, controller_address)
     }
 
-    fn add_peer_com(net: &mut NetworkMembership, peer_addr: &[u8; 5]) {
-        let com = CertificateOfMembership {
-            issued_to: [0; 5],
-            qualifiers: vec![
-                ComQualifier {
-                    id: 0,
-                    value: 1050,
-                    max_delta: 100,
-                },
-                ComQualifier {
-                    id: 1,
-                    value: net.network_id,
-                    max_delta: 0,
-                },
-            ],
-            signer_address: [0; 5],
-            signature: [0; 96],
-        };
+    fn add_peer_com(
+        node: &mut Node,
+        network_id: u64,
+        signing_key: &ed25519_dalek::SigningKey,
+        controller_address: &[u8; 5],
+        peer_addr: &[u8; 5],
+    ) {
+        let com = crate::controller::engine::build_signed_com(
+            signing_key,
+            controller_address,
+            network_id,
+            0,
+            1050,
+        );
+        let net = node.find_network_mut(network_id).unwrap();
         net.peer_coms.push((*peer_addr, com));
     }
 
@@ -593,24 +614,22 @@ mod tests {
 
     fn make_synthetic_planet() -> Vec<u8> {
         let root_id = test_identity(0xe0);
-        let world = World {
-            world_type: WorldType::Planet,
-            id: 149604618,
-            timestamp: 1000000,
-            signing_key: [0xAA; 64],
-            signature: [0xBB; 96],
-            roots: alloc::vec![WorldRoot {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut public_key_bytes = [0u8; 64];
+        public_key_bytes[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        crate::controller::world_gen::generate_planet(
+            149604618,
+            1000000,
+            alloc::vec![WorldRoot {
                 identity: root_id,
                 endpoints: alloc::vec![InetAddress::V4 {
                     ip: [192, 168, 1, 1],
                     port: 9993,
                 }],
             }],
-            dict_data: None,
-        };
-        let mut buf = [0u8; 2048];
-        let n = world.serialize(&mut buf).unwrap();
-        buf[..n].to_vec()
+            &signing_key,
+            &public_key_bytes,
+        )
     }
 
     #[test]
@@ -633,13 +652,18 @@ mod tests {
         let mut buf = [0u8; 256];
         let n = ext.serialize(&mut buf);
 
-        // We need a Node, but Node::new requires planet data.
         // Test the has_peer_com helper and parsing logic directly.
-        let mut net = make_network_with_com(network_id);
-        add_peer_com(&mut net, &sender);
+        let (mut node, signing_key, controller_address) = make_node_with_com(network_id);
+        add_peer_com(
+            &mut node,
+            network_id,
+            &signing_key,
+            &controller_address,
+            &sender,
+        );
 
         // Verify COM check works
-        assert!(has_peer_com(&net, &sender));
+        assert!(has_peer_com(&node, network_id, &sender));
 
         // Verify parsing works
         let parsed = ExtFramePayload::parse(&buf[..n]).unwrap();
@@ -652,9 +676,9 @@ mod tests {
         let network_id = 0xff00000000abcdef_u64;
         let sender = [0x0a, 0x0b, 0x0c, 0x0d, 0x0e];
 
-        let net = make_network_with_com(network_id);
+        let (node, _signing_key, _controller_address) = make_node_with_com(network_id);
         // No peer COM added for sender
-        assert!(!has_peer_com(&net, &sender));
+        assert!(!has_peer_com(&node, network_id, &sender));
     }
 
     #[test]

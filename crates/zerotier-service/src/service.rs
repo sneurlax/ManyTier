@@ -125,12 +125,21 @@ pub async fn run_service(config: ServiceConfig) -> anyhow::Result<()> {
     // 3.5 Load moons from {data-dir}/moons.d/ so their roots join the
     // topology before bootstrap HELLOs go out.
     for moon in load_moons(&config.data_dir) {
+        let moon_id = moon.id;
+        let root_count = moon.roots.len();
+        if let Err(e) = node.topology.load_moon(moon) {
+            tracing::warn!(
+                moon = %format!("{:016x}", moon_id),
+                error = %e,
+                "rejected moon from moons.d: signature does not verify"
+            );
+            continue;
+        }
         tracing::info!(
-            moon = %format!("{:016x}", moon.id),
-            roots = moon.roots.len(),
+            moon = %format!("{:016x}", moon_id),
+            roots = root_count,
             "loaded moon from moons.d"
         );
-        node.topology.load_moon(moon);
     }
 
     let node = Arc::new(Mutex::new(node));

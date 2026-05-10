@@ -196,7 +196,7 @@ impl Node {
     ) -> Result<Self, ProtocolError> {
         let planet = zerotier_protocol::world::World::deserialize(planet_data)?;
         let mut topology = Topology::new();
-        topology.load_planet(planet);
+        topology.load_planet(planet)?;
 
         Ok(Node {
             root_manager: RootManager::new(),
@@ -2842,7 +2842,7 @@ fn inet_v6_from_bytes(data: &[u8]) -> Option<(Option<(Ipv6Addr, u8)>, usize)> {
     }
 }
 
-fn controller_address_from_network_id(network_id: u64) -> [u8; 5] {
+pub(crate) fn controller_address_from_network_id(network_id: u64) -> [u8; 5] {
     let controller = network_id >> 24;
     [
         ((controller >> 32) & 0xFF) as u8,
@@ -2880,7 +2880,7 @@ mod tests {
     use zerotier_protocol::verbs::network_config::{
         CertificateOfMembership, ComQualifier, NetworkConfigPayload, NetworkConfigRequestPayload,
     };
-    use zerotier_protocol::world::{World, WorldRoot, WorldType};
+    use zerotier_protocol::world::WorldRoot;
 
     fn test_identity(addr_byte: u8) -> Identity {
         let address = Address::new([0xa0, 0xb1, 0xc2, 0xd3, addr_byte]).unwrap();
@@ -2898,24 +2898,22 @@ mod tests {
 
     fn make_synthetic_planet() -> Vec<u8> {
         let root_id = test_identity(0xe0);
-        let world = World {
-            world_type: WorldType::Planet,
-            id: 149604618,
-            timestamp: 1000000,
-            signing_key: [0xAA; 64],
-            signature: [0xBB; 96],
-            roots: alloc::vec![WorldRoot {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut public_key_bytes = [0u8; 64];
+        public_key_bytes[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        crate::controller::world_gen::generate_planet(
+            149604618,
+            1000000,
+            alloc::vec![WorldRoot {
                 identity: root_id,
                 endpoints: alloc::vec![InetAddress::V4 {
                     ip: [192, 168, 1, 1],
                     port: 9993,
                 }],
             }],
-            dict_data: None,
-        };
-        let mut buf = [0u8; 2048];
-        let n = world.serialize(&mut buf).unwrap();
-        buf[..n].to_vec()
+            &signing_key,
+            &public_key_bytes,
+        )
     }
 
     fn add_active_peer(

@@ -16,3 +16,4 @@ zerotier-crypto = { workspace = true }
 zerocopy = { workspace = true }
 thiserror = { workspace = true }
 hashbrown = { workspace = true }
+ed25519-dalek = { workspace = true }

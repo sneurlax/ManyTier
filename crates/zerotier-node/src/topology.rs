@@ -41,7 +41,12 @@ impl Topology {
     }
 
     /// Load a planet file and populate root peers with their endpoints.
-    pub fn load_planet(&mut self, world: World) {
+    ///
+    /// Rejects (without side effects) a world whose signature does not
+    /// verify against its own embedded signing key -- see
+    /// `World::verify_signature`.
+    pub fn load_planet(&mut self, world: World) -> Result<(), zerotier_protocol::ProtocolError> {
+        world.verify_signature()?;
         for root in &world.roots {
             let addr_bytes = *root.identity.address.as_bytes();
             if !self.roots.contains(&addr_bytes) {
@@ -64,10 +69,15 @@ impl Topology {
             self.peers.insert(addr_bytes, peer);
         }
         self.planet = Some(world);
+        Ok(())
     }
 
     /// Load a moon and add its roots as additional root servers.
-    pub fn load_moon(&mut self, moon: World) {
+    ///
+    /// Rejects (without side effects) a moon whose signature does not verify
+    /// against its own embedded signing key -- see `World::verify_signature`.
+    pub fn load_moon(&mut self, moon: World) -> Result<(), zerotier_protocol::ProtocolError> {
+        moon.verify_signature()?;
         for root in &moon.roots {
             let addr_bytes = *root.identity.address.as_bytes();
             if !self.roots.contains(&addr_bytes) {
@@ -89,6 +99,7 @@ impl Topology {
             self.peers.insert(addr_bytes, peer);
         }
         self.moons.push(moon);
+        Ok(())
     }
 
     /// Unload a moon by world ID, removing its roots from the root set.
@@ -178,23 +189,50 @@ mod tests {
         }
     }
 
+    /// Build a self-consistently-signed test world so `verify_signature` (and
+    /// therefore `Topology::load_planet`/`load_moon`) accepts it.
+    fn signed_test_world(
+        world_type: WorldType,
+        id: u64,
+        timestamp: u64,
+        roots: alloc::vec::Vec<WorldRoot>,
+    ) -> World {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let mut public_key_bytes = [0u8; 64];
+        public_key_bytes[32..].copy_from_slice(signing_key.verifying_key().as_bytes());
+        let bytes = match world_type {
+            WorldType::Moon => crate::controller::world_gen::generate_moon(
+                id,
+                timestamp,
+                roots,
+                &signing_key,
+                &public_key_bytes,
+            ),
+            _ => crate::controller::world_gen::generate_planet(
+                id,
+                timestamp,
+                roots,
+                &signing_key,
+                &public_key_bytes,
+            ),
+        };
+        World::deserialize(&bytes).expect("generated test world should deserialize")
+    }
+
     fn stub_world() -> World {
         let root_id = build_test_identity(0xe0);
-        World {
-            world_type: WorldType::Planet,
-            id: 149604618,
-            timestamp: 1000000,
-            signing_key: [0xAA; 64],
-            signature: [0xBB; 96],
-            roots: alloc::vec![WorldRoot {
+        signed_test_world(
+            WorldType::Planet,
+            149604618,
+            1000000,
+            alloc::vec![WorldRoot {
                 identity: root_id,
                 endpoints: alloc::vec![InetAddress::V4 {
                     ip: [192, 168, 1, 1],
                     port: 9993,
                 }],
             }],
-            dict_data: None,
-        }
+        )
     }
 
     #[test]
@@ -209,7 +247,7 @@ mod tests {
     fn load_planet_adds_roots() {
         let mut topo = Topology::new();
         let world = stub_world();
-        topo.load_planet(world);
+        topo.load_planet(world).unwrap();
 
         assert_eq!(topo.roots.len(), 1);
         assert_eq!(topo.peers.len(), 1);
@@ -224,7 +262,7 @@ mod tests {
     #[test]
     fn get_root_returns_root_peer() {
         let mut topo = Topology::new();
-        topo.load_planet(stub_world());
+        topo.load_planet(stub_world()).unwrap();
         assert!(topo.get_root().is_some());
         assert!(topo.get_root().unwrap().is_root);
     }
@@ -255,28 +293,25 @@ mod tests {
     #[test]
     fn load_and_unload_moon_roundtrips() {
         let mut topo = Topology::new();
-        topo.load_planet(stub_world());
+        topo.load_planet(stub_world()).unwrap();
         let planet_roots = topo.roots.len();
 
         let moon_root = build_test_identity(0x99);
         let moon_root_addr = *moon_root.address.as_bytes();
-        let moon = World {
-            world_type: WorldType::Moon,
-            id: 0x0000_a0b1_c2d3_0099,
-            timestamp: 2000000,
-            signing_key: [0xCC; 64],
-            signature: [0xDD; 96],
-            roots: alloc::vec![WorldRoot {
+        let moon = signed_test_world(
+            WorldType::Moon,
+            0x0000_a0b1_c2d3_0099,
+            2000000,
+            alloc::vec![WorldRoot {
                 identity: moon_root,
                 endpoints: alloc::vec![InetAddress::V4 {
                     ip: [10, 0, 0, 9],
                     port: 9993,
                 }],
             }],
-            dict_data: Some(alloc::vec![]),
-        };
+        );
 
-        topo.load_moon(moon);
+        topo.load_moon(moon).unwrap();
         assert_eq!(topo.moons.len(), 1);
         assert_eq!(topo.roots.len(), planet_roots + 1);
         assert!(topo.roots.contains(&moon_root_addr));

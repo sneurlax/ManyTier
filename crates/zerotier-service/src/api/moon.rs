@@ -84,13 +84,15 @@ pub async fn orbit_moon(
         return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    let response = world_to_response(&world);
+    node.topology
+        .load_moon(world)
+        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
     tracing::info!(
         moon = %format!("{:016x}", moon_id),
-        roots = world.roots.len(),
+        roots = response.roots.len(),
         "orbiting moon"
     );
-    let response = world_to_response(&world);
-    node.topology.load_moon(world);
     Ok(Json(response))
 }
 

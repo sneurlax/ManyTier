@@ -96,18 +96,38 @@ impl NetworkMembership {
         ethernet::derive_mac(our_zt_address, self.network_id)
     }
 
-    /// Verify a peer's COM against our own COM using agrees_with.
+    /// Verify a peer's COM: qualifiers must agree with our own COM (same
+    /// network, timestamp within tolerance) AND the COM's Ed25519 signature
+    /// must verify against the network's actual controller key, with
+    /// `signer_address` matching the network's structural controller
+    /// address. Qualifier agreement alone only proves the peer *constructed*
+    /// a COM that happens to match our expectations, not that the network
+    /// controller ever issued it.
     ///
-    /// Returns false if we have no COM of our own.
+    /// `controller_verifying_key` is `None` when the controller's identity
+    /// hasn't been resolved yet (e.g. no HELLO/WHOIS exchange with it yet) --
+    /// in that case the COM is rejected rather than trusted on qualifiers
+    /// alone.
     pub fn verify_peer_com(
         &self,
         _peer_address: &[u8; 5],
         peer_com: &CertificateOfMembership,
+        controller_address: &[u8; 5],
+        controller_verifying_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> bool {
-        match &self.our_com {
-            Some(our) => peer_com_agrees_with(our, peer_com),
-            None => false,
+        let our = match &self.our_com {
+            Some(our) => our,
+            None => return false,
+        };
+        if !peer_com_agrees_with(our, peer_com) {
+            return false;
         }
+        let verifying_key = match controller_verifying_key {
+            Some(key) => key,
+            None => return false,
+        };
+        peer_com.signer_address == *controller_address
+            && com_verify_signature(peer_com, verifying_key)
     }
 
     pub fn our_com_timestamp_qualifier(&self) -> Option<&ComQualifier> {
@@ -217,6 +237,30 @@ mod tests {
             qualifiers,
             signer_address: [0; 5],
             signature: [0; 96],
+        }
+    }
+
+    /// Build a COM signed by `signing_key`, matching the wire format
+    /// `com_verify_signature` checks (qualifiers sorted by ID ascending).
+    fn signed_com(
+        signing_key: &ed25519_dalek::SigningKey,
+        signer_address: [u8; 5],
+        qualifiers: Vec<ComQualifier>,
+    ) -> CertificateOfMembership {
+        let mut sorted = qualifiers.clone();
+        sorted.sort_by_key(|q| q.id);
+        let mut signed_data = Vec::with_capacity(sorted.len() * 24);
+        for q in &sorted {
+            signed_data.extend_from_slice(&q.id.to_be_bytes());
+            signed_data.extend_from_slice(&q.value.to_be_bytes());
+            signed_data.extend_from_slice(&q.max_delta.to_be_bytes());
+        }
+        let signature = zerotier_crypto::signing::sign(signing_key, &signed_data);
+        CertificateOfMembership {
+            issued_to: [0; 5],
+            qualifiers,
+            signer_address,
+            signature,
         }
     }
 
@@ -572,77 +616,166 @@ mod tests {
             value: 1000,
             max_delta: 100,
         }]);
-        assert!(!net.verify_peer_com(&[0x01; 5], &peer_com));
+        assert!(!net.verify_peer_com(&[0x01; 5], &peer_com, &[0; 5], None));
     }
 
     #[test]
     fn verify_peer_com_with_matching_com() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let controller_address = [0xc0, 0xc1, 0xc2, 0xc3, 0xc4];
+
         let mut net = NetworkMembership::new(0xff00000000abcdef, 2800);
-        net.our_com = Some(make_com(vec![
-            ComQualifier {
-                id: 0,
-                value: 1000,
-                max_delta: 100,
-            },
-            ComQualifier {
-                id: 1,
-                value: 0xff,
-                max_delta: 0,
-            },
-        ]));
-        let peer_com = make_com(vec![
-            ComQualifier {
-                id: 0,
-                value: 1050,
-                max_delta: 100,
-            },
-            ComQualifier {
-                id: 1,
-                value: 0xff,
-                max_delta: 0,
-            },
-        ]);
-        assert!(net.verify_peer_com(&[0x01; 5], &peer_com));
+        net.our_com = Some(signed_com(
+            &signing_key,
+            controller_address,
+            vec![
+                ComQualifier {
+                    id: 0,
+                    value: 1000,
+                    max_delta: 100,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 0xff,
+                    max_delta: 0,
+                },
+            ],
+        ));
+        let peer_com = signed_com(
+            &signing_key,
+            controller_address,
+            vec![
+                ComQualifier {
+                    id: 0,
+                    value: 1050,
+                    max_delta: 100,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 0xff,
+                    max_delta: 0,
+                },
+            ],
+        );
+        assert!(net.verify_peer_com(
+            &[0x01; 5],
+            &peer_com,
+            &controller_address,
+            Some(&verifying_key)
+        ));
+
+        // Same qualifiers, but signed by a different key: signature no longer
+        // matches, so it must be rejected even though qualifiers agree.
+        let other_key = ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]);
+        let forged_com = signed_com(
+            &other_key,
+            controller_address,
+            vec![
+                ComQualifier {
+                    id: 0,
+                    value: 1050,
+                    max_delta: 100,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 0xff,
+                    max_delta: 0,
+                },
+            ],
+        );
+        assert!(!net.verify_peer_com(
+            &[0x01; 5],
+            &forged_com,
+            &controller_address,
+            Some(&verifying_key)
+        ));
+
+        // Same qualifiers and correctly signed, but claiming a signer address
+        // that doesn't match the network's actual controller address.
+        let wrong_signer_com = signed_com(
+            &signing_key,
+            [0x99; 5],
+            vec![
+                ComQualifier {
+                    id: 0,
+                    value: 1050,
+                    max_delta: 100,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 0xff,
+                    max_delta: 0,
+                },
+            ],
+        );
+        assert!(!net.verify_peer_com(
+            &[0x01; 5],
+            &wrong_signer_com,
+            &controller_address,
+            Some(&verifying_key)
+        ));
+
+        // Qualifiers agree and signature verifies, but the controller's
+        // identity hasn't been resolved yet -- must fail closed.
+        assert!(!net.verify_peer_com(&[0x01; 5], &peer_com, &controller_address, None));
     }
 
     #[test]
     fn verify_peer_com_ignores_issued_to_qualifier() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x33; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let controller_address = [0xc0, 0xc1, 0xc2, 0xc3, 0xc4];
+
         let mut net = NetworkMembership::new(0xff00000000abcdef, 2800);
-        net.our_com = Some(make_com(vec![
-            ComQualifier {
-                id: 0,
-                value: 1000,
-                max_delta: 100,
-            },
-            ComQualifier {
-                id: 1,
-                value: 0xff00000000abcdef,
-                max_delta: 0,
-            },
-            ComQualifier {
-                id: 2,
-                value: 0x00a0b1c2d3e4,
-                max_delta: 0,
-            },
-        ]));
-        let peer_com = make_com(vec![
-            ComQualifier {
-                id: 0,
-                value: 1050,
-                max_delta: 100,
-            },
-            ComQualifier {
-                id: 1,
-                value: 0xff00000000abcdef,
-                max_delta: 0,
-            },
-            ComQualifier {
-                id: 2,
-                value: 0x00f0e1d2c3b4,
-                max_delta: 0,
-            },
-        ]);
-        assert!(net.verify_peer_com(&[0x01; 5], &peer_com));
+        net.our_com = Some(signed_com(
+            &signing_key,
+            controller_address,
+            vec![
+                ComQualifier {
+                    id: 0,
+                    value: 1000,
+                    max_delta: 100,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 0xff00000000abcdef,
+                    max_delta: 0,
+                },
+                ComQualifier {
+                    id: 2,
+                    value: 0x00a0b1c2d3e4,
+                    max_delta: 0,
+                },
+            ],
+        ));
+        let peer_com = signed_com(
+            &signing_key,
+            controller_address,
+            vec![
+                ComQualifier {
+                    id: 0,
+                    value: 1050,
+                    max_delta: 100,
+                },
+                ComQualifier {
+                    id: 1,
+                    value: 0xff00000000abcdef,
+                    max_delta: 0,
+                },
+                ComQualifier {
+                    id: 2,
+                    value: 0x00f0e1d2c3b4,
+                    max_delta: 0,
+                },
+            ],
+        );
+        assert!(net.verify_peer_com(
+            &[0x01; 5],
+            &peer_com,
+            &controller_address,
+            Some(&verifying_key)
+        ));
     }
 
     #[test]
