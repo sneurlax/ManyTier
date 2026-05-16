@@ -540,6 +540,22 @@ mod tests {
     }
 
     #[test]
+    fn default_planet_signature_does_not_self_verify() {
+        // The bundled default planet's `signature` is NOT expected to verify
+        // against its own embedded `signing_key`: upstream ZeroTier's
+        // `signing_key` field (`_updatesMustBeSignedBy`) names the key
+        // required to sign a FUTURE replacement world, not the key that
+        // signed this one. A genesis/bootstrap world (id != 0, but no prior
+        // world to chain from) has no self-referential verification --
+        // upstream trusts it unconditionally once bundled with the release.
+        // `verify_signature()` is still useful for a world an operator
+        // generates and embeds its own signing identity into (e.g.
+        // ManyTier's `moon generate`), which is self-referential.
+        let world = World::deserialize(DEFAULT_PLANET).unwrap();
+        assert!(world.verify_signature().is_err());
+    }
+
+    #[test]
     fn default_planet_has_4_roots() {
         let world = World::deserialize(DEFAULT_PLANET).unwrap();
         assert_eq!(world.roots.len(), 4);

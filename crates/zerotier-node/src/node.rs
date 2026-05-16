@@ -196,7 +196,7 @@ impl Node {
     ) -> Result<Self, ProtocolError> {
         let planet = zerotier_protocol::world::World::deserialize(planet_data)?;
         let mut topology = Topology::new();
-        topology.load_planet(planet)?;
+        topology.load_planet(planet);
 
         Ok(Node {
             root_manager: RootManager::new(),

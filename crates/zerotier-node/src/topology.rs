@@ -42,11 +42,13 @@ impl Topology {
 
     /// Load a planet file and populate root peers with their endpoints.
     ///
-    /// Rejects (without side effects) a world whose signature does not
-    /// verify against its own embedded signing key -- see
-    /// `World::verify_signature`.
-    pub fn load_planet(&mut self, world: World) -> Result<(), zerotier_protocol::ProtocolError> {
-        world.verify_signature()?;
+    /// The bundled default/genesis planet is trusted unconditionally,
+    /// matching upstream ZeroTier: a world's `signing_key` field names the
+    /// key required to sign a *future* replacement world
+    /// (`_updatesMustBeSignedBy`), not the key that signed this one, so
+    /// there is no self-referential signature to check for a bootstrap
+    /// world with no prior world to chain trust from.
+    pub fn load_planet(&mut self, world: World) {
         for root in &world.roots {
             let addr_bytes = *root.identity.address.as_bytes();
             if !self.roots.contains(&addr_bytes) {
@@ -69,7 +71,6 @@ impl Topology {
             self.peers.insert(addr_bytes, peer);
         }
         self.planet = Some(world);
-        Ok(())
     }
 
     /// Load a moon and add its roots as additional root servers.
@@ -190,7 +191,7 @@ mod tests {
     }
 
     /// Build a self-consistently-signed test world so `verify_signature` (and
-    /// therefore `Topology::load_planet`/`load_moon`) accepts it.
+    /// therefore `Topology::load_moon`) accepts it.
     fn signed_test_world(
         world_type: WorldType,
         id: u64,
@@ -247,7 +248,7 @@ mod tests {
     fn load_planet_adds_roots() {
         let mut topo = Topology::new();
         let world = stub_world();
-        topo.load_planet(world).unwrap();
+        topo.load_planet(world);
 
         assert_eq!(topo.roots.len(), 1);
         assert_eq!(topo.peers.len(), 1);
@@ -262,7 +263,7 @@ mod tests {
     #[test]
     fn get_root_returns_root_peer() {
         let mut topo = Topology::new();
-        topo.load_planet(stub_world()).unwrap();
+        topo.load_planet(stub_world());
         assert!(topo.get_root().is_some());
         assert!(topo.get_root().unwrap().is_root);
     }
@@ -293,7 +294,7 @@ mod tests {
     #[test]
     fn load_and_unload_moon_roundtrips() {
         let mut topo = Topology::new();
-        topo.load_planet(stub_world()).unwrap();
+        topo.load_planet(stub_world());
         let planet_roots = topo.roots.len();
 
         let moon_root = build_test_identity(0x99);
