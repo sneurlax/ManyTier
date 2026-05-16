@@ -135,6 +135,11 @@ impl<S: ControllerStorage> Controller<S> {
                     creation_time: now_ms,
                     last_seen: now_ms,
                     name: String::new(),
+                    revision: 0,
+                    last_authorized_time: 0,
+                    last_deauthorized_time: 0,
+                    active_bridge: false,
+                    no_auto_assign_ips: false,
                 };
                 self.storage
                     .upsert_member(&m)

@@ -521,11 +521,12 @@ async fn update_member(
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?
         .is_none();
 
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
     let mut member = if is_new {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
         zerotier_node::controller::types::MemberRecord {
             network_id,
             node_id,
@@ -534,6 +535,11 @@ async fn update_member(
             creation_time: now_ms,
             last_seen: now_ms,
             name: String::new(),
+            revision: 0,
+            last_authorized_time: 0,
+            last_deauthorized_time: 0,
+            active_bridge: false,
+            no_auto_assign_ips: false,
         }
     } else {
         ctrl.storage
@@ -551,8 +557,22 @@ async fn update_member(
         member.ip_assignments = ips.clone();
     }
     if let Some(authorized) = body.authorized {
+        if authorized != member.authorized {
+            if authorized {
+                member.last_authorized_time = now_ms;
+            } else {
+                member.last_deauthorized_time = now_ms;
+            }
+        }
         member.authorized = authorized;
     }
+    if let Some(active_bridge) = body.active_bridge {
+        member.active_bridge = active_bridge;
+    }
+    if let Some(no_auto_assign_ips) = body.no_auto_assign_ips {
+        member.no_auto_assign_ips = no_auto_assign_ips;
+    }
+    member.revision += 1;
 
     // Save the member first (so engine methods can find it)
     ctrl.storage
@@ -596,5 +616,16 @@ fn member_to_response(
         creation_time: member.creation_time,
         last_seen: member.last_seen,
         name: member.name.clone(),
+        revision: member.revision,
+        active_bridge: member.active_bridge,
+        no_auto_assign_ips: member.no_auto_assign_ips,
+        last_authorized_time: member.last_authorized_time,
+        last_deauthorized_time: member.last_deauthorized_time,
+        // ManyTier does not track peer protocol/version per member yet; -1 matches
+        // official ZeroTier's "unknown" sentinel for these fields.
+        v_major: -1,
+        v_minor: -1,
+        v_rev: -1,
+        v_proto: -1,
     }
 }

@@ -54,6 +54,11 @@ impl SqliteStorage {
                 creation_time INTEGER NOT NULL,
                 last_seen INTEGER NOT NULL,
                 name TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0,
+                last_authorized_time INTEGER NOT NULL DEFAULT 0,
+                last_deauthorized_time INTEGER NOT NULL DEFAULT 0,
+                active_bridge INTEGER NOT NULL DEFAULT 0,
+                no_auto_assign_ips INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (network_id, node_id)
             );
             CREATE TABLE IF NOT EXISTS ip_pools (
@@ -69,9 +74,40 @@ impl SqliteStorage {
                 PRIMARY KEY (network_id, target)
             );",
         )?;
+        Self::migrate_members_table(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Add columns introduced after the initial `members` table shape.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` only creates the table on first run, so a
+    /// pre-existing database (e.g. a live deployment's `members` table) needs
+    /// an explicit `ALTER TABLE` to pick up new columns.
+    fn migrate_members_table(conn: &Connection) -> Result<(), SqliteStorageError> {
+        let mut existing = std::collections::HashSet::new();
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                existing.insert(name);
+            }
+        }
+        let new_columns: &[(&str, &str)] = &[
+            ("revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_authorized_time", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_deauthorized_time", "INTEGER NOT NULL DEFAULT 0"),
+            ("active_bridge", "INTEGER NOT NULL DEFAULT 0"),
+            ("no_auto_assign_ips", "INTEGER NOT NULL DEFAULT 0"),
+        ];
+        for (name, decl) in new_columns {
+            if !existing.contains(*name) {
+                conn.execute(&format!("ALTER TABLE members ADD COLUMN {name} {decl}"), [])?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -202,7 +238,9 @@ impl ControllerStorage for SqliteStorage {
             let conn = conn.lock().unwrap();
             let mut stmt = conn.prepare(
                 "SELECT network_id, node_id, authorized, ip_assignments, creation_time, \
-                 last_seen, name FROM members WHERE network_id = ?1 AND node_id = ?2",
+                 last_seen, name, revision, last_authorized_time, last_deauthorized_time, \
+                 active_bridge, no_auto_assign_ips \
+                 FROM members WHERE network_id = ?1 AND node_id = ?2",
             )?;
             let result = stmt.query_row(params![network_id as i64, node_id.as_slice()], |row| {
                 let node_blob: Vec<u8> = row.get(1)?;
@@ -217,10 +255,28 @@ impl ControllerStorage for SqliteStorage {
                     row.get::<_, i64>(4)? as u64,
                     row.get::<_, i64>(5)? as u64,
                     row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)? as u64,
+                    row.get::<_, i64>(8)? as u64,
+                    row.get::<_, i64>(9)? as u64,
+                    row.get::<_, i32>(10)? != 0,
+                    row.get::<_, i32>(11)? != 0,
                 ))
             });
             match result {
-                Ok((nw_id, nid, authorized, ip_json, creation_time, last_seen, name)) => {
+                Ok((
+                    nw_id,
+                    nid,
+                    authorized,
+                    ip_json,
+                    creation_time,
+                    last_seen,
+                    name,
+                    revision,
+                    last_authorized_time,
+                    last_deauthorized_time,
+                    active_bridge,
+                    no_auto_assign_ips,
+                )) => {
                     let ip_assignments: Vec<String> = serde_json::from_str(&ip_json)?;
                     Ok(Some(MemberRecord {
                         network_id: nw_id,
@@ -230,6 +286,11 @@ impl ControllerStorage for SqliteStorage {
                         creation_time,
                         last_seen,
                         name,
+                        revision,
+                        last_authorized_time,
+                        last_deauthorized_time,
+                        active_bridge,
+                        no_auto_assign_ips,
                     }))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -247,8 +308,10 @@ impl ControllerStorage for SqliteStorage {
             let conn = conn.lock().unwrap();
             conn.execute(
                 "INSERT OR REPLACE INTO members \
-                 (network_id, node_id, authorized, ip_assignments, creation_time, last_seen, name) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (network_id, node_id, authorized, ip_assignments, creation_time, last_seen, name, \
+                  revision, last_authorized_time, last_deauthorized_time, active_bridge, \
+                  no_auto_assign_ips) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     member.network_id as i64,
                     member.node_id.as_slice(),
@@ -257,6 +320,11 @@ impl ControllerStorage for SqliteStorage {
                     member.creation_time as i64,
                     member.last_seen as i64,
                     member.name,
+                    member.revision as i64,
+                    member.last_authorized_time as i64,
+                    member.last_deauthorized_time as i64,
+                    member.active_bridge as i32,
+                    member.no_auto_assign_ips as i32,
                 ],
             )?;
             Ok(())
@@ -406,5 +474,86 @@ impl ControllerStorage for SqliteStorage {
             Ok(())
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_member(network_id: u64) -> MemberRecord {
+        MemberRecord {
+            network_id,
+            node_id: [0xa0, 0xb1, 0xc2, 0xd3, 0xe4],
+            authorized: true,
+            ip_assignments: vec![String::from("192.168.192.1/24")],
+            creation_time: 1000,
+            last_seen: 2000,
+            name: String::from("member"),
+            revision: 3,
+            last_authorized_time: 1500,
+            last_deauthorized_time: 0,
+            active_bridge: true,
+            no_auto_assign_ips: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn member_round_trips_new_fields() {
+        let storage = SqliteStorage::new(":memory:").unwrap();
+        let member = test_member(1);
+        storage.upsert_member(&member).await.unwrap();
+
+        let loaded = storage
+            .get_member(1, &member.node_id)
+            .await
+            .unwrap()
+            .expect("member should exist");
+
+        assert_eq!(loaded.revision, 3);
+        assert_eq!(loaded.last_authorized_time, 1500);
+        assert_eq!(loaded.last_deauthorized_time, 0);
+        assert!(loaded.active_bridge);
+        assert!(loaded.no_auto_assign_ips);
+    }
+
+    #[test]
+    fn migrate_members_table_adds_missing_columns_to_legacy_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Recreate the pre-migration members table shape (no new columns).
+        conn.execute_batch(
+            "CREATE TABLE members (
+                network_id INTEGER NOT NULL,
+                node_id BLOB NOT NULL,
+                authorized INTEGER NOT NULL,
+                ip_assignments TEXT NOT NULL,
+                creation_time INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                PRIMARY KEY (network_id, node_id)
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO members (network_id, node_id, authorized, ip_assignments, \
+             creation_time, last_seen, name) VALUES (1, X'aabbccddee', 1, '[]', 10, 20, 'n')",
+            [],
+        )
+        .unwrap();
+
+        SqliteStorage::migrate_members_table(&conn).unwrap();
+
+        let (revision, active_bridge): (i64, i32) = conn
+            .query_row(
+                "SELECT revision, active_bridge FROM members WHERE network_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, 0);
+        assert_eq!(active_bridge, 0);
+
+        // Running the migration again on an already-migrated table must not error.
+        SqliteStorage::migrate_members_table(&conn).unwrap();
     }
 }

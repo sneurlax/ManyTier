@@ -42,6 +42,16 @@ pub struct MemberRecord {
     pub creation_time: u64,
     pub last_seen: u64,
     pub name: String,
+    /// Incremented on every update; used for optimistic-concurrency-style clients.
+    pub revision: u64,
+    /// Milliseconds since epoch of the most recent authorization, or 0 if never authorized.
+    pub last_authorized_time: u64,
+    /// Milliseconds since epoch of the most recent deauthorization, or 0 if never deauthorized.
+    pub last_deauthorized_time: u64,
+    /// Whether this member acts as an active bridge for the network.
+    pub active_bridge: bool,
+    /// If true, this member does not receive IPs from the network's auto-assign pools.
+    pub no_auto_assign_ips: bool,
 }
 
 /// An IPv4 address pool for auto-assignment.

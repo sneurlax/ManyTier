@@ -375,6 +375,11 @@ mod tests {
             creation_time: 1000000,
             last_seen: 2000000,
             name: String::from("test-member"),
+            revision: 0,
+            last_authorized_time: 1000000,
+            last_deauthorized_time: 0,
+            active_bridge: false,
+            no_auto_assign_ips: false,
         }
     }
 

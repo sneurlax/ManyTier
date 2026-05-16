@@ -120,6 +120,28 @@ pub struct ControllerMemberResponse {
     #[serde(rename = "lastSeen")]
     pub last_seen: u64,
     pub name: String,
+    pub revision: u64,
+    /// Whether this member acts as an active bridge for the network.
+    #[serde(rename = "activeBridge")]
+    pub active_bridge: bool,
+    /// If true, this member does not receive IPs from the network's auto-assign pools.
+    #[serde(rename = "noAutoAssignIps")]
+    pub no_auto_assign_ips: bool,
+    /// Milliseconds since epoch of the most recent authorization, or 0 if never authorized.
+    #[serde(rename = "lastAuthorizedTime")]
+    pub last_authorized_time: u64,
+    /// Milliseconds since epoch of the most recent deauthorization, or 0 if never deauthorized.
+    #[serde(rename = "lastDeauthorizedTime")]
+    pub last_deauthorized_time: u64,
+    /// Peer protocol/version fields; -1 (unknown) until version tracking lands.
+    #[serde(rename = "vMajor")]
+    pub v_major: i32,
+    #[serde(rename = "vMinor")]
+    pub v_minor: i32,
+    #[serde(rename = "vRev")]
+    pub v_rev: i32,
+    #[serde(rename = "vProto")]
+    pub v_proto: i32,
 }
 
 /// Request body for POST /controller/network/{nwid} (partial update).
@@ -153,4 +175,10 @@ pub struct UpdateMemberRequest {
     #[serde(rename = "ipAssignments")]
     pub ip_assignments: Option<Vec<String>>,
     pub name: Option<String>,
+    /// New active-bridge setting.
+    #[serde(rename = "activeBridge")]
+    pub active_bridge: Option<bool>,
+    /// New no-auto-assign-ips setting.
+    #[serde(rename = "noAutoAssignIps")]
+    pub no_auto_assign_ips: Option<bool>,
 }
