@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+use super::rules::{Capability, Rule, Tag};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -24,8 +25,12 @@ pub struct NetworkRecord {
     pub v4_assign_mode: String,
     /// IPv6 assignment mode: "none", "zt", "6plane", "rfc4193"
     pub v6_assign_mode: String,
-    /// Raw rules binary
-    pub rules_source: Vec<u8>,
+    /// Network-wide match/action rule chain (the `R` dictionary key). Empty
+    /// means allow-all.
+    pub rules: Vec<Rule>,
+    /// Network-level capability definitions. A member gains a capability by
+    /// listing its `id` in `MemberRecord::capabilities`.
+    pub capabilities: Vec<Capability>,
     /// Whether broadcast is enabled
     pub enable_broadcast: bool,
 }
@@ -52,6 +57,10 @@ pub struct MemberRecord {
     pub active_bridge: bool,
     /// If true, this member does not receive IPs from the network's auto-assign pools.
     pub no_auto_assign_ips: bool,
+    /// IDs of network-level `Capability` definitions granted to this member.
+    pub capabilities: Vec<u32>,
+    /// Tag id/value pairs assigned to this member.
+    pub tags: Vec<Tag>,
 }
 
 /// An IPv4 address pool for auto-assignment.

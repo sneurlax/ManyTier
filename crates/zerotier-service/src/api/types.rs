@@ -81,6 +81,39 @@ pub struct ControllerNetworkResponse {
     #[serde(rename = "enableBroadcast")]
     pub enable_broadcast: bool,
     pub routes: Vec<RouteResponse>,
+    /// Network-wide match/action rule chain. Empty means allow-all.
+    ///
+    /// This is ManyTier's own rule JSON shape (`ruleType`/`not`/`or`/`value`),
+    /// not yet the official controller's per-rule-type symbolic schema (e.g.
+    /// `{"type": "ACTION_ACCEPT"}`, `{"type": "MATCH_IP_PROTOCOL", "ipProtocol": 6}`).
+    pub rules: Vec<RuleResponse>,
+    /// Network-level capability definitions.
+    pub capabilities: Vec<CapabilityResponse>,
+}
+
+/// A single match/action rule.
+#[derive(Serialize, Deserialize)]
+pub struct RuleResponse {
+    #[serde(rename = "ruleType")]
+    pub rule_type: u8,
+    pub not: bool,
+    #[serde(rename = "or")]
+    pub or_flag: bool,
+    pub value: Vec<u8>,
+}
+
+/// A network-level capability definition (id + rule chain).
+#[derive(Serialize, Deserialize)]
+pub struct CapabilityResponse {
+    pub id: u32,
+    pub rules: Vec<RuleResponse>,
+}
+
+/// A tag id/value pair assigned to a member.
+#[derive(Serialize, Deserialize)]
+pub struct TagResponse {
+    pub id: u32,
+    pub value: u32,
 }
 
 /// An IP assignment pool range.
@@ -142,6 +175,10 @@ pub struct ControllerMemberResponse {
     pub v_rev: i32,
     #[serde(rename = "vProto")]
     pub v_proto: i32,
+    /// IDs of network-level capability definitions granted to this member.
+    pub capabilities: Vec<u32>,
+    /// Tag id/value pairs assigned to this member.
+    pub tags: Vec<TagResponse>,
 }
 
 /// Request body for POST /controller/network/{nwid} (partial update).
@@ -164,6 +201,10 @@ pub struct UpdateNetworkRequest {
     /// New broadcast setting.
     #[serde(rename = "enableBroadcast")]
     pub enable_broadcast: Option<bool>,
+    /// New rule chain.
+    pub rules: Option<Vec<RuleResponse>>,
+    /// New capability definitions.
+    pub capabilities: Option<Vec<CapabilityResponse>>,
 }
 
 /// Request body for POST /controller/network/{nwid}/member/{nodeId} (partial update).
@@ -181,4 +222,8 @@ pub struct UpdateMemberRequest {
     /// New no-auto-assign-ips setting.
     #[serde(rename = "noAutoAssignIps")]
     pub no_auto_assign_ips: Option<bool>,
+    /// New set of granted capability IDs.
+    pub capabilities: Option<Vec<u32>>,
+    /// New set of assigned tag id/value pairs.
+    pub tags: Option<Vec<TagResponse>>,
 }

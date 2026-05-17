@@ -43,7 +43,8 @@ impl SqliteStorage {
                 mtu INTEGER NOT NULL,
                 v4_assign_mode TEXT NOT NULL,
                 v6_assign_mode TEXT NOT NULL,
-                rules_source BLOB NOT NULL,
+                rules_json TEXT NOT NULL DEFAULT '[]',
+                capabilities_json TEXT NOT NULL DEFAULT '[]',
                 enable_broadcast INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS members (
@@ -59,6 +60,8 @@ impl SqliteStorage {
                 last_deauthorized_time INTEGER NOT NULL DEFAULT 0,
                 active_bridge INTEGER NOT NULL DEFAULT 0,
                 no_auto_assign_ips INTEGER NOT NULL DEFAULT 0,
+                capabilities_json TEXT NOT NULL DEFAULT '[]',
+                tags_json TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (network_id, node_id)
             );
             CREATE TABLE IF NOT EXISTS ip_pools (
@@ -74,37 +77,56 @@ impl SqliteStorage {
                 PRIMARY KEY (network_id, target)
             );",
         )?;
-        Self::migrate_members_table(&conn)?;
+        Self::add_missing_columns(
+            &conn,
+            "members",
+            &[
+                ("revision", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_authorized_time", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_deauthorized_time", "INTEGER NOT NULL DEFAULT 0"),
+                ("active_bridge", "INTEGER NOT NULL DEFAULT 0"),
+                ("no_auto_assign_ips", "INTEGER NOT NULL DEFAULT 0"),
+                ("capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ],
+        )?;
+        Self::add_missing_columns(
+            &conn,
+            "networks",
+            &[
+                ("rules_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ],
+        )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
 
-    /// Add columns introduced after the initial `members` table shape.
+    /// Add columns introduced after a table's initial shape.
     ///
     /// `CREATE TABLE IF NOT EXISTS` only creates the table on first run, so a
-    /// pre-existing database (e.g. a live deployment's `members` table) needs
-    /// an explicit `ALTER TABLE` to pick up new columns.
-    fn migrate_members_table(conn: &Connection) -> Result<(), SqliteStorageError> {
+    /// pre-existing database (e.g. a live deployment's tables) needs an
+    /// explicit `ALTER TABLE` to pick up new columns. Columns from earlier
+    /// schema versions that are no longer used (e.g. the old `rules_source`
+    /// blob) are left in place rather than dropped.
+    fn add_missing_columns(
+        conn: &Connection,
+        table: &str,
+        new_columns: &[(&str, &str)],
+    ) -> Result<(), SqliteStorageError> {
         let mut existing = std::collections::HashSet::new();
         {
-            let mut stmt = conn.prepare("PRAGMA table_info(members)")?;
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let name: String = row.get(1)?;
                 existing.insert(name);
             }
         }
-        let new_columns: &[(&str, &str)] = &[
-            ("revision", "INTEGER NOT NULL DEFAULT 0"),
-            ("last_authorized_time", "INTEGER NOT NULL DEFAULT 0"),
-            ("last_deauthorized_time", "INTEGER NOT NULL DEFAULT 0"),
-            ("active_bridge", "INTEGER NOT NULL DEFAULT 0"),
-            ("no_auto_assign_ips", "INTEGER NOT NULL DEFAULT 0"),
-        ];
         for (name, decl) in new_columns {
             if !existing.contains(*name) {
-                conn.execute(&format!("ALTER TABLE members ADD COLUMN {name} {decl}"), [])?;
+                conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {name} {decl}"), [])?;
             }
         }
         Ok(())
@@ -120,26 +142,56 @@ impl ControllerStorage for SqliteStorage {
             let conn = conn.lock().unwrap();
             let mut stmt = conn.prepare(
                 "SELECT id, name, private, creation_time, revision, multicast_limit, \
-                 mtu, v4_assign_mode, v6_assign_mode, rules_source, enable_broadcast \
+                 mtu, v4_assign_mode, v6_assign_mode, rules_json, capabilities_json, \
+                 enable_broadcast \
                  FROM networks WHERE id = ?1",
             )?;
             let result = stmt.query_row(params![id as i64], |row| {
-                Ok(NetworkRecord {
-                    id: row.get::<_, i64>(0)? as u64,
-                    name: row.get(1)?,
-                    private: row.get::<_, i32>(2)? != 0,
-                    creation_time: row.get::<_, i64>(3)? as u64,
-                    revision: row.get::<_, i64>(4)? as u64,
-                    multicast_limit: row.get::<_, i32>(5)? as u32,
-                    mtu: row.get::<_, i32>(6)? as u16,
-                    v4_assign_mode: row.get(7)?,
-                    v6_assign_mode: row.get(8)?,
-                    rules_source: row.get(9)?,
-                    enable_broadcast: row.get::<_, i32>(10)? != 0,
-                })
+                let rules_json: String = row.get(9)?;
+                let capabilities_json: String = row.get(10)?;
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i32>(2)? != 0,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, i64>(4)? as u64,
+                    row.get::<_, i32>(5)? as u32,
+                    row.get::<_, i32>(6)? as u16,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    rules_json,
+                    capabilities_json,
+                    row.get::<_, i32>(11)? != 0,
+                ))
             });
             match result {
-                Ok(record) => Ok(Some(record)),
+                Ok((
+                    id,
+                    name,
+                    private,
+                    creation_time,
+                    revision,
+                    multicast_limit,
+                    mtu,
+                    v4_assign_mode,
+                    v6_assign_mode,
+                    rules_json,
+                    capabilities_json,
+                    enable_broadcast,
+                )) => Ok(Some(NetworkRecord {
+                    id,
+                    name,
+                    private,
+                    creation_time,
+                    revision,
+                    multicast_limit,
+                    mtu,
+                    v4_assign_mode,
+                    v6_assign_mode,
+                    rules: serde_json::from_str(&rules_json)?,
+                    capabilities: serde_json::from_str(&capabilities_json)?,
+                    enable_broadcast,
+                })),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(SqliteStorageError::Sqlite(e)),
             }
@@ -151,11 +203,14 @@ impl ControllerStorage for SqliteStorage {
         let network = network.clone();
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
+            let rules_json = serde_json::to_string(&network.rules)?;
+            let capabilities_json = serde_json::to_string(&network.capabilities)?;
             let conn = conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO networks (id, name, private, creation_time, revision, \
-                 multicast_limit, mtu, v4_assign_mode, v6_assign_mode, rules_source, \
-                 enable_broadcast) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 multicast_limit, mtu, v4_assign_mode, v6_assign_mode, rules_json, \
+                 capabilities_json, enable_broadcast) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     network.id as i64,
                     network.name,
@@ -166,7 +221,8 @@ impl ControllerStorage for SqliteStorage {
                     network.mtu as i32,
                     network.v4_assign_mode,
                     network.v6_assign_mode,
-                    network.rules_source,
+                    rules_json,
+                    capabilities_json,
                     network.enable_broadcast as i32,
                 ],
             )?;
@@ -179,11 +235,14 @@ impl ControllerStorage for SqliteStorage {
         let network = network.clone();
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
+            let rules_json = serde_json::to_string(&network.rules)?;
+            let capabilities_json = serde_json::to_string(&network.capabilities)?;
             let conn = conn.lock().unwrap();
             conn.execute(
                 "UPDATE networks SET name = ?2, private = ?3, creation_time = ?4, \
                  revision = ?5, multicast_limit = ?6, mtu = ?7, v4_assign_mode = ?8, \
-                 v6_assign_mode = ?9, rules_source = ?10, enable_broadcast = ?11 \
+                 v6_assign_mode = ?9, rules_json = ?10, capabilities_json = ?11, \
+                 enable_broadcast = ?12 \
                  WHERE id = ?1",
                 params![
                     network.id as i64,
@@ -195,7 +254,8 @@ impl ControllerStorage for SqliteStorage {
                     network.mtu as i32,
                     network.v4_assign_mode,
                     network.v6_assign_mode,
-                    network.rules_source,
+                    rules_json,
+                    capabilities_json,
                     network.enable_broadcast as i32,
                 ],
             )?;
@@ -239,7 +299,7 @@ impl ControllerStorage for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT network_id, node_id, authorized, ip_assignments, creation_time, \
                  last_seen, name, revision, last_authorized_time, last_deauthorized_time, \
-                 active_bridge, no_auto_assign_ips \
+                 active_bridge, no_auto_assign_ips, capabilities_json, tags_json \
                  FROM members WHERE network_id = ?1 AND node_id = ?2",
             )?;
             let result = stmt.query_row(params![network_id as i64, node_id.as_slice()], |row| {
@@ -260,6 +320,8 @@ impl ControllerStorage for SqliteStorage {
                     row.get::<_, i64>(9)? as u64,
                     row.get::<_, i32>(10)? != 0,
                     row.get::<_, i32>(11)? != 0,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
                 ))
             });
             match result {
@@ -276,6 +338,8 @@ impl ControllerStorage for SqliteStorage {
                     last_deauthorized_time,
                     active_bridge,
                     no_auto_assign_ips,
+                    capabilities_json,
+                    tags_json,
                 )) => {
                     let ip_assignments: Vec<String> = serde_json::from_str(&ip_json)?;
                     Ok(Some(MemberRecord {
@@ -291,6 +355,8 @@ impl ControllerStorage for SqliteStorage {
                         last_deauthorized_time,
                         active_bridge,
                         no_auto_assign_ips,
+                        capabilities: serde_json::from_str(&capabilities_json)?,
+                        tags: serde_json::from_str(&tags_json)?,
                     }))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -305,13 +371,15 @@ impl ControllerStorage for SqliteStorage {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let ip_json = serde_json::to_string(&member.ip_assignments)?;
+            let capabilities_json = serde_json::to_string(&member.capabilities)?;
+            let tags_json = serde_json::to_string(&member.tags)?;
             let conn = conn.lock().unwrap();
             conn.execute(
                 "INSERT OR REPLACE INTO members \
                  (network_id, node_id, authorized, ip_assignments, creation_time, last_seen, name, \
                   revision, last_authorized_time, last_deauthorized_time, active_bridge, \
-                  no_auto_assign_ips) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  no_auto_assign_ips, capabilities_json, tags_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     member.network_id as i64,
                     member.node_id.as_slice(),
@@ -325,6 +393,8 @@ impl ControllerStorage for SqliteStorage {
                     member.last_deauthorized_time as i64,
                     member.active_bridge as i32,
                     member.no_auto_assign_ips as i32,
+                    capabilities_json,
+                    tags_json,
                 ],
             )?;
             Ok(())
@@ -481,6 +551,8 @@ impl ControllerStorage for SqliteStorage {
 mod tests {
     use super::*;
 
+    use zerotier_node::controller::rules::{Capability, Rule, Tag};
+
     fn test_member(network_id: u64) -> MemberRecord {
         MemberRecord {
             network_id,
@@ -495,6 +567,8 @@ mod tests {
             last_deauthorized_time: 0,
             active_bridge: true,
             no_auto_assign_ips: true,
+            capabilities: vec![7],
+            tags: vec![Tag { id: 1, value: 42 }],
         }
     }
 
@@ -515,10 +589,46 @@ mod tests {
         assert_eq!(loaded.last_deauthorized_time, 0);
         assert!(loaded.active_bridge);
         assert!(loaded.no_auto_assign_ips);
+        assert_eq!(loaded.capabilities, vec![7]);
+        assert_eq!(loaded.tags, vec![Tag { id: 1, value: 42 }]);
+    }
+
+    #[tokio::test]
+    async fn network_round_trips_rules_and_capabilities() {
+        let storage = SqliteStorage::new(":memory:").unwrap();
+        let network = NetworkRecord {
+            id: 1,
+            name: String::from("net"),
+            private: true,
+            creation_time: 0,
+            revision: 0,
+            multicast_limit: 32,
+            mtu: 2800,
+            v4_assign_mode: String::from("zt"),
+            v6_assign_mode: String::from("none"),
+            rules: vec![Rule {
+                rule_type: 0x01,
+                not_flag: false,
+                or_flag: false,
+                value: vec![],
+            }],
+            capabilities: vec![Capability {
+                id: 5,
+                rules: vec![],
+            }],
+            enable_broadcast: true,
+        };
+        storage.create_network(&network).await.unwrap();
+
+        let loaded = storage.get_network(1).await.unwrap().expect("exists");
+        assert_eq!(loaded.rules.len(), 1);
+        assert_eq!(loaded.rules[0].rule_type, 0x01);
+        assert_eq!(loaded.capabilities.len(), 1);
+        assert_eq!(loaded.capabilities[0].id, 5);
     }
 
     #[test]
-    fn migrate_members_table_adds_missing_columns_to_legacy_schema() {
+    fn add_missing_columns_backfills_legacy_schema() {
         let conn = Connection::open_in_memory().unwrap();
         // Recreate the pre-migration members table shape (no new columns).
         conn.execute_batch(
@@ -541,19 +651,30 @@ mod tests {
         )
         .unwrap();
 
-        SqliteStorage::migrate_members_table(&conn).unwrap();
+        let columns: &[(&str, &str)] = &[
+            ("revision", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_authorized_time", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_deauthorized_time", "INTEGER NOT NULL DEFAULT 0"),
+            ("active_bridge", "INTEGER NOT NULL DEFAULT 0"),
+            ("no_auto_assign_ips", "INTEGER NOT NULL DEFAULT 0"),
+            ("capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ];
+        SqliteStorage::add_missing_columns(&conn, "members", columns).unwrap();
 
-        let (revision, active_bridge): (i64, i32) = conn
+        let (revision, active_bridge, capabilities_json): (i64, i32, String) = conn
             .query_row(
-                "SELECT revision, active_bridge FROM members WHERE network_id = 1",
+                "SELECT revision, active_bridge, capabilities_json FROM members \
+                 WHERE network_id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(revision, 0);
         assert_eq!(active_bridge, 0);
+        assert_eq!(capabilities_json, "[]");
 
         // Running the migration again on an already-migrated table must not error.
-        SqliteStorage::migrate_members_table(&conn).unwrap();
+        SqliteStorage::add_missing_columns(&conn, "members", columns).unwrap();
     }
 }

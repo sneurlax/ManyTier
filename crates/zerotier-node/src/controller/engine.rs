@@ -87,7 +87,8 @@ impl<S: ControllerStorage> Controller<S> {
             mtu: 2800,
             v4_assign_mode: String::from("zt"),
             v6_assign_mode: String::from("none"),
-            rules_source: Vec::new(),
+            rules: Vec::new(),
+            capabilities: Vec::new(),
             enable_broadcast: true,
         };
 
@@ -140,6 +141,8 @@ impl<S: ControllerStorage> Controller<S> {
                     last_deauthorized_time: 0,
                     active_bridge: false,
                     no_auto_assign_ips: false,
+                    capabilities: Vec::new(),
+                    tags: Vec::new(),
                 };
                 self.storage
                     .upsert_member(&m)
@@ -254,10 +257,41 @@ impl<S: ControllerStorage> Controller<S> {
             signature: None,
         };
 
+        // Only the capability definitions this member is actually granted are
+        // issued to it, signed with the controller's key.
+        let member_caps: Vec<super::rules::Capability> = network
+            .capabilities
+            .iter()
+            .filter(|cap| member.capabilities.contains(&cap.id))
+            .cloned()
+            .collect();
+        let capabilities_raw = if member_caps.is_empty() {
+            Vec::new()
+        } else {
+            super::rules::serialize_capabilities_signed(
+                &member_caps,
+                network_id,
+                requester,
+                now_ms,
+                &self.signing_key,
+            )
+        };
+        let tags_raw = if member.tags.is_empty() {
+            Vec::new()
+        } else {
+            super::rules::serialize_tags_signed(
+                &member.tags,
+                network_id,
+                requester,
+                now_ms,
+                &self.signing_key,
+            )
+        };
+
         let credentials = NetworkCredentialsPayload {
             com: Some(com),
-            capabilities_raw: vec![],
-            tags_raw: vec![],
+            capabilities_raw,
+            tags_raw,
             revocations_raw: vec![],
             coo_raw: vec![],
         };

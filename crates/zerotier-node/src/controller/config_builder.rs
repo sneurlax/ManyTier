@@ -67,10 +67,10 @@ pub fn build_network_config(
     dict.add_binary("C", serialize_com(com));
 
     // R: Rules binary (allow-all by default, or from network record)
-    if network.rules_source.is_empty() {
+    if network.rules.is_empty() {
         dict.add_binary("R", serialize_rules_allow_all());
     } else {
-        dict.add_binary("R", network.rules_source.clone());
+        dict.add_binary("R", super::rules::serialize_rules(&network.rules));
     }
 
     // I: IP assignments binary
@@ -361,7 +361,8 @@ mod tests {
             mtu: 2800,
             v4_assign_mode: String::from("zt"),
             v6_assign_mode: String::from("none"),
-            rules_source: Vec::new(),
+            rules: Vec::new(),
+            capabilities: Vec::new(),
             enable_broadcast: true,
         }
     }
@@ -380,6 +381,8 @@ mod tests {
             last_deauthorized_time: 0,
             active_bridge: false,
             no_auto_assign_ips: false,
+            capabilities: Vec::new(),
+            tags: Vec::new(),
         }
     }
 

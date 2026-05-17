@@ -22,8 +22,8 @@ use zerotier_node::controller::storage::ControllerStorage;
 use zerotier_node::controller::types::{IpPool, ManagedRoute};
 
 use super::types::{
-    ControllerMemberResponse, ControllerNetworkResponse, IpPoolResponse, RouteResponse,
-    UpdateMemberRequest, UpdateNetworkRequest,
+    CapabilityResponse, ControllerMemberResponse, ControllerNetworkResponse, IpPoolResponse,
+    RouteResponse, RuleResponse, TagResponse, UpdateMemberRequest, UpdateNetworkRequest,
 };
 use super::AppState;
 
@@ -187,20 +187,7 @@ async fn get_network(
         .await
         .map_err(|e| error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)))?;
 
-    let response = ControllerNetworkResponse {
-        id: format_network_id(network.id),
-        name: network.name,
-        private: network.private,
-        creation_time: network.creation_time,
-        revision: network.revision,
-        multicast_limit: network.multicast_limit,
-        mtu: network.mtu,
-        v4_assign_mode: v4_assign_mode_to_json(&network.v4_assign_mode),
-        v6_assign_mode: v6_assign_mode_to_json(&network.v6_assign_mode),
-        ip_assignment_pools: pools.iter().map(ip_pool_to_response).collect(),
-        enable_broadcast: network.enable_broadcast,
-        routes: routes.iter().map(route_to_response).collect(),
-    };
+    let response = network_to_response(network, &pools, &routes);
 
     Ok(Json(response))
 }
@@ -244,6 +231,8 @@ async fn update_network(
             || body.mtu.is_some()
             || body.enable_broadcast.is_some()
             || body.v4_assign_mode.is_some()
+            || body.rules.is_some()
+            || body.capabilities.is_some()
         {
             if let Some(mut network) =
                 ctrl.storage.get_network(network_id).await.map_err(|e| {
@@ -383,6 +372,62 @@ fn apply_network_updates(
             };
         }
     }
+    if let Some(ref rules) = body.rules {
+        network.rules = rules.iter().map(rule_from_response).collect();
+    }
+    if let Some(ref caps) = body.capabilities {
+        network.capabilities = caps.iter().map(capability_from_response).collect();
+    }
+}
+
+fn rule_to_response(rule: &zerotier_node::controller::rules::Rule) -> RuleResponse {
+    RuleResponse {
+        rule_type: rule.rule_type,
+        not: rule.not_flag,
+        or_flag: rule.or_flag,
+        value: rule.value.clone(),
+    }
+}
+
+fn rule_from_response(rule: &RuleResponse) -> zerotier_node::controller::rules::Rule {
+    zerotier_node::controller::rules::Rule {
+        rule_type: rule.rule_type,
+        not_flag: rule.not,
+        or_flag: rule.or_flag,
+        value: rule.value.clone(),
+    }
+}
+
+fn capability_to_response(
+    cap: &zerotier_node::controller::rules::Capability,
+) -> CapabilityResponse {
+    CapabilityResponse {
+        id: cap.id,
+        rules: cap.rules.iter().map(rule_to_response).collect(),
+    }
+}
+
+fn capability_from_response(
+    cap: &CapabilityResponse,
+) -> zerotier_node::controller::rules::Capability {
+    zerotier_node::controller::rules::Capability {
+        id: cap.id,
+        rules: cap.rules.iter().map(rule_from_response).collect(),
+    }
+}
+
+fn tag_to_response(tag: &zerotier_node::controller::rules::Tag) -> TagResponse {
+    TagResponse {
+        id: tag.id,
+        value: tag.value,
+    }
+}
+
+fn tag_from_response(tag: &TagResponse) -> zerotier_node::controller::rules::Tag {
+    zerotier_node::controller::rules::Tag {
+        id: tag.id,
+        value: tag.value,
+    }
 }
 
 /// Convert a NetworkRecord + IP pools to a ControllerNetworkResponse.
@@ -404,6 +449,12 @@ fn network_to_response(
         ip_assignment_pools: pools.iter().map(ip_pool_to_response).collect(),
         enable_broadcast: network.enable_broadcast,
         routes: routes.iter().map(route_to_response).collect(),
+        rules: network.rules.iter().map(rule_to_response).collect(),
+        capabilities: network
+            .capabilities
+            .iter()
+            .map(capability_to_response)
+            .collect(),
     }
 }
 
@@ -540,6 +591,8 @@ async fn update_member(
             last_deauthorized_time: 0,
             active_bridge: false,
             no_auto_assign_ips: false,
+            capabilities: Vec::new(),
+            tags: Vec::new(),
         }
     } else {
         ctrl.storage
@@ -571,6 +624,12 @@ async fn update_member(
     }
     if let Some(no_auto_assign_ips) = body.no_auto_assign_ips {
         member.no_auto_assign_ips = no_auto_assign_ips;
+    }
+    if let Some(ref capabilities) = body.capabilities {
+        member.capabilities = capabilities.clone();
+    }
+    if let Some(ref tags) = body.tags {
+        member.tags = tags.iter().map(tag_from_response).collect();
     }
     member.revision += 1;
 
@@ -627,5 +686,7 @@ fn member_to_response(
         v_minor: -1,
         v_rev: -1,
         v_proto: -1,
+        capabilities: member.capabilities.clone(),
+        tags: member.tags.iter().map(tag_to_response).collect(),
     }
 }

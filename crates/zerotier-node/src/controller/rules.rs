@@ -14,7 +14,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 /// A single ZeroTier network rule (match condition or action).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rule {
     pub rule_type: u8,
     pub not_flag: bool,
@@ -23,14 +23,17 @@ pub struct Rule {
 }
 
 /// A tag assigned to a network member.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub id: u32,
     pub value: u32,
 }
 
 /// A capability granted to a network member, containing its own rule chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// This is the network-level *definition*; a member gains the capability by
+/// having its `id` listed in that member's assigned capability IDs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Capability {
     pub id: u32,
     pub rules: Vec<Rule>,
@@ -164,6 +167,74 @@ pub fn serialize_capabilities(
         buf.extend_from_slice(issued_to);
         // Stub signature (96 bytes of zeros)
         buf.extend_from_slice(&[0u8; 96]);
+    }
+    buf
+}
+
+/// Serialize tags for the TAG dictionary key, signed with the controller's key.
+///
+/// Same layout as [`serialize_tags`], except the trailing 96-byte signature is
+/// computed via [`zerotier_crypto::signing::sign`] (the same Ed25519 +
+/// SHA-512-digest-suffix scheme already used for the Certificate of
+/// Membership) over the preceding `network_id || timestamp || tag_id ||
+/// tag_value || issued_to` bytes.
+///
+/// This canonical signed layout follows this codebase's existing COM-signing
+/// convention but has not been byte-verified against a real official
+/// `zerotier-one` peer the way the COM and HELLO formats were: treat it as
+/// unverified until an interop rerun confirms an official client accepts it.
+pub fn serialize_tags_signed(
+    tags: &[Tag],
+    network_id: u64,
+    issued_to: &[u8; 5],
+    timestamp: u64,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(tags.len() * 125);
+    for tag in tags {
+        let mut signed_data = Vec::with_capacity(29);
+        signed_data.extend_from_slice(&network_id.to_be_bytes());
+        signed_data.extend_from_slice(&timestamp.to_be_bytes());
+        signed_data.extend_from_slice(&tag.id.to_be_bytes());
+        signed_data.extend_from_slice(&tag.value.to_be_bytes());
+        signed_data.extend_from_slice(issued_to);
+
+        let signature = zerotier_crypto::signing::sign(signing_key, &signed_data);
+
+        buf.extend_from_slice(&signed_data);
+        buf.extend_from_slice(&signature);
+    }
+    buf
+}
+
+/// Serialize capabilities for the CAP dictionary key, signed with the controller's key.
+///
+/// Same layout as [`serialize_capabilities`], except the trailing 96-byte
+/// signature is computed via [`zerotier_crypto::signing::sign`] over the
+/// preceding `network_id || timestamp || cap_id || rule_count || rules ||
+/// issued_to` bytes. See [`serialize_tags_signed`] for the same
+/// not-yet-interop-verified caveat.
+pub fn serialize_capabilities_signed(
+    caps: &[Capability],
+    network_id: u64,
+    issued_to: &[u8; 5],
+    timestamp: u64,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for cap in caps {
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&network_id.to_be_bytes());
+        signed_data.extend_from_slice(&timestamp.to_be_bytes());
+        signed_data.extend_from_slice(&cap.id.to_be_bytes());
+        signed_data.extend_from_slice(&(cap.rules.len() as u16).to_be_bytes());
+        signed_data.extend_from_slice(&serialize_rules(&cap.rules));
+        signed_data.extend_from_slice(issued_to);
+
+        let signature = zerotier_crypto::signing::sign(signing_key, &signed_data);
+
+        buf.extend_from_slice(&signed_data);
+        buf.extend_from_slice(&signature);
     }
     buf
 }
@@ -306,5 +377,62 @@ mod tests {
         assert_eq!(u16::from_be_bytes(bytes[20..22].try_into().unwrap()), 1);
         // Check rules
         assert_eq!(&bytes[22..24], &[0x01, 0x00]);
+    }
+
+    fn test_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    #[test]
+    fn serialize_tags_signed_produces_nonzero_verifiable_signature() {
+        let tags = vec![Tag { id: 1, value: 100 }];
+        let network_id = 0xff00001234560001u64;
+        let issued_to = [0xa0, 0xb1, 0xc2, 0xd3, 0xe4];
+        let timestamp = 1000000u64;
+        let signing_key = test_signing_key();
+
+        let bytes = serialize_tags_signed(&tags, network_id, &issued_to, timestamp, &signing_key);
+        assert_eq!(bytes.len(), 125);
+
+        let signed_data = &bytes[0..29];
+        let signature: [u8; 96] = bytes[29..125].try_into().unwrap();
+        assert!(!signature.iter().all(|&b| b == 0));
+        assert!(zerotier_crypto::signing::verify(
+            &signing_key.verifying_key(),
+            signed_data,
+            &signature
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn serialize_capabilities_signed_produces_nonzero_verifiable_signature() {
+        let caps = vec![Capability {
+            id: 42,
+            rules: vec![Rule {
+                rule_type: ACTION_ACCEPT,
+                not_flag: false,
+                or_flag: false,
+                value: vec![],
+            }],
+        }];
+        let network_id = 0xff00001234560001u64;
+        let issued_to = [0xa0, 0xb1, 0xc2, 0xd3, 0xe4];
+        let timestamp = 1000000u64;
+        let signing_key = test_signing_key();
+
+        let bytes =
+            serialize_capabilities_signed(&caps, network_id, &issued_to, timestamp, &signing_key);
+        assert_eq!(bytes.len(), 125);
+
+        let signed_data = &bytes[0..29];
+        let signature: [u8; 96] = bytes[29..125].try_into().unwrap();
+        assert!(!signature.iter().all(|&b| b == 0));
+        assert!(zerotier_crypto::signing::verify(
+            &signing_key.verifying_key(),
+            signed_data,
+            &signature
+        )
+        .is_ok());
     }
 }
