@@ -272,6 +272,7 @@ impl<S: ControllerStorage> Controller<S> {
                 &member_caps,
                 network_id,
                 requester,
+                &self.address,
                 now_ms,
                 &self.signing_key,
             )
@@ -283,6 +284,7 @@ impl<S: ControllerStorage> Controller<S> {
                 &member.tags,
                 network_id,
                 requester,
+                &self.address,
                 now_ms,
                 &self.signing_key,
             )

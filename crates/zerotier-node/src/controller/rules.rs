@@ -83,6 +83,16 @@ pub const MATCH_INTEGER_RANGE: u8 = 0x3f;
 // Serialization
 // ---------------------------------------------------------------------------
 
+/// Signature type byte for an Ed25519 signature (upstream `Tag.hpp`/`Capability.hpp`).
+const SIGNATURE_TYPE_ED25519: u8 = 1;
+
+/// Length in bytes of the combined Ed25519 + digest-suffix signature (upstream `ZT_C25519_SIGNATURE_LEN`).
+const SIGNATURE_LEN: usize = 96;
+
+/// Marker upstream wraps around the "for signing" byte range of Tag/Capability
+/// (`0x7f7f7f7f7f7f7f7f` in `Tag.hpp`/`Capability.hpp` `serialize(..., forSign=true)`).
+const SIGN_MARKER: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+
 /// Serialize a list of rules into binary format (R dictionary key).
 ///
 /// Each rule is encoded as:
@@ -114,47 +124,60 @@ pub fn default_allow_all() -> Vec<Rule> {
 
 /// Serialize tags for the TAG dictionary key.
 ///
-/// Format per tag:
+/// Matches the wire layout of upstream `Tag::serialize` (`node/Tag.hpp`,
+/// verified against the ZeroTier 1.14.2 source):
 /// - network_id: u64 BE
-/// - timestamp: u64 BE
+/// - timestamp: i64 BE
 /// - tag_id: u32 BE
 /// - tag_value: u32 BE
 /// - issued_to: 5 bytes (ZeroTier address)
-/// - signature: 96 bytes (stub: all zeros until controller signing is wired)
+/// - signed_by: 5 bytes (ZeroTier address; zero here: stub is unsigned)
+/// - signature_type: u8 (0 == none, so a deserializer skips `signature_len` bytes)
+/// - signature_len: u16 BE
+/// - signature: `signature_len` bytes (stub: all zeros until controller signing is wired)
+/// - additional_fields_len: u16 BE (currently always 0)
 pub fn serialize_tags(
     tags: &[Tag],
     network_id: u64,
     issued_to: &[u8; 5],
     timestamp: u64,
 ) -> Vec<u8> {
-    // Per-tag size: 8 + 8 + 4 + 4 + 5 + 96 = 125 bytes
-    let mut buf = Vec::with_capacity(tags.len() * 125);
+    // Per-tag size: 8 + 8 + 4 + 4 + 5 + 5 + 1 + 2 + 96 + 2 = 135 bytes
+    let mut buf = Vec::with_capacity(tags.len() * 135);
     for tag in tags {
         buf.extend_from_slice(&network_id.to_be_bytes());
         buf.extend_from_slice(&timestamp.to_be_bytes());
         buf.extend_from_slice(&tag.id.to_be_bytes());
         buf.extend_from_slice(&tag.value.to_be_bytes());
         buf.extend_from_slice(issued_to);
-        // Stub signature (96 bytes of zeros)
-        buf.extend_from_slice(&[0u8; 96]);
+        buf.extend_from_slice(&[0u8; 5]); // signed_by (none)
+        buf.push(0); // signature_type: none
+        buf.extend_from_slice(&(SIGNATURE_LEN as u16).to_be_bytes());
+        buf.extend_from_slice(&[0u8; SIGNATURE_LEN]); // stub signature
+        buf.extend_from_slice(&0u16.to_be_bytes()); // additional_fields_len
     }
     buf
 }
 
 /// Serialize capabilities for the CAP dictionary key.
 ///
-/// Format per capability:
+/// Matches the wire layout of upstream `Capability::serialize`
+/// (`node/Capability.hpp`, verified against the ZeroTier 1.14.2 source):
 /// - network_id: u64 BE
-/// - timestamp: u64 BE
+/// - timestamp: i64 BE
 /// - cap_id: u32 BE
 /// - rule_count: u16 BE
-/// - rules: serialized rule chain (same format as R key)
-/// - issued_to: 5 bytes (ZeroTier address)
-/// - signature: 96 bytes (stub: all zeros until controller signing is wired)
+/// - rules: serialized rule chain (same per-rule `type_and_flags, value_len,
+///   value` format as the R key, which matches upstream's `serializeRules`)
+/// - max_custody_chain_length: u8 (always 1: ManyTier issues non-transferable
+///   capabilities directly, no chain-of-custody hand-off)
+/// - custody chain: terminated immediately by a 5-byte zero `to` address,
+///   since this stub issues no signature
+/// - additional_fields_len: u16 BE (currently always 0)
 pub fn serialize_capabilities(
     caps: &[Capability],
     network_id: u64,
-    issued_to: &[u8; 5],
+    _issued_to: &[u8; 5],
     timestamp: u64,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -164,77 +187,118 @@ pub fn serialize_capabilities(
         buf.extend_from_slice(&cap.id.to_be_bytes());
         buf.extend_from_slice(&(cap.rules.len() as u16).to_be_bytes());
         buf.extend_from_slice(&serialize_rules(&cap.rules));
-        buf.extend_from_slice(issued_to);
-        // Stub signature (96 bytes of zeros)
-        buf.extend_from_slice(&[0u8; 96]);
+        buf.push(1); // max_custody_chain_length
+        buf.extend_from_slice(&[0u8; 5]); // terminate custody chain (unsigned)
+        buf.extend_from_slice(&0u16.to_be_bytes()); // additional_fields_len
     }
     buf
 }
 
 /// Serialize tags for the TAG dictionary key, signed with the controller's key.
 ///
-/// Same layout as [`serialize_tags`], except the trailing 96-byte signature is
-/// computed via [`zerotier_crypto::signing::sign`] (the same Ed25519 +
-/// SHA-512-digest-suffix scheme already used for the Certificate of
-/// Membership) over the preceding `network_id || timestamp || tag_id ||
-/// tag_value || issued_to` bytes.
+/// Byte-verified against upstream `Tag::serialize`/`Tag::sign` (`node/Tag.hpp`,
+/// ZeroTier 1.14.2 source): the signed range is `0x7f7f7f7f7f7f7f7f ||
+/// network_id || timestamp || tag_id || tag_value || issued_to || signed_by ||
+/// additional_fields_len(0) || 0x7f7f7f7f7f7f7f7f`, signed via
+/// [`zerotier_crypto::signing::sign`] (the same Ed25519 + SHA-512-digest-suffix
+/// scheme already used for the Certificate of Membership). The wire form then
+/// carries `network_id || timestamp || tag_id || tag_value || issued_to ||
+/// signed_by || signature_type(1) || signature_len(96) || signature ||
+/// additional_fields_len(0)`: see [`serialize_tags`] for the unsigned layout
+/// this mirrors. `signed_by` is the controller's own ZeroTier address (the
+/// public counterpart of `signing_key`).
 ///
-/// This canonical signed layout follows this codebase's existing COM-signing
-/// convention but has not been byte-verified against a real official
-/// `zerotier-one` peer the way the COM and HELLO formats were: treat it as
-/// unverified until an interop rerun confirms an official client accepts it.
+/// This is now byte-format-verified against the upstream source rather than
+/// guessed, but: like the rest of this module: has not been confirmed by
+/// running a real official `zerotier-one` peer against it the way COM and
+/// HELLO were during v1.3-v1.7 interop work.
 pub fn serialize_tags_signed(
     tags: &[Tag],
     network_id: u64,
     issued_to: &[u8; 5],
+    signed_by: &[u8; 5],
     timestamp: u64,
     signing_key: &ed25519_dalek::SigningKey,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(tags.len() * 125);
+    let mut buf = Vec::with_capacity(tags.len() * 135);
     for tag in tags {
-        let mut signed_data = Vec::with_capacity(29);
+        let mut signed_data = Vec::with_capacity(48);
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
         signed_data.extend_from_slice(&network_id.to_be_bytes());
         signed_data.extend_from_slice(&timestamp.to_be_bytes());
         signed_data.extend_from_slice(&tag.id.to_be_bytes());
         signed_data.extend_from_slice(&tag.value.to_be_bytes());
         signed_data.extend_from_slice(issued_to);
+        signed_data.extend_from_slice(signed_by);
+        signed_data.extend_from_slice(&0u16.to_be_bytes()); // additional_fields_len
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
 
         let signature = zerotier_crypto::signing::sign(signing_key, &signed_data);
 
-        buf.extend_from_slice(&signed_data);
+        buf.extend_from_slice(&network_id.to_be_bytes());
+        buf.extend_from_slice(&timestamp.to_be_bytes());
+        buf.extend_from_slice(&tag.id.to_be_bytes());
+        buf.extend_from_slice(&tag.value.to_be_bytes());
+        buf.extend_from_slice(issued_to);
+        buf.extend_from_slice(signed_by);
+        buf.push(SIGNATURE_TYPE_ED25519);
+        buf.extend_from_slice(&(SIGNATURE_LEN as u16).to_be_bytes());
         buf.extend_from_slice(&signature);
+        buf.extend_from_slice(&0u16.to_be_bytes()); // additional_fields_len
     }
     buf
 }
 
 /// Serialize capabilities for the CAP dictionary key, signed with the controller's key.
 ///
-/// Same layout as [`serialize_capabilities`], except the trailing 96-byte
-/// signature is computed via [`zerotier_crypto::signing::sign`] over the
-/// preceding `network_id || timestamp || cap_id || rule_count || rules ||
-/// issued_to` bytes. See [`serialize_tags_signed`] for the same
-/// not-yet-interop-verified caveat.
+/// Byte-verified against upstream `Capability::serialize`/`Capability::sign`
+/// (`node/Capability.hpp`, ZeroTier 1.14.2 source): the signed range is
+/// `0x7f7f7f7f7f7f7f7f || network_id || timestamp || cap_id || rule_count ||
+/// rules || max_custody_chain_length(1) || additional_fields_len(0) ||
+/// 0x7f7f7f7f7f7f7f7f`, signed via [`zerotier_crypto::signing::sign`]. The
+/// wire form then appends a single custody-chain entry: `to(issued_to) ||
+/// from(signed_by) || signature_type(1) || signature_len(96) || signature`
+///: followed by the zero-address chain terminator and
+/// `additional_fields_len(0)`. ManyTier only ever issues a capability
+/// directly (`max_custody_chain_length` is always 1, one custody entry),
+/// never a transferable multi-hop chain. See [`serialize_tags_signed`] for
+/// the same not-yet-live-interop-verified caveat.
 pub fn serialize_capabilities_signed(
     caps: &[Capability],
     network_id: u64,
     issued_to: &[u8; 5],
+    signed_by: &[u8; 5],
     timestamp: u64,
     signing_key: &ed25519_dalek::SigningKey,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
     for cap in caps {
         let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
         signed_data.extend_from_slice(&network_id.to_be_bytes());
         signed_data.extend_from_slice(&timestamp.to_be_bytes());
         signed_data.extend_from_slice(&cap.id.to_be_bytes());
         signed_data.extend_from_slice(&(cap.rules.len() as u16).to_be_bytes());
         signed_data.extend_from_slice(&serialize_rules(&cap.rules));
-        signed_data.extend_from_slice(issued_to);
+        signed_data.push(1); // max_custody_chain_length
+        signed_data.extend_from_slice(&0u16.to_be_bytes()); // additional_fields_len
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
 
         let signature = zerotier_crypto::signing::sign(signing_key, &signed_data);
 
-        buf.extend_from_slice(&signed_data);
+        buf.extend_from_slice(&network_id.to_be_bytes());
+        buf.extend_from_slice(&timestamp.to_be_bytes());
+        buf.extend_from_slice(&cap.id.to_be_bytes());
+        buf.extend_from_slice(&(cap.rules.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&serialize_rules(&cap.rules));
+        buf.push(1); // max_custody_chain_length
+        buf.extend_from_slice(issued_to); // custody[0].to
+        buf.extend_from_slice(signed_by); // custody[0].from
+        buf.push(SIGNATURE_TYPE_ED25519);
+        buf.extend_from_slice(&(SIGNATURE_LEN as u16).to_be_bytes());
         buf.extend_from_slice(&signature);
+        buf.extend_from_slice(&[0u8; 5]); // terminate custody chain
+        buf.extend_from_slice(&0u16.to_be_bytes()); // additional_fields_len
     }
     buf
 }
@@ -325,8 +389,8 @@ mod tests {
 
         let bytes = serialize_tags(&tags, network_id, &issued_to, timestamp);
 
-        // Each tag: 8 + 8 + 4 + 4 + 5 + 96 = 125 bytes
-        assert_eq!(bytes.len(), 250);
+        // Each tag: 8 + 8 + 4 + 4 + 5 + 5 + 1 + 2 + 96 + 2 = 135 bytes
+        assert_eq!(bytes.len(), 270);
 
         // First tag: check network_id
         assert_eq!(
@@ -344,8 +408,16 @@ mod tests {
         assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 100);
         // First tag: check issued_to
         assert_eq!(&bytes[24..29], &issued_to);
-        // First tag: signature is stub zeros
-        assert!(bytes[29..125].iter().all(|&b| b == 0));
+        // First tag: signed_by is zero (unsigned stub)
+        assert_eq!(&bytes[29..34], &[0u8; 5]);
+        // First tag: signature_type is 0 (none)
+        assert_eq!(bytes[34], 0);
+        // First tag: signature_len is 96
+        assert_eq!(u16::from_be_bytes(bytes[35..37].try_into().unwrap()), 96);
+        // First tag: stub signature is zeros
+        assert!(bytes[37..133].iter().all(|&b| b == 0));
+        // First tag: additional_fields_len is 0
+        assert_eq!(u16::from_be_bytes(bytes[133..135].try_into().unwrap()), 0);
     }
 
     #[test]
@@ -367,9 +439,11 @@ mod tests {
 
         // Header: 8 + 8 + 4 + 2 = 22 bytes
         // Rules: 2 bytes (accept = [0x01, 0x00])
-        // Footer: 5 + 96 = 101 bytes
-        // Total: 22 + 2 + 101 = 125 bytes
-        assert_eq!(bytes.len(), 125);
+        // max_custody_chain_length: 1 byte
+        // Terminator: 5 bytes (zero 'to': unsigned stub)
+        // additional_fields_len: 2 bytes
+        // Total: 22 + 2 + 1 + 5 + 2 = 32 bytes
+        assert_eq!(bytes.len(), 32);
 
         // Check cap_id
         assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 42);
@@ -377,6 +451,12 @@ mod tests {
         assert_eq!(u16::from_be_bytes(bytes[20..22].try_into().unwrap()), 1);
         // Check rules
         assert_eq!(&bytes[22..24], &[0x01, 0x00]);
+        // max_custody_chain_length
+        assert_eq!(bytes[24], 1);
+        // Terminator ('to' == 0)
+        assert_eq!(&bytes[25..30], &[0u8; 5]);
+        // additional_fields_len
+        assert_eq!(u16::from_be_bytes(bytes[30..32].try_into().unwrap()), 0);
     }
 
     fn test_signing_key() -> ed25519_dalek::SigningKey {
@@ -388,18 +468,37 @@ mod tests {
         let tags = vec![Tag { id: 1, value: 100 }];
         let network_id = 0xff00001234560001u64;
         let issued_to = [0xa0, 0xb1, 0xc2, 0xd3, 0xe4];
+        let signed_by = [0x11, 0x22, 0x33, 0x44, 0x55];
         let timestamp = 1000000u64;
         let signing_key = test_signing_key();
 
-        let bytes = serialize_tags_signed(&tags, network_id, &issued_to, timestamp, &signing_key);
-        assert_eq!(bytes.len(), 125);
+        let bytes = serialize_tags_signed(
+            &tags,
+            network_id,
+            &issued_to,
+            &signed_by,
+            timestamp,
+            &signing_key,
+        );
+        assert_eq!(bytes.len(), 135);
 
-        let signed_data = &bytes[0..29];
-        let signature: [u8; 96] = bytes[29..125].try_into().unwrap();
+        // network_id || timestamp || id || value || issued_to || signed_by
+        assert_eq!(&bytes[24..29], &issued_to);
+        assert_eq!(&bytes[29..34], &signed_by);
+        assert_eq!(bytes[34], SIGNATURE_TYPE_ED25519);
+        assert_eq!(u16::from_be_bytes(bytes[35..37].try_into().unwrap()), 96);
+        let signature: [u8; 96] = bytes[37..133].try_into().unwrap();
+        assert_eq!(u16::from_be_bytes(bytes[133..135].try_into().unwrap()), 0);
         assert!(!signature.iter().all(|&b| b == 0));
+
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
+        signed_data.extend_from_slice(&bytes[0..34]);
+        signed_data.extend_from_slice(&0u16.to_be_bytes());
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
         assert!(zerotier_crypto::signing::verify(
             &signing_key.verifying_key(),
-            signed_data,
+            &signed_data,
             &signature
         )
         .is_ok());
@@ -418,19 +517,41 @@ mod tests {
         }];
         let network_id = 0xff00001234560001u64;
         let issued_to = [0xa0, 0xb1, 0xc2, 0xd3, 0xe4];
+        let signed_by = [0x11, 0x22, 0x33, 0x44, 0x55];
         let timestamp = 1000000u64;
         let signing_key = test_signing_key();
 
-        let bytes =
-            serialize_capabilities_signed(&caps, network_id, &issued_to, timestamp, &signing_key);
-        assert_eq!(bytes.len(), 125);
+        let bytes = serialize_capabilities_signed(
+            &caps,
+            network_id,
+            &issued_to,
+            &signed_by,
+            timestamp,
+            &signing_key,
+        );
+        // Header (22) + rules (2) + max_custody_chain_length (1) + to (5) +
+        // from (5) + sig_type (1) + sig_len (2) + sig (96) + terminator (5) +
+        // additional_fields_len (2) = 141 bytes
+        assert_eq!(bytes.len(), 141);
 
-        let signed_data = &bytes[0..29];
-        let signature: [u8; 96] = bytes[29..125].try_into().unwrap();
+        assert_eq!(bytes[24], 1); // max_custody_chain_length
+        assert_eq!(&bytes[25..30], &issued_to);
+        assert_eq!(&bytes[30..35], &signed_by);
+        assert_eq!(bytes[35], SIGNATURE_TYPE_ED25519);
+        assert_eq!(u16::from_be_bytes(bytes[36..38].try_into().unwrap()), 96);
+        let signature: [u8; 96] = bytes[38..134].try_into().unwrap();
+        assert_eq!(&bytes[134..139], &[0u8; 5]); // chain terminator
+        assert_eq!(u16::from_be_bytes(bytes[139..141].try_into().unwrap()), 0);
         assert!(!signature.iter().all(|&b| b == 0));
+
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
+        signed_data.extend_from_slice(&bytes[0..25]);
+        signed_data.extend_from_slice(&0u16.to_be_bytes());
+        signed_data.extend_from_slice(&SIGN_MARKER.to_be_bytes());
         assert!(zerotier_crypto::signing::verify(
             &signing_key.verifying_key(),
-            signed_data,
+            &signed_data,
             &signature
         )
         .is_ok());
