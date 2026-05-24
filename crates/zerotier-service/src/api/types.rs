@@ -83,9 +83,11 @@ pub struct ControllerNetworkResponse {
     pub routes: Vec<RouteResponse>,
     /// Network-wide match/action rule chain. Empty means allow-all.
     ///
-    /// This is ManyTier's own rule JSON shape (`ruleType`/`not`/`or`/`value`),
-    /// not yet the official controller's per-rule-type symbolic schema (e.g.
-    /// `{"type": "ACTION_ACCEPT"}`, `{"type": "MATCH_IP_PROTOCOL", "ipProtocol": 6}`).
+    /// This is still ManyTier's own rule JSON shape (`ruleType`/`not`/`or`/`value`)
+    /// with an added `type` field carrying official's symbolic rule-type name for
+    /// readability (e.g. `"ACTION_ACCEPT"`, `"MATCH_IP_PROTOCOL"`). It is not yet
+    /// official's fully per-rule-type schema (e.g. `{"type": "MATCH_IP_PROTOCOL",
+    /// "ipProtocol": 6}` with type-specific field names instead of a raw `value` blob).
     pub rules: Vec<RuleResponse>,
     /// Network-level capability definitions.
     pub capabilities: Vec<CapabilityResponse>,
@@ -98,6 +100,10 @@ pub struct ControllerNetworkResponse {
 pub struct RuleResponse {
     #[serde(rename = "ruleType")]
     pub rule_type: u8,
+    /// Official's symbolic rule-type name (e.g. `"MATCH_IP_PROTOCOL"`), derived
+    /// from `rule_type` for readability. Ignored on input; recomputed on output.
+    #[serde(rename = "type", default)]
+    pub type_name: String,
     pub not: bool,
     #[serde(rename = "or")]
     pub or_flag: bool,

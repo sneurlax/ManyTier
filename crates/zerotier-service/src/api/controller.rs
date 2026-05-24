@@ -388,6 +388,7 @@ fn apply_network_updates(
 fn rule_to_response(rule: &zerotier_node::controller::rules::Rule) -> RuleResponse {
     RuleResponse {
         rule_type: rule.rule_type,
+        type_name: zerotier_node::controller::rules::rule_type_name(rule.rule_type).to_string(),
         not: rule.not_flag,
         or_flag: rule.or_flag,
         value: rule.value.clone(),

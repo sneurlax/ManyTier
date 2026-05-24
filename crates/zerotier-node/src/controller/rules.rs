@@ -95,6 +95,46 @@ pub const MATCH_TAGS_BITWISE_XOR: u8 = 0x33;
 pub const MATCH_TAGS_EQUAL: u8 = 0x34;
 pub const MATCH_INTEGER_RANGE: u8 = 0x3f;
 
+/// Map a rule-type byte (masked to bits 0-5) to official's symbolic REST name,
+/// e.g. `ACTION_ACCEPT`, `MATCH_IP_PROTOCOL`. Unknown values return `"UNKNOWN"`.
+pub fn rule_type_name(rule_type: u8) -> &'static str {
+    match rule_type & 0x3F {
+        ACTION_DROP => "ACTION_DROP",
+        ACTION_ACCEPT => "ACTION_ACCEPT",
+        ACTION_TEE => "ACTION_TEE",
+        ACTION_WATCH => "ACTION_WATCH",
+        ACTION_REDIRECT => "ACTION_REDIRECT",
+        ACTION_BREAK => "ACTION_BREAK",
+        MATCH_SOURCE_ZEROTIER_ADDRESS => "MATCH_SOURCE_ZEROTIER_ADDRESS",
+        MATCH_DEST_ZEROTIER_ADDRESS => "MATCH_DEST_ZEROTIER_ADDRESS",
+        MATCH_VLAN_ID => "MATCH_VLAN_ID",
+        MATCH_VLAN_PCP => "MATCH_VLAN_PCP",
+        MATCH_VLAN_DEI => "MATCH_VLAN_DEI",
+        MATCH_MAC_SOURCE => "MATCH_MAC_SOURCE",
+        MATCH_MAC_DEST => "MATCH_MAC_DEST",
+        MATCH_IPV4_SOURCE => "MATCH_IPV4_SOURCE",
+        MATCH_IPV4_DEST => "MATCH_IPV4_DEST",
+        MATCH_IPV6_SOURCE => "MATCH_IPV6_SOURCE",
+        MATCH_IPV6_DEST => "MATCH_IPV6_DEST",
+        MATCH_IP_TOS => "MATCH_IP_TOS",
+        MATCH_IP_PROTOCOL => "MATCH_IP_PROTOCOL",
+        MATCH_ETHERTYPE => "MATCH_ETHERTYPE",
+        MATCH_ICMP_TYPE => "MATCH_ICMP_TYPE",
+        MATCH_IP_SOURCE_PORT_RANGE => "MATCH_IP_SOURCE_PORT_RANGE",
+        MATCH_IP_DEST_PORT_RANGE => "MATCH_IP_DEST_PORT_RANGE",
+        MATCH_CHARACTERISTICS => "MATCH_CHARACTERISTICS",
+        MATCH_FRAME_SIZE_RANGE => "MATCH_FRAME_SIZE_RANGE",
+        MATCH_RANDOM => "MATCH_RANDOM",
+        MATCH_TAGS_DIFFERENCE => "MATCH_TAGS_DIFFERENCE",
+        MATCH_TAGS_BITWISE_AND => "MATCH_TAGS_BITWISE_AND",
+        MATCH_TAGS_BITWISE_OR => "MATCH_TAGS_BITWISE_OR",
+        MATCH_TAGS_BITWISE_XOR => "MATCH_TAGS_BITWISE_XOR",
+        MATCH_TAGS_EQUAL => "MATCH_TAGS_EQUAL",
+        MATCH_INTEGER_RANGE => "MATCH_INTEGER_RANGE",
+        _ => "UNKNOWN",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Serialization
 // ---------------------------------------------------------------------------
@@ -326,6 +366,17 @@ pub fn serialize_capabilities_signed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_type_name_covers_actions_and_matches() {
+        assert_eq!(rule_type_name(ACTION_ACCEPT), "ACTION_ACCEPT");
+        assert_eq!(rule_type_name(ACTION_DROP), "ACTION_DROP");
+        assert_eq!(rule_type_name(MATCH_IP_PROTOCOL), "MATCH_IP_PROTOCOL");
+        assert_eq!(rule_type_name(MATCH_INTEGER_RANGE), "MATCH_INTEGER_RANGE");
+        // NOT/OR flag bits (0x80/0x40) must be masked off before lookup.
+        assert_eq!(rule_type_name(MATCH_ETHERTYPE | 0x80), "MATCH_ETHERTYPE");
+        assert_eq!(rule_type_name(0x3e), "UNKNOWN");
+    }
 
     #[test]
     fn default_allow_all_serializes_to_accept() {
