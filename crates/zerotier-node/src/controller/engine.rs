@@ -89,6 +89,7 @@ impl<S: ControllerStorage> Controller<S> {
             v6_assign_mode: String::from("none"),
             rules: Vec::new(),
             capabilities: Vec::new(),
+            tags: Vec::new(),
             enable_broadcast: true,
         };
 

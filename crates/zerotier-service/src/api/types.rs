@@ -89,6 +89,8 @@ pub struct ControllerNetworkResponse {
     pub rules: Vec<RuleResponse>,
     /// Network-level capability definitions.
     pub capabilities: Vec<CapabilityResponse>,
+    /// Network-level tag definitions (name/default/enums metadata).
+    pub tags: Vec<TagDefinitionResponse>,
 }
 
 /// A single match/action rule.
@@ -114,6 +116,16 @@ pub struct CapabilityResponse {
 pub struct TagResponse {
     pub id: u32,
     pub value: u32,
+}
+
+/// A network-level tag definition (name/default/enums metadata).
+#[derive(Serialize, Deserialize)]
+pub struct TagDefinitionResponse {
+    pub id: u32,
+    pub name: String,
+    pub default: Option<u32>,
+    /// Named enum values as `{name: value}`.
+    pub enums: std::collections::BTreeMap<String, u32>,
 }
 
 /// An IP assignment pool range.
@@ -205,6 +217,8 @@ pub struct UpdateNetworkRequest {
     pub rules: Option<Vec<RuleResponse>>,
     /// New capability definitions.
     pub capabilities: Option<Vec<CapabilityResponse>>,
+    /// New tag definitions.
+    pub tags: Option<Vec<TagDefinitionResponse>>,
 }
 
 /// Request body for POST /controller/network/{nwid}/member/{nodeId} (partial update).

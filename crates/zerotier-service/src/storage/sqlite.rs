@@ -45,6 +45,7 @@ impl SqliteStorage {
                 v6_assign_mode TEXT NOT NULL,
                 rules_json TEXT NOT NULL DEFAULT '[]',
                 capabilities_json TEXT NOT NULL DEFAULT '[]',
+                tag_definitions_json TEXT NOT NULL DEFAULT '[]',
                 enable_broadcast INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS members (
@@ -96,6 +97,7 @@ impl SqliteStorage {
             &[
                 ("rules_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("tag_definitions_json", "TEXT NOT NULL DEFAULT '[]'"),
             ],
         )?;
         Ok(Self {
@@ -143,12 +145,13 @@ impl ControllerStorage for SqliteStorage {
             let mut stmt = conn.prepare(
                 "SELECT id, name, private, creation_time, revision, multicast_limit, \
                  mtu, v4_assign_mode, v6_assign_mode, rules_json, capabilities_json, \
-                 enable_broadcast \
+                 tag_definitions_json, enable_broadcast \
                  FROM networks WHERE id = ?1",
             )?;
             let result = stmt.query_row(params![id as i64], |row| {
                 let rules_json: String = row.get(9)?;
                 let capabilities_json: String = row.get(10)?;
+                let tag_definitions_json: String = row.get(11)?;
                 Ok((
                     row.get::<_, i64>(0)? as u64,
                     row.get::<_, String>(1)?,
@@ -161,7 +164,8 @@ impl ControllerStorage for SqliteStorage {
                     row.get::<_, String>(8)?,
                     rules_json,
                     capabilities_json,
-                    row.get::<_, i32>(11)? != 0,
+                    tag_definitions_json,
+                    row.get::<_, i32>(12)? != 0,
                 ))
             });
             match result {
@@ -177,6 +181,7 @@ impl ControllerStorage for SqliteStorage {
                     v6_assign_mode,
                     rules_json,
                     capabilities_json,
+                    tag_definitions_json,
                     enable_broadcast,
                 )) => Ok(Some(NetworkRecord {
                     id,
@@ -190,6 +195,7 @@ impl ControllerStorage for SqliteStorage {
                     v6_assign_mode,
                     rules: serde_json::from_str(&rules_json)?,
                     capabilities: serde_json::from_str(&capabilities_json)?,
+                    tags: serde_json::from_str(&tag_definitions_json)?,
                     enable_broadcast,
                 })),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -205,12 +211,13 @@ impl ControllerStorage for SqliteStorage {
         tokio::task::spawn_blocking(move || {
             let rules_json = serde_json::to_string(&network.rules)?;
             let capabilities_json = serde_json::to_string(&network.capabilities)?;
+            let tag_definitions_json = serde_json::to_string(&network.tags)?;
             let conn = conn.lock().unwrap();
             conn.execute(
                 "INSERT INTO networks (id, name, private, creation_time, revision, \
                  multicast_limit, mtu, v4_assign_mode, v6_assign_mode, rules_json, \
-                 capabilities_json, enable_broadcast) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 capabilities_json, tag_definitions_json, enable_broadcast) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     network.id as i64,
                     network.name,
@@ -223,6 +230,7 @@ impl ControllerStorage for SqliteStorage {
                     network.v6_assign_mode,
                     rules_json,
                     capabilities_json,
+                    tag_definitions_json,
                     network.enable_broadcast as i32,
                 ],
             )?;
@@ -237,12 +245,13 @@ impl ControllerStorage for SqliteStorage {
         tokio::task::spawn_blocking(move || {
             let rules_json = serde_json::to_string(&network.rules)?;
             let capabilities_json = serde_json::to_string(&network.capabilities)?;
+            let tag_definitions_json = serde_json::to_string(&network.tags)?;
             let conn = conn.lock().unwrap();
             conn.execute(
                 "UPDATE networks SET name = ?2, private = ?3, creation_time = ?4, \
                  revision = ?5, multicast_limit = ?6, mtu = ?7, v4_assign_mode = ?8, \
                  v6_assign_mode = ?9, rules_json = ?10, capabilities_json = ?11, \
-                 enable_broadcast = ?12 \
+                 tag_definitions_json = ?12, enable_broadcast = ?13 \
                  WHERE id = ?1",
                 params![
                     network.id as i64,
@@ -256,6 +265,7 @@ impl ControllerStorage for SqliteStorage {
                     network.v6_assign_mode,
                     rules_json,
                     capabilities_json,
+                    tag_definitions_json,
                     network.enable_broadcast as i32,
                 ],
             )?;
@@ -551,7 +561,7 @@ impl ControllerStorage for SqliteStorage {
 mod tests {
     use super::*;
 
-    use zerotier_node::controller::rules::{Capability, Rule, Tag};
+    use zerotier_node::controller::rules::{Capability, Rule, Tag, TagDefinition};
 
     fn test_member(network_id: u64) -> MemberRecord {
         MemberRecord {
@@ -616,6 +626,12 @@ mod tests {
                 id: 5,
                 rules: vec![],
             }],
+            tags: vec![TagDefinition {
+                id: 1000,
+                name: String::from("role"),
+                default: Some(2),
+                enums: vec![(String::from("admin"), 1), (String::from("user"), 2)],
+            }],
             enable_broadcast: true,
         };
         storage.create_network(&network).await.unwrap();
@@ -625,6 +641,13 @@ mod tests {
         assert_eq!(loaded.rules[0].rule_type, 0x01);
         assert_eq!(loaded.capabilities.len(), 1);
         assert_eq!(loaded.capabilities[0].id, 5);
+        assert_eq!(loaded.tags.len(), 1);
+        assert_eq!(loaded.tags[0].name, "role");
+        assert_eq!(loaded.tags[0].default, Some(2));
+        assert_eq!(
+            loaded.tags[0].enums,
+            vec![(String::from("admin"), 1), (String::from("user"), 2)]
+        );
     }
 
     #[test]

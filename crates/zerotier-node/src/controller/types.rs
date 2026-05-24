@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use super::rules::{Capability, Rule, Tag};
+use super::rules::{Capability, Rule, Tag, TagDefinition};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -31,6 +31,9 @@ pub struct NetworkRecord {
     /// Network-level capability definitions. A member gains a capability by
     /// listing its `id` in `MemberRecord::capabilities`.
     pub capabilities: Vec<Capability>,
+    /// Network-level tag definitions (name/default/enums metadata). A member
+    /// carries tag *assignments* in `MemberRecord::tags`.
+    pub tags: Vec<TagDefinition>,
     /// Whether broadcast is enabled
     pub enable_broadcast: bool,
 }

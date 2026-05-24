@@ -23,7 +23,8 @@ use zerotier_node::controller::types::{IpPool, ManagedRoute};
 
 use super::types::{
     CapabilityResponse, ControllerMemberResponse, ControllerNetworkResponse, IpPoolResponse,
-    RouteResponse, RuleResponse, TagResponse, UpdateMemberRequest, UpdateNetworkRequest,
+    RouteResponse, RuleResponse, TagDefinitionResponse, TagResponse, UpdateMemberRequest,
+    UpdateNetworkRequest,
 };
 use super::AppState;
 
@@ -233,6 +234,7 @@ async fn update_network(
             || body.v4_assign_mode.is_some()
             || body.rules.is_some()
             || body.capabilities.is_some()
+            || body.tags.is_some()
         {
             if let Some(mut network) =
                 ctrl.storage.get_network(network_id).await.map_err(|e| {
@@ -378,6 +380,9 @@ fn apply_network_updates(
     if let Some(ref caps) = body.capabilities {
         network.capabilities = caps.iter().map(capability_from_response).collect();
     }
+    if let Some(ref tags) = body.tags {
+        network.tags = tags.iter().map(tag_definition_from_response).collect();
+    }
 }
 
 fn rule_to_response(rule: &zerotier_node::controller::rules::Rule) -> RuleResponse {
@@ -413,6 +418,28 @@ fn capability_from_response(
     zerotier_node::controller::rules::Capability {
         id: cap.id,
         rules: cap.rules.iter().map(rule_from_response).collect(),
+    }
+}
+
+fn tag_definition_to_response(
+    def: &zerotier_node::controller::rules::TagDefinition,
+) -> TagDefinitionResponse {
+    TagDefinitionResponse {
+        id: def.id,
+        name: def.name.clone(),
+        default: def.default,
+        enums: def.enums.iter().cloned().collect(),
+    }
+}
+
+fn tag_definition_from_response(
+    def: &TagDefinitionResponse,
+) -> zerotier_node::controller::rules::TagDefinition {
+    zerotier_node::controller::rules::TagDefinition {
+        id: def.id,
+        name: def.name.clone(),
+        default: def.default,
+        enums: def.enums.iter().map(|(k, v)| (k.clone(), *v)).collect(),
     }
 }
 
@@ -454,6 +481,11 @@ fn network_to_response(
             .capabilities
             .iter()
             .map(capability_to_response)
+            .collect(),
+        tags: network
+            .tags
+            .iter()
+            .map(tag_definition_to_response)
             .collect(),
     }
 }

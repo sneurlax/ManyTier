@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -37,6 +38,21 @@ pub struct Tag {
 pub struct Capability {
     pub id: u32,
     pub rules: Vec<Rule>,
+}
+
+/// A network-level tag *definition*: the name and allowed value space for a
+/// tag ID. Members carry tag *assignments* (`Tag { id, value }`) that should
+/// reference one of these definitions, but the controller does not enforce
+/// that binding -- it is metadata for operators/UIs, matching official's
+/// `network.conf` "tags" schema.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TagDefinition {
+    pub id: u32,
+    pub name: String,
+    /// Default value assigned to members that don't have this tag explicitly set.
+    pub default: Option<u32>,
+    /// Named enum values for this tag, e.g. `[("admin", 1), ("user", 2)]`.
+    pub enums: Vec<(String, u32)>,
 }
 
 // ---------------------------------------------------------------------------
