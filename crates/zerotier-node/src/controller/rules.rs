@@ -59,13 +59,18 @@ pub struct TagDefinition {
 // Rule type constants (from ZeroTier source)
 // ---------------------------------------------------------------------------
 
-/// Actions
+/// Actions (numeric values verified 2026-07-03 against upstream
+/// `include/ZeroTierOne.h` `ZT_VirtualNetworkRuleType` at ZeroTierOne tag
+/// `1.14.2` -- the previous MATCH_MAC_SOURCE..MATCH_INTEGER_RANGE values
+/// below this comment were wrong by a systematic offset and would have
+/// mis-encoded any non-default rule on the wire).
 pub const ACTION_DROP: u8 = 0x00;
 pub const ACTION_ACCEPT: u8 = 0x01;
 pub const ACTION_TEE: u8 = 0x02;
 pub const ACTION_WATCH: u8 = 0x03;
 pub const ACTION_REDIRECT: u8 = 0x04;
 pub const ACTION_BREAK: u8 = 0x05;
+pub const ACTION_PRIORITY: u8 = 0x06;
 
 /// Match conditions
 pub const MATCH_SOURCE_ZEROTIER_ADDRESS: u8 = 0x18;
@@ -73,27 +78,29 @@ pub const MATCH_DEST_ZEROTIER_ADDRESS: u8 = 0x19;
 pub const MATCH_VLAN_ID: u8 = 0x1a;
 pub const MATCH_VLAN_PCP: u8 = 0x1b;
 pub const MATCH_VLAN_DEI: u8 = 0x1c;
-pub const MATCH_MAC_SOURCE: u8 = 0x20;
-pub const MATCH_MAC_DEST: u8 = 0x21;
-pub const MATCH_IPV4_SOURCE: u8 = 0x22;
-pub const MATCH_IPV4_DEST: u8 = 0x23;
-pub const MATCH_IPV6_SOURCE: u8 = 0x24;
-pub const MATCH_IPV6_DEST: u8 = 0x25;
-pub const MATCH_IP_TOS: u8 = 0x26;
-pub const MATCH_IP_PROTOCOL: u8 = 0x27;
-pub const MATCH_ETHERTYPE: u8 = 0x28;
-pub const MATCH_ICMP_TYPE: u8 = 0x29;
-pub const MATCH_IP_SOURCE_PORT_RANGE: u8 = 0x2a;
-pub const MATCH_IP_DEST_PORT_RANGE: u8 = 0x2b;
-pub const MATCH_CHARACTERISTICS: u8 = 0x2c;
-pub const MATCH_FRAME_SIZE_RANGE: u8 = 0x2d;
-pub const MATCH_RANDOM: u8 = 0x2e;
-pub const MATCH_TAGS_DIFFERENCE: u8 = 0x30;
-pub const MATCH_TAGS_BITWISE_AND: u8 = 0x31;
-pub const MATCH_TAGS_BITWISE_OR: u8 = 0x32;
-pub const MATCH_TAGS_BITWISE_XOR: u8 = 0x33;
-pub const MATCH_TAGS_EQUAL: u8 = 0x34;
-pub const MATCH_INTEGER_RANGE: u8 = 0x3f;
+pub const MATCH_MAC_SOURCE: u8 = 0x1d;
+pub const MATCH_MAC_DEST: u8 = 0x1e;
+pub const MATCH_IPV4_SOURCE: u8 = 0x1f;
+pub const MATCH_IPV4_DEST: u8 = 0x20;
+pub const MATCH_IPV6_SOURCE: u8 = 0x21;
+pub const MATCH_IPV6_DEST: u8 = 0x22;
+pub const MATCH_IP_TOS: u8 = 0x23;
+pub const MATCH_IP_PROTOCOL: u8 = 0x24;
+pub const MATCH_ETHERTYPE: u8 = 0x25;
+pub const MATCH_ICMP: u8 = 0x26;
+pub const MATCH_IP_SOURCE_PORT_RANGE: u8 = 0x27;
+pub const MATCH_IP_DEST_PORT_RANGE: u8 = 0x28;
+pub const MATCH_CHARACTERISTICS: u8 = 0x29;
+pub const MATCH_FRAME_SIZE_RANGE: u8 = 0x2a;
+pub const MATCH_RANDOM: u8 = 0x2b;
+pub const MATCH_TAGS_DIFFERENCE: u8 = 0x2c;
+pub const MATCH_TAGS_BITWISE_AND: u8 = 0x2d;
+pub const MATCH_TAGS_BITWISE_OR: u8 = 0x2e;
+pub const MATCH_TAGS_BITWISE_XOR: u8 = 0x2f;
+pub const MATCH_TAGS_EQUAL: u8 = 0x30;
+pub const MATCH_TAG_SENDER: u8 = 0x31;
+pub const MATCH_TAG_RECEIVER: u8 = 0x32;
+pub const MATCH_INTEGER_RANGE: u8 = 0x33;
 
 /// Map a rule-type byte (masked to bits 0-5) to official's symbolic REST name,
 /// e.g. `ACTION_ACCEPT`, `MATCH_IP_PROTOCOL`. Unknown values return `"UNKNOWN"`.
@@ -105,6 +112,7 @@ pub fn rule_type_name(rule_type: u8) -> &'static str {
         ACTION_WATCH => "ACTION_WATCH",
         ACTION_REDIRECT => "ACTION_REDIRECT",
         ACTION_BREAK => "ACTION_BREAK",
+        ACTION_PRIORITY => "ACTION_PRIORITY",
         MATCH_SOURCE_ZEROTIER_ADDRESS => "MATCH_SOURCE_ZEROTIER_ADDRESS",
         MATCH_DEST_ZEROTIER_ADDRESS => "MATCH_DEST_ZEROTIER_ADDRESS",
         MATCH_VLAN_ID => "MATCH_VLAN_ID",
@@ -119,7 +127,7 @@ pub fn rule_type_name(rule_type: u8) -> &'static str {
         MATCH_IP_TOS => "MATCH_IP_TOS",
         MATCH_IP_PROTOCOL => "MATCH_IP_PROTOCOL",
         MATCH_ETHERTYPE => "MATCH_ETHERTYPE",
-        MATCH_ICMP_TYPE => "MATCH_ICMP_TYPE",
+        MATCH_ICMP => "MATCH_ICMP",
         MATCH_IP_SOURCE_PORT_RANGE => "MATCH_IP_SOURCE_PORT_RANGE",
         MATCH_IP_DEST_PORT_RANGE => "MATCH_IP_DEST_PORT_RANGE",
         MATCH_CHARACTERISTICS => "MATCH_CHARACTERISTICS",
@@ -130,6 +138,8 @@ pub fn rule_type_name(rule_type: u8) -> &'static str {
         MATCH_TAGS_BITWISE_OR => "MATCH_TAGS_BITWISE_OR",
         MATCH_TAGS_BITWISE_XOR => "MATCH_TAGS_BITWISE_XOR",
         MATCH_TAGS_EQUAL => "MATCH_TAGS_EQUAL",
+        MATCH_TAG_SENDER => "MATCH_TAG_SENDER",
+        MATCH_TAG_RECEIVER => "MATCH_TAG_RECEIVER",
         MATCH_INTEGER_RANGE => "MATCH_INTEGER_RANGE",
         _ => "UNKNOWN",
     }
@@ -379,6 +389,49 @@ mod tests {
     }
 
     #[test]
+    fn rule_type_constants_match_upstream_zt_virtualnetworkruletype() {
+        // Pinned against `include/ZeroTierOne.h` `ZT_VirtualNetworkRuleType` at
+        // ZeroTierOne tag 1.14.2, fetched 2026-07-03. A prior version of these
+        // constants (MATCH_MAC_SOURCE and beyond) used a wrong systematic
+        // offset that would have mis-encoded non-default rules on the wire.
+        assert_eq!(ACTION_DROP, 0);
+        assert_eq!(ACTION_ACCEPT, 1);
+        assert_eq!(ACTION_TEE, 2);
+        assert_eq!(ACTION_WATCH, 3);
+        assert_eq!(ACTION_REDIRECT, 4);
+        assert_eq!(ACTION_BREAK, 5);
+        assert_eq!(ACTION_PRIORITY, 6);
+        assert_eq!(MATCH_SOURCE_ZEROTIER_ADDRESS, 24);
+        assert_eq!(MATCH_DEST_ZEROTIER_ADDRESS, 25);
+        assert_eq!(MATCH_VLAN_ID, 26);
+        assert_eq!(MATCH_VLAN_PCP, 27);
+        assert_eq!(MATCH_VLAN_DEI, 28);
+        assert_eq!(MATCH_MAC_SOURCE, 29);
+        assert_eq!(MATCH_MAC_DEST, 30);
+        assert_eq!(MATCH_IPV4_SOURCE, 31);
+        assert_eq!(MATCH_IPV4_DEST, 32);
+        assert_eq!(MATCH_IPV6_SOURCE, 33);
+        assert_eq!(MATCH_IPV6_DEST, 34);
+        assert_eq!(MATCH_IP_TOS, 35);
+        assert_eq!(MATCH_IP_PROTOCOL, 36);
+        assert_eq!(MATCH_ETHERTYPE, 37);
+        assert_eq!(MATCH_ICMP, 38);
+        assert_eq!(MATCH_IP_SOURCE_PORT_RANGE, 39);
+        assert_eq!(MATCH_IP_DEST_PORT_RANGE, 40);
+        assert_eq!(MATCH_CHARACTERISTICS, 41);
+        assert_eq!(MATCH_FRAME_SIZE_RANGE, 42);
+        assert_eq!(MATCH_RANDOM, 43);
+        assert_eq!(MATCH_TAGS_DIFFERENCE, 44);
+        assert_eq!(MATCH_TAGS_BITWISE_AND, 45);
+        assert_eq!(MATCH_TAGS_BITWISE_OR, 46);
+        assert_eq!(MATCH_TAGS_BITWISE_XOR, 47);
+        assert_eq!(MATCH_TAGS_EQUAL, 48);
+        assert_eq!(MATCH_TAG_SENDER, 49);
+        assert_eq!(MATCH_TAG_RECEIVER, 50);
+        assert_eq!(MATCH_INTEGER_RANGE, 51);
+    }
+
+    #[test]
     fn default_allow_all_serializes_to_accept() {
         let rules = default_allow_all();
         let bytes = serialize_rules(&rules);
@@ -403,9 +456,9 @@ mod tests {
             },
         ];
         let bytes = serialize_rules(&rules);
-        // First rule: type=0x28, len=2, value=[0x08, 0x00]
+        // First rule: type=0x25, len=2, value=[0x08, 0x00]
         // Second rule: type=0x01, len=0
-        assert_eq!(bytes, vec![0x28, 0x02, 0x08, 0x00, 0x01, 0x00]);
+        assert_eq!(bytes, vec![0x25, 0x02, 0x08, 0x00, 0x01, 0x00]);
     }
 
     #[test]
@@ -432,13 +485,13 @@ mod tests {
         ];
         let bytes = serialize_rules(&rules);
 
-        // First rule: type=0x27 | NOT(0x80) = 0xA7, len=1, value=0x06
-        assert_eq!(bytes[0], 0xA7);
+        // First rule: type=0x24 | NOT(0x80) = 0xA4, len=1, value=0x06
+        assert_eq!(bytes[0], 0xA4);
         assert_eq!(bytes[1], 0x01);
         assert_eq!(bytes[2], 0x06);
 
-        // Second rule: type=0x27 | OR(0x40) = 0x67, len=1, value=0x11
-        assert_eq!(bytes[3], 0x67);
+        // Second rule: type=0x24 | OR(0x40) = 0x64, len=1, value=0x11
+        assert_eq!(bytes[3], 0x64);
         assert_eq!(bytes[4], 0x01);
         assert_eq!(bytes[5], 0x11);
 
