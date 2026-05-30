@@ -1942,6 +1942,79 @@ fn authorize_member_via_manytier_api(
     output.map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Define a network-level capability and tag definition via the ManyTier controller API.
+///
+/// Used by `test_official_client_accepts_capability_and_tag_credentials` (live
+/// interop check) so the controller has a `Capability { id: 1, .. }` and a
+/// `TagDefinition { id: 10, .. }` to grant to a member.
+fn set_network_capability_and_tag_definition_via_manytier_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+) -> bool {
+    let url = format!(
+        "http://127.0.0.1:{}/controller/network/{}",
+        api_port, network_id
+    );
+    let body = serde_json::json!({
+        "capabilities": [
+            {"id": 1, "rules": [{"ruleType": 1, "not": false, "or": false, "value": []}]}
+        ],
+        "tags": [
+            {"id": 10, "name": "role", "default": 2, "enums": {"admin": 1, "user": 2}}
+        ]
+    });
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body.to_string(),
+            &url,
+        ])
+        .output();
+    output.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Authorize a member and grant it the network's capability + tag assignment in one
+/// request, via the ManyTier controller API.
+fn authorize_member_with_capability_and_tag_via_manytier_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+    member_addr_hex: &str,
+) -> bool {
+    let url = format!(
+        "http://127.0.0.1:{}/controller/network/{}/member/{}",
+        api_port, network_id, member_addr_hex
+    );
+    let body = serde_json::json!({
+        "authorized": true,
+        "capabilities": [1],
+        "tags": [{"id": 10, "value": 1}]
+    });
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body.to_string(),
+            &url,
+        ])
+        .output();
+    output.map(|o| o.status.success()).unwrap_or(false)
+}
+
 /// Join a network via the ManyTier local service API.
 fn join_network_via_manytier_api(api_port: u16, authtoken: &str, network_id: &str) -> bool {
     let url = format!("http://127.0.0.1:{}/network/{}", api_port, network_id);
@@ -7414,5 +7487,309 @@ pub mod tests {
             "manytier-controller",
             &controller_result.artifact_root,
         );
+    }
+
+    /// Test: a real official zerotier-one client accepts a ManyTier-issued
+    /// NETWORK_CONFIG that carries a signed tag + capability credential.
+    ///
+    /// The tag/capability
+    /// signing envelope (`serialize_tags_signed`/`serialize_capabilities_signed` in
+    /// `crates/zerotier-node/src/controller/rules.rs`) was byte-verified against
+    /// upstream `Tag.hpp`/`Capability.hpp` but never exercised against a live
+    /// official `zerotier-one` peer. This test assigns a capability + tag to the
+    /// official member before authorization (so `handle_config_request` builds a
+    /// real, non-empty `capabilities_raw`/`tags_raw` credential per
+    /// `crates/zerotier-node/src/controller/engine.rs`) and confirms the official
+    /// client still reaches assigned-IP joined state rather than silently dropping
+    /// or choking on the unfamiliar credential bytes.
+    ///
+    /// Evidence model: host-native only (explicit compromise).
+    /// This does not confirm official *applies* the capability's rule (that would
+    /// need a data-plane rule-effect test); it confirms official's NETWORK_CONFIG
+    /// parser accepts the credential-bearing config without regressing the join.
+    ///
+    /// This test is IGNORED because it requires:
+    ///   - zerotier-one binary in tests/fixtures/ (run download-zerotier.sh)
+    ///   - manytier binary built (cargo build -p zerotier-cli --bin manytier)
+    ///   - curl available for API calls
+    ///   - localhost UDP ports 31998, 31999 and API port 31198 available
+    #[test]
+    #[ignore]
+    fn test_official_client_accepts_capability_and_tag_credentials() {
+        const CONTROLLER_UDP_PORT: u16 = 31998;
+        const CONTROLLER_API_PORT: u16 = 31198;
+
+        let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let status = Command::new("cargo")
+            .args(["build", "-p", "zerotier-cli", "--bin", "manytier"])
+            .status()
+            .expect("cargo build failed");
+        assert!(status.success(), "Failed to build manytier");
+
+        if !zerotier_one_available(&work_dir) {
+            eprintln!(
+                "SKIP: zerotier-one binary not found. Run tests/fixtures/download-zerotier.sh first."
+            );
+            return;
+        }
+
+        let shadow_test_dir =
+            prepare_shadow_test_dir(&work_dir, "official-accepts-capability-and-tag-credentials");
+
+        // Step 1: Start the ManyTier controller.
+        let controller_process = spawn_manytier_with_planet_and_env(
+            &shadow_test_dir,
+            "manytier-controller",
+            CONTROLLER_API_PORT,
+            CONTROLLER_UDP_PORT,
+            true,
+            None,
+            vec![("MANYTIER_DUMP_UDP".to_string(), "1".to_string())],
+        );
+        let controller_data_dir = controller_process.layout.home_dir.clone();
+        let controller_ready =
+            wait_for_manytier_ready(&controller_data_dir, std::time::Duration::from_secs(30));
+        if !controller_ready {
+            let controller_result = finish_host_native_process(controller_process);
+            panic!(
+                "ManyTier controller did not finish identity/API startup in 30s.\n{}",
+                format_host_native_check(&controller_result)
+            );
+        }
+        let controller_addr =
+            read_manytier_address(&controller_data_dir).expect("controller address not readable");
+        let controller_authtoken = read_manytier_authtoken(&controller_data_dir)
+            .expect("controller authtoken not readable");
+        let controller_identity_str =
+            std::fs::read_to_string(controller_data_dir.join("identity.secret"))
+                .unwrap_or_default();
+
+        let zt_one_bin =
+            zerotier_one_binary_path(&work_dir).expect("failed to locate zerotier-one fixture");
+
+        // Step 2: Build a localhost planet + moon pointing at the ManyTier controller,
+        // same pattern as test_official_joins_manytier_controller_fallback.
+        let _planet_path = build_planet_for_localhost(
+            &shadow_test_dir,
+            &controller_identity_str,
+            CONTROLLER_UDP_PORT,
+        );
+        let id_secret_path = shadow_test_dir.join("controller.secret");
+        std::fs::write(&id_secret_path, &controller_identity_str).unwrap();
+        let output = Command::new(&zt_one_bin)
+            .args(["-i", "initmoon", id_secret_path.to_str().unwrap()])
+            .current_dir(&shadow_test_dir)
+            .output()
+            .expect("failed to execute initmoon");
+        let moon_json_path = shadow_test_dir.join("moon.json");
+        let mut moon_json = load_initmoon_json(&shadow_test_dir, &moon_json_path, &output)
+            .unwrap_or_else(|message| panic!("{message}"));
+        if let Some(roots) = moon_json.get_mut("roots") {
+            if let Some(root_obj) = roots[0].as_object_mut() {
+                root_obj.insert(
+                    "stableEndpoints".to_string(),
+                    serde_json::json!([format!("127.0.0.1/{}", CONTROLLER_UDP_PORT)]),
+                );
+            }
+        }
+        std::fs::write(&moon_json_path, serde_json::to_string(&moon_json).unwrap()).unwrap();
+        let _ = Command::new(&zt_one_bin)
+            .args(["-i", "genmoon", moon_json_path.to_str().unwrap()])
+            .current_dir(&shadow_test_dir)
+            .status();
+        let moon_id = (controller_addr[0] as u64) << 32
+            | (controller_addr[1] as u64) << 24
+            | (controller_addr[2] as u64) << 16
+            | (controller_addr[3] as u64) << 8
+            | (controller_addr[4] as u64);
+        let moon_src = shadow_test_dir.join(format!("{:016x}.moon", moon_id));
+
+        // Step 3: Create the network and define a capability + tag on it.
+        let network_id = (0..10)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                create_network_via_manytier_api(
+                    CONTROLLER_API_PORT,
+                    &controller_authtoken,
+                    &hex_encode_address(&controller_addr),
+                )
+            })
+            .expect("failed to create network via ManyTier controller API");
+        let definitions_set = set_network_capability_and_tag_definition_via_manytier_api(
+            CONTROLLER_API_PORT,
+            &controller_authtoken,
+            &network_id,
+        );
+        assert!(
+            definitions_set,
+            "failed to set network-level capability + tag definition via controller API"
+        );
+
+        // Step 4: Prepare and start the official zerotier-one client, pointed at the
+        // localhost moon instead of the default planet.
+        let official_label = "official-client-capability-tag";
+        let official_layout =
+            prepare_host_native_layout(&shadow_test_dir, official_label, "zerotier-one-home");
+        prepare_zerotier_home(
+            &official_layout.home_dir,
+            u64::from_str_radix(&network_id, 16).ok(),
+        );
+        let moons_dir = official_layout.home_dir.join("moons.d");
+        std::fs::create_dir_all(&moons_dir).expect("failed to create moons.d");
+        std::fs::copy(&moon_src, moons_dir.join(format!("{:016x}.moon", moon_id)))
+            .expect("failed to copy moon file");
+
+        let zt_one_bin =
+            zerotier_one_binary_path(&work_dir).expect("failed to locate zerotier-one fixture");
+        let official_stdout_file = File::create(&official_layout.stdout_path)
+            .expect("failed to create official stdout log");
+        let official_stderr_file = File::create(&official_layout.stderr_path)
+            .expect("failed to create official stderr log");
+        let mut official_child = Command::new(&zt_one_bin)
+            .args(["-U", official_layout.home_dir.to_str().unwrap()])
+            .current_dir(workspace_root(&work_dir))
+            .stdout(Stdio::from(official_stdout_file))
+            .stderr(Stdio::from(official_stderr_file))
+            .spawn()
+            .expect("failed to start official zerotier-one client");
+
+        let official_node_addr = (0..20)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                read_zerotier_identity_address(&official_layout.home_dir)
+            })
+            .expect("official client did not generate an identity in time");
+
+        // Step 5: Authorize the official member and grant it the capability + tag,
+        // then orbit the moon and join.
+        let authorized = authorize_member_with_capability_and_tag_via_manytier_api(
+            CONTROLLER_API_PORT,
+            &controller_authtoken,
+            &network_id,
+            &hex_encode_address(&official_node_addr),
+        );
+        assert!(
+            authorized,
+            "failed to authorize + grant capability/tag to official member"
+        );
+
+        let orbit_status = Command::new(&zt_one_bin)
+            .args([
+                "-q",
+                &format!("-D{}", official_layout.home_dir.to_str().unwrap()),
+                "orbit",
+                &format!("{:010x}", moon_id),
+                &format!("{:010x}", moon_id),
+            ])
+            .status()
+            .expect("failed to execute official orbit command");
+        eprintln!(
+            "[cap-tag] Official orbit command status: {:?}",
+            orbit_status
+        );
+
+        let join_status = Command::new(&zt_one_bin)
+            .args([
+                "-q",
+                &format!("-D{}", official_layout.home_dir.to_str().unwrap()),
+                "join",
+                &network_id,
+            ])
+            .status()
+            .expect("failed to execute official join command");
+        eprintln!("[cap-tag] Official join command status: {:?}", join_status);
+
+        // Step 6: Wait for the assigned IPv4 to show up on the controller's own
+        // member record: this only happens after the official client completed
+        // NETWORK_CONFIG_REQUEST and the controller issued (and, on refresh, the
+        // client accepted) the config carrying the capability/tag credential.
+        let mut assigned_ipv4 = wait_for_assigned_ipv4_via_manytier_controller_member_api(
+            CONTROLLER_API_PORT,
+            &controller_authtoken,
+            &network_id,
+            &hex_encode_address(&official_node_addr),
+            std::time::Duration::from_secs(10),
+        );
+        if assigned_ipv4.is_none() {
+            // Refresh join, matching the retry pattern used by the other O2M test.
+            let refresh_status = Command::new(&zt_one_bin)
+                .args([
+                    "-q",
+                    &format!("-D{}", official_layout.home_dir.to_str().unwrap()),
+                    "join",
+                    &network_id,
+                ])
+                .status()
+                .expect("failed to execute official refresh join command");
+            eprintln!(
+                "[cap-tag] Official join refresh status: {:?}",
+                refresh_status
+            );
+            assigned_ipv4 = wait_for_assigned_ipv4_via_manytier_controller_member_api(
+                CONTROLLER_API_PORT,
+                &controller_authtoken,
+                &network_id,
+                &hex_encode_address(&official_node_addr),
+                std::time::Duration::from_secs(10),
+            );
+        }
+
+        let official_tool_parity = capture_official_tool_parity_artifacts(
+            &official_layout.artifact_root,
+            &zt_one_bin,
+            &official_layout.home_dir,
+        );
+
+        let official_combined = strip_ansi_escape_sequences(&format!(
+            "{}\n{}",
+            std::fs::read_to_string(&official_layout.stdout_path).unwrap_or_default(),
+            std::fs::read_to_string(&official_layout.stderr_path).unwrap_or_default(),
+        ));
+
+        let report = format!(
+            "=== Live interop check: official client vs. ManyTier tag/capability credential ===\n\
+             Network: {}\n\
+             Official node: {}\n\
+             Controller-recorded assigned IPv4: {}\n\
+             Official listnetworks output:\n{}\n\
+             Official log tail:\n{}\n",
+            network_id,
+            hex_encode_address(&official_node_addr),
+            assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            official_tool_parity.listnetworks_cli.stdout,
+            summarize_text_block(&official_combined, 40),
+        );
+        let report_path = shadow_test_dir.join("api-01-capability-tag-credential-evidence.txt");
+        std::fs::write(&report_path, &report)
+            .expect("failed to write capability/tag credential evidence report");
+        eprintln!("{}", report);
+
+        let controller_result = finish_host_native_process(controller_process);
+
+        assert!(
+            assigned_ipv4.is_some(),
+            "official client never reached assigned-IP joined state after being granted a \
+             capability + tag credential; NETWORK_CONFIG with capabilities_raw/tags_raw may be \
+             getting rejected or dropped by the official client. See {}",
+            report_path.display()
+        );
+
+        eprintln!(
+            "[cap-tag] Official client reached assigned-IP joined state ({}) with a signed \
+             tag + capability credential present in its NETWORK_CONFIG. Controller log:\n{}",
+            assigned_ipv4.as_deref().unwrap_or("<unassigned>"),
+            summarize_shadow_stdout(&controller_result.stdout, "manytier-controller")
+        );
+
+        let _ = official_child.kill();
+        let _ = official_child.wait();
     }
 }
