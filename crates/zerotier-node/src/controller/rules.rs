@@ -146,6 +146,266 @@ pub fn rule_type_name(rule_type: u8) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Per-rule-type field decomposition
+// ---------------------------------------------------------------------------
+
+/// A rule's `value` bytes decoded into official's typed per-rule-type fields
+/// (matching the field names/shapes `EmbeddedNetworkController.cpp`'s
+/// `_renderRule`/`_parseRule` expose over JSON), rather than the raw wire
+/// blob. Byte layouts verified 2026-07-03 against upstream `Capability.hpp`
+/// `serializeRules`/`deserializeRules` at ZeroTierOne tag `1.14.2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleFields {
+    /// `ACTION_TEE` / `ACTION_WATCH` / `ACTION_REDIRECT`. `length` is only
+    /// meaningful for TEE/WATCH; REDIRECT always encodes it as 0.
+    Forward {
+        address: u64,
+        flags: u32,
+        length: u16,
+    },
+    /// `MATCH_SOURCE_ZEROTIER_ADDRESS` / `MATCH_DEST_ZEROTIER_ADDRESS`.
+    ZtAddress(u64),
+    VlanId(u16),
+    VlanPcp(u8),
+    VlanDei(u8),
+    /// `MATCH_MAC_SOURCE` / `MATCH_MAC_DEST`.
+    Mac([u8; 6]),
+    /// `MATCH_IPV4_SOURCE` / `MATCH_IPV4_DEST`.
+    Ipv4 {
+        ip: [u8; 4],
+        mask: u8,
+    },
+    /// `MATCH_IPV6_SOURCE` / `MATCH_IPV6_DEST`.
+    Ipv6 {
+        ip: [u8; 16],
+        mask: u8,
+    },
+    IpTos {
+        mask: u8,
+        start: u8,
+        end: u8,
+    },
+    IpProtocol(u8),
+    EtherType(u16),
+    Icmp {
+        icmp_type: u8,
+        icmp_code: Option<u8>,
+    },
+    /// `MATCH_IP_SOURCE_PORT_RANGE` / `MATCH_IP_DEST_PORT_RANGE`.
+    PortRange {
+        start: u16,
+        end: u16,
+    },
+    Characteristics(u64),
+    FrameSizeRange {
+        start: u16,
+        end: u16,
+    },
+    RandomProbability(u32),
+    /// `MATCH_TAGS_*` / `MATCH_TAG_SENDER` / `MATCH_TAG_RECEIVER`.
+    Tag {
+        id: u32,
+        value: u32,
+    },
+    /// `end` is the absolute range end (already `start + delta`, matching the
+    /// wire and official's JSON -- not the raw in-memory delta).
+    IntegerRange {
+        start: u64,
+        end: u64,
+        idx: u16,
+        little: bool,
+        bits: u8,
+    },
+}
+
+/// Decode a rule's `value` bytes into typed fields for the rule's type.
+/// Returns `None` for rule types with no value payload (e.g. `ACTION_DROP`,
+/// `ACTION_ACCEPT`, `ACTION_BREAK`, `ACTION_PRIORITY`), unknown rule types,
+/// or a `value` shorter than the type's fixed layout requires.
+pub fn decode_rule_fields(rule_type: u8, value: &[u8]) -> Option<RuleFields> {
+    fn u16_be(b: &[u8]) -> u16 {
+        u16::from_be_bytes([b[0], b[1]])
+    }
+    fn u32_be(b: &[u8]) -> u32 {
+        u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+    }
+    fn u64_be(b: &[u8]) -> u64 {
+        u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+    }
+
+    match rule_type & 0x3F {
+        ACTION_TEE | ACTION_WATCH | ACTION_REDIRECT if value.len() >= 14 => {
+            Some(RuleFields::Forward {
+                address: u64_be(&value[0..8]),
+                flags: u32_be(&value[8..12]),
+                length: u16_be(&value[12..14]),
+            })
+        }
+        MATCH_SOURCE_ZEROTIER_ADDRESS | MATCH_DEST_ZEROTIER_ADDRESS if value.len() >= 5 => {
+            let addr = (value[0] as u64) << 32
+                | (value[1] as u64) << 24
+                | (value[2] as u64) << 16
+                | (value[3] as u64) << 8
+                | value[4] as u64;
+            Some(RuleFields::ZtAddress(addr))
+        }
+        MATCH_VLAN_ID if value.len() >= 2 => Some(RuleFields::VlanId(u16_be(&value[0..2]))),
+        MATCH_VLAN_PCP if !value.is_empty() => Some(RuleFields::VlanPcp(value[0])),
+        MATCH_VLAN_DEI if !value.is_empty() => Some(RuleFields::VlanDei(value[0])),
+        MATCH_MAC_SOURCE | MATCH_MAC_DEST if value.len() >= 6 => {
+            let mut mac = [0u8; 6];
+            mac.copy_from_slice(&value[0..6]);
+            Some(RuleFields::Mac(mac))
+        }
+        MATCH_IPV4_SOURCE | MATCH_IPV4_DEST if value.len() >= 5 => {
+            let mut ip = [0u8; 4];
+            ip.copy_from_slice(&value[0..4]);
+            Some(RuleFields::Ipv4 { ip, mask: value[4] })
+        }
+        MATCH_IPV6_SOURCE | MATCH_IPV6_DEST if value.len() >= 17 => {
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&value[0..16]);
+            Some(RuleFields::Ipv6 {
+                ip,
+                mask: value[16],
+            })
+        }
+        MATCH_IP_TOS if value.len() >= 3 => Some(RuleFields::IpTos {
+            mask: value[0],
+            start: value[1],
+            end: value[2],
+        }),
+        MATCH_IP_PROTOCOL if !value.is_empty() => Some(RuleFields::IpProtocol(value[0])),
+        MATCH_ETHERTYPE if value.len() >= 2 => Some(RuleFields::EtherType(u16_be(&value[0..2]))),
+        MATCH_ICMP if value.len() >= 3 => Some(RuleFields::Icmp {
+            icmp_type: value[0],
+            icmp_code: if value[2] & 0x01 != 0 {
+                Some(value[1])
+            } else {
+                None
+            },
+        }),
+        MATCH_IP_SOURCE_PORT_RANGE | MATCH_IP_DEST_PORT_RANGE if value.len() >= 4 => {
+            Some(RuleFields::PortRange {
+                start: u16_be(&value[0..2]),
+                end: u16_be(&value[2..4]),
+            })
+        }
+        MATCH_CHARACTERISTICS if value.len() >= 8 => {
+            Some(RuleFields::Characteristics(u64_be(&value[0..8])))
+        }
+        MATCH_FRAME_SIZE_RANGE if value.len() >= 4 => Some(RuleFields::FrameSizeRange {
+            start: u16_be(&value[0..2]),
+            end: u16_be(&value[2..4]),
+        }),
+        MATCH_RANDOM if value.len() >= 4 => {
+            Some(RuleFields::RandomProbability(u32_be(&value[0..4])))
+        }
+        MATCH_TAGS_DIFFERENCE
+        | MATCH_TAGS_BITWISE_AND
+        | MATCH_TAGS_BITWISE_OR
+        | MATCH_TAGS_BITWISE_XOR
+        | MATCH_TAGS_EQUAL
+        | MATCH_TAG_SENDER
+        | MATCH_TAG_RECEIVER
+            if value.len() >= 8 =>
+        {
+            Some(RuleFields::Tag {
+                id: u32_be(&value[0..4]),
+                value: u32_be(&value[4..8]),
+            })
+        }
+        MATCH_INTEGER_RANGE if value.len() >= 19 => {
+            let format = value[18];
+            Some(RuleFields::IntegerRange {
+                start: u64_be(&value[0..8]),
+                end: u64_be(&value[8..16]),
+                idx: u16_be(&value[16..18]),
+                little: format & 0x80 != 0,
+                bits: (format & 0x3F) + 1,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Encode typed rule fields back into wire-format `value` bytes, the inverse
+/// of [`decode_rule_fields`].
+pub fn encode_rule_fields(fields: &RuleFields) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match *fields {
+        RuleFields::Forward {
+            address,
+            flags,
+            length,
+        } => {
+            buf.extend_from_slice(&address.to_be_bytes());
+            buf.extend_from_slice(&flags.to_be_bytes());
+            buf.extend_from_slice(&length.to_be_bytes());
+        }
+        RuleFields::ZtAddress(addr) => {
+            let b = addr.to_be_bytes();
+            buf.extend_from_slice(&b[3..8]);
+        }
+        RuleFields::VlanId(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        RuleFields::VlanPcp(v) => buf.push(v),
+        RuleFields::VlanDei(v) => buf.push(v),
+        RuleFields::Mac(mac) => buf.extend_from_slice(&mac),
+        RuleFields::Ipv4 { ip, mask } => {
+            buf.extend_from_slice(&ip);
+            buf.push(mask);
+        }
+        RuleFields::Ipv6 { ip, mask } => {
+            buf.extend_from_slice(&ip);
+            buf.push(mask);
+        }
+        RuleFields::IpTos { mask, start, end } => {
+            buf.push(mask);
+            buf.push(start);
+            buf.push(end);
+        }
+        RuleFields::IpProtocol(v) => buf.push(v),
+        RuleFields::EtherType(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        RuleFields::Icmp {
+            icmp_type,
+            icmp_code,
+        } => {
+            buf.push(icmp_type);
+            buf.push(icmp_code.unwrap_or(0));
+            buf.push(if icmp_code.is_some() { 0x01 } else { 0x00 });
+        }
+        RuleFields::PortRange { start, end } => {
+            buf.extend_from_slice(&start.to_be_bytes());
+            buf.extend_from_slice(&end.to_be_bytes());
+        }
+        RuleFields::Characteristics(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        RuleFields::FrameSizeRange { start, end } => {
+            buf.extend_from_slice(&start.to_be_bytes());
+            buf.extend_from_slice(&end.to_be_bytes());
+        }
+        RuleFields::RandomProbability(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        RuleFields::Tag { id, value } => {
+            buf.extend_from_slice(&id.to_be_bytes());
+            buf.extend_from_slice(&value.to_be_bytes());
+        }
+        RuleFields::IntegerRange {
+            start,
+            end,
+            idx,
+            little,
+            bits,
+        } => {
+            buf.extend_from_slice(&start.to_be_bytes());
+            buf.extend_from_slice(&end.to_be_bytes());
+            buf.extend_from_slice(&idx.to_be_bytes());
+            let format = ((bits - 1) & 0x3F) | if little { 0x80 } else { 0 };
+            buf.push(format);
+        }
+    }
+    buf
+}
+
+// ---------------------------------------------------------------------------
 // Serialization
 // ---------------------------------------------------------------------------
 
@@ -386,6 +646,137 @@ mod tests {
         // NOT/OR flag bits (0x80/0x40) must be masked off before lookup.
         assert_eq!(rule_type_name(MATCH_ETHERTYPE | 0x80), "MATCH_ETHERTYPE");
         assert_eq!(rule_type_name(0x3e), "UNKNOWN");
+    }
+
+    #[test]
+    fn decode_rule_fields_returns_none_for_valueless_types() {
+        assert_eq!(decode_rule_fields(ACTION_DROP, &[]), None);
+        assert_eq!(decode_rule_fields(ACTION_ACCEPT, &[]), None);
+        assert_eq!(decode_rule_fields(ACTION_BREAK, &[]), None);
+        assert_eq!(decode_rule_fields(ACTION_PRIORITY, &[]), None);
+        assert_eq!(decode_rule_fields(0x3e, &[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn decode_rule_fields_ip_protocol_and_ethertype_match_upstream_byte_widths() {
+        // MATCH_ETHERTYPE: single u16 BE (matches
+        // serialize_ethertype_match_then_accept's [0x08, 0x00] fixture).
+        assert_eq!(
+            decode_rule_fields(MATCH_ETHERTYPE, &[0x08, 0x00]),
+            Some(RuleFields::EtherType(0x0800))
+        );
+        assert_eq!(
+            decode_rule_fields(MATCH_IP_PROTOCOL, &[6]),
+            Some(RuleFields::IpProtocol(6))
+        );
+    }
+
+    #[test]
+    fn rule_fields_round_trip_through_encode_decode_for_every_type() {
+        let cases = [
+            (
+                ACTION_TEE,
+                RuleFields::Forward {
+                    address: 0x0102030405,
+                    flags: 7,
+                    length: 200,
+                },
+            ),
+            (
+                MATCH_SOURCE_ZEROTIER_ADDRESS,
+                RuleFields::ZtAddress(0x8899aabbcc),
+            ),
+            (MATCH_VLAN_ID, RuleFields::VlanId(42)),
+            (MATCH_VLAN_PCP, RuleFields::VlanPcp(3)),
+            (MATCH_VLAN_DEI, RuleFields::VlanDei(1)),
+            (
+                MATCH_MAC_SOURCE,
+                RuleFields::Mac([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            ),
+            (
+                MATCH_IPV4_SOURCE,
+                RuleFields::Ipv4 {
+                    ip: [10, 0, 0, 1],
+                    mask: 24,
+                },
+            ),
+            (
+                MATCH_IPV6_SOURCE,
+                RuleFields::Ipv6 {
+                    ip: [0xfd; 16],
+                    mask: 64,
+                },
+            ),
+            (
+                MATCH_IP_TOS,
+                RuleFields::IpTos {
+                    mask: 0xff,
+                    start: 1,
+                    end: 2,
+                },
+            ),
+            (MATCH_IP_PROTOCOL, RuleFields::IpProtocol(17)),
+            (MATCH_ETHERTYPE, RuleFields::EtherType(0x86dd)),
+            (
+                MATCH_ICMP,
+                RuleFields::Icmp {
+                    icmp_type: 8,
+                    icmp_code: Some(0),
+                },
+            ),
+            (
+                MATCH_ICMP,
+                RuleFields::Icmp {
+                    icmp_type: 8,
+                    icmp_code: None,
+                },
+            ),
+            (
+                MATCH_IP_SOURCE_PORT_RANGE,
+                RuleFields::PortRange {
+                    start: 1024,
+                    end: 2048,
+                },
+            ),
+            (
+                MATCH_CHARACTERISTICS,
+                RuleFields::Characteristics(0xdead_beef_1234_5678),
+            ),
+            (
+                MATCH_FRAME_SIZE_RANGE,
+                RuleFields::FrameSizeRange {
+                    start: 64,
+                    end: 1500,
+                },
+            ),
+            (MATCH_RANDOM, RuleFields::RandomProbability(0x7fff_ffff)),
+            (
+                MATCH_TAGS_EQUAL,
+                RuleFields::Tag {
+                    id: 9,
+                    value: 12345,
+                },
+            ),
+            (
+                MATCH_INTEGER_RANGE,
+                RuleFields::IntegerRange {
+                    start: 100,
+                    end: 200,
+                    idx: 4,
+                    little: true,
+                    bits: 32,
+                },
+            ),
+        ];
+        for (rule_type, fields) in cases {
+            let encoded = encode_rule_fields(&fields);
+            let decoded = decode_rule_fields(rule_type, &encoded);
+            assert_eq!(
+                decoded,
+                Some(fields),
+                "round-trip mismatch for rule_type {rule_type:#x}"
+            );
+        }
     }
 
     #[test]
