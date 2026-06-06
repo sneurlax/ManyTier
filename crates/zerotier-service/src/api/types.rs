@@ -107,7 +107,17 @@ pub struct RuleResponse {
     pub not: bool,
     #[serde(rename = "or")]
     pub or_flag: bool,
+    /// Raw wire-format value bytes. Always the authoritative, lossless
+    /// representation; recomputed on every GET from the rule's actual bytes.
     pub value: Vec<u8>,
+    /// The same value decoded into official's type-specific named fields
+    /// (e.g. `{"ipProtocol": 6}` for `MATCH_IP_PROTOCOL`), nested here rather
+    /// than flattened to avoid colliding with `value` (official's own flat
+    /// schema reuses `"value"` for `MATCH_TAG*` rules' tag value). `None` for
+    /// rule types with no value payload or an unrecognized type. On input,
+    /// used only when `value` is empty -- an explicit `value` always wins.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fields: Option<serde_json::Value>,
 }
 
 /// A network-level capability definition (id + rule chain).

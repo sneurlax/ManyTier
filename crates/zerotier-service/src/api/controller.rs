@@ -392,16 +392,241 @@ fn rule_to_response(rule: &zerotier_node::controller::rules::Rule) -> RuleRespon
         not: rule.not_flag,
         or_flag: rule.or_flag,
         value: rule.value.clone(),
+        fields: zerotier_node::controller::rules::decode_rule_fields(rule.rule_type, &rule.value)
+            .map(rule_fields_to_json),
     }
 }
 
 fn rule_from_response(rule: &RuleResponse) -> zerotier_node::controller::rules::Rule {
+    let value = if rule.value.is_empty() {
+        rule.fields
+            .as_ref()
+            .and_then(|f| rule_fields_from_json(rule.rule_type, f))
+            .map(|f| zerotier_node::controller::rules::encode_rule_fields(&f))
+            .unwrap_or_default()
+    } else {
+        rule.value.clone()
+    };
     zerotier_node::controller::rules::Rule {
         rule_type: rule.rule_type,
         not_flag: rule.not,
         or_flag: rule.or_flag,
-        value: rule.value.clone(),
+        value,
     }
+}
+
+/// Render decoded rule fields into official's per-rule-type JSON key names
+/// (e.g. `"ipProtocol"`, `"vlanId"`), matching `EmbeddedNetworkController.cpp`
+/// `_renderRule`'s field shapes.
+fn rule_fields_to_json(fields: zerotier_node::controller::rules::RuleFields) -> serde_json::Value {
+    use zerotier_node::controller::rules::RuleFields;
+    match fields {
+        RuleFields::Forward {
+            address,
+            flags,
+            length,
+        } => serde_json::json!({
+            "address": format_node_id(&addr_u64_to_bytes(address)),
+            "flags": flags,
+            "length": length,
+        }),
+        RuleFields::ZtAddress(addr) => serde_json::json!({
+            "zt": format_node_id(&addr_u64_to_bytes(addr)),
+        }),
+        RuleFields::VlanId(v) => serde_json::json!({ "vlanId": v }),
+        RuleFields::VlanPcp(v) => serde_json::json!({ "vlanPcp": v }),
+        RuleFields::VlanDei(v) => serde_json::json!({ "vlanDei": v }),
+        RuleFields::Mac(mac) => serde_json::json!({
+            "mac": format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ),
+        }),
+        RuleFields::Ipv4 { ip, mask } => serde_json::json!({
+            "ip": format!("{}.{}.{}.{}/{}", ip[0], ip[1], ip[2], ip[3], mask),
+        }),
+        RuleFields::Ipv6 { ip, mask } => {
+            let addr = std::net::Ipv6Addr::from(ip);
+            serde_json::json!({ "ip": format!("{}/{}", addr, mask) })
+        }
+        RuleFields::IpTos { mask, start, end } => serde_json::json!({
+            "mask": mask,
+            "start": start,
+            "end": end,
+        }),
+        RuleFields::IpProtocol(v) => serde_json::json!({ "ipProtocol": v }),
+        RuleFields::EtherType(v) => serde_json::json!({ "etherType": v }),
+        RuleFields::Icmp {
+            icmp_type,
+            icmp_code,
+        } => serde_json::json!({
+            "icmpType": icmp_type,
+            "icmpCode": icmp_code,
+        }),
+        RuleFields::PortRange { start, end } => serde_json::json!({
+            "start": start,
+            "end": end,
+        }),
+        RuleFields::Characteristics(v) => serde_json::json!({
+            "mask": format!("{:016x}", v),
+        }),
+        RuleFields::FrameSizeRange { start, end } => serde_json::json!({
+            "start": start,
+            "end": end,
+        }),
+        RuleFields::RandomProbability(v) => serde_json::json!({ "probability": v }),
+        RuleFields::Tag { id, value } => serde_json::json!({
+            "id": id,
+            "value": value,
+        }),
+        RuleFields::IntegerRange {
+            start,
+            end,
+            idx,
+            little,
+            bits,
+        } => serde_json::json!({
+            "start": format!("{:016x}", start),
+            "end": format!("{:016x}", end),
+            "idx": idx,
+            "little": little,
+            "bits": bits,
+        }),
+    }
+}
+
+/// Parse official's per-rule-type JSON fields back into [`RuleFields`] for a
+/// given rule type, the inverse of [`rule_fields_to_json`]. Returns `None` if
+/// the JSON is missing required keys or the rule type has no field shape.
+fn rule_fields_from_json(
+    rule_type: u8,
+    json: &serde_json::Value,
+) -> Option<zerotier_node::controller::rules::RuleFields> {
+    use zerotier_node::controller::rules::{
+        RuleFields, ACTION_REDIRECT, ACTION_TEE, ACTION_WATCH, MATCH_CHARACTERISTICS,
+        MATCH_DEST_ZEROTIER_ADDRESS, MATCH_ETHERTYPE, MATCH_FRAME_SIZE_RANGE, MATCH_ICMP,
+        MATCH_INTEGER_RANGE, MATCH_IPV4_DEST, MATCH_IPV4_SOURCE, MATCH_IPV6_DEST,
+        MATCH_IPV6_SOURCE, MATCH_IP_DEST_PORT_RANGE, MATCH_IP_PROTOCOL, MATCH_IP_SOURCE_PORT_RANGE,
+        MATCH_IP_TOS, MATCH_MAC_DEST, MATCH_MAC_SOURCE, MATCH_RANDOM,
+        MATCH_SOURCE_ZEROTIER_ADDRESS, MATCH_TAGS_BITWISE_AND, MATCH_TAGS_BITWISE_OR,
+        MATCH_TAGS_BITWISE_XOR, MATCH_TAGS_DIFFERENCE, MATCH_TAGS_EQUAL, MATCH_TAG_RECEIVER,
+        MATCH_TAG_SENDER, MATCH_VLAN_DEI, MATCH_VLAN_ID, MATCH_VLAN_PCP,
+    };
+
+    fn u(json: &serde_json::Value, key: &str) -> Option<u64> {
+        json.get(key).and_then(|v| v.as_u64())
+    }
+    fn hex_addr(json: &serde_json::Value, key: &str) -> Option<u64> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+    }
+    fn hex_u64(json: &serde_json::Value, key: &str) -> Option<u64> {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| u64::from_str_radix(s, 16).ok())
+    }
+
+    match rule_type & 0x3F {
+        ACTION_TEE | ACTION_WATCH | ACTION_REDIRECT => Some(RuleFields::Forward {
+            address: hex_addr(json, "address")?,
+            flags: u(json, "flags").unwrap_or(0) as u32,
+            length: u(json, "length").unwrap_or(0) as u16,
+        }),
+        MATCH_SOURCE_ZEROTIER_ADDRESS | MATCH_DEST_ZEROTIER_ADDRESS => {
+            Some(RuleFields::ZtAddress(hex_addr(json, "zt")?))
+        }
+        MATCH_VLAN_ID => Some(RuleFields::VlanId(u(json, "vlanId")? as u16)),
+        MATCH_VLAN_PCP => Some(RuleFields::VlanPcp(u(json, "vlanPcp")? as u8)),
+        MATCH_VLAN_DEI => Some(RuleFields::VlanDei(u(json, "vlanDei")? as u8)),
+        MATCH_MAC_SOURCE | MATCH_MAC_DEST => {
+            let s = json.get("mac")?.as_str()?;
+            let bytes: Vec<u8> = s
+                .split(':')
+                .map(|h| u8::from_str_radix(h, 16))
+                .collect::<Result<_, _>>()
+                .ok()?;
+            let mut mac = [0u8; 6];
+            if bytes.len() != 6 {
+                return None;
+            }
+            mac.copy_from_slice(&bytes);
+            Some(RuleFields::Mac(mac))
+        }
+        MATCH_IPV4_SOURCE | MATCH_IPV4_DEST => {
+            let s = json.get("ip")?.as_str()?;
+            let (addr, mask) = s.split_once('/')?;
+            let ip: std::net::Ipv4Addr = addr.parse().ok()?;
+            Some(RuleFields::Ipv4 {
+                ip: ip.octets(),
+                mask: mask.parse().ok()?,
+            })
+        }
+        MATCH_IPV6_SOURCE | MATCH_IPV6_DEST => {
+            let s = json.get("ip")?.as_str()?;
+            let (addr, mask) = s.split_once('/')?;
+            let ip: std::net::Ipv6Addr = addr.parse().ok()?;
+            Some(RuleFields::Ipv6 {
+                ip: ip.octets(),
+                mask: mask.parse().ok()?,
+            })
+        }
+        MATCH_IP_TOS => Some(RuleFields::IpTos {
+            mask: u(json, "mask")? as u8,
+            start: u(json, "start")? as u8,
+            end: u(json, "end")? as u8,
+        }),
+        MATCH_IP_PROTOCOL => Some(RuleFields::IpProtocol(u(json, "ipProtocol")? as u8)),
+        MATCH_ETHERTYPE => Some(RuleFields::EtherType(u(json, "etherType")? as u16)),
+        MATCH_ICMP => Some(RuleFields::Icmp {
+            icmp_type: u(json, "icmpType")? as u8,
+            icmp_code: json
+                .get("icmpCode")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u8),
+        }),
+        MATCH_IP_SOURCE_PORT_RANGE | MATCH_IP_DEST_PORT_RANGE => Some(RuleFields::PortRange {
+            start: u(json, "start")? as u16,
+            end: u(json, "end")? as u16,
+        }),
+        MATCH_CHARACTERISTICS => Some(RuleFields::Characteristics(hex_u64(json, "mask")?)),
+        MATCH_FRAME_SIZE_RANGE => Some(RuleFields::FrameSizeRange {
+            start: u(json, "start")? as u16,
+            end: u(json, "end")? as u16,
+        }),
+        MATCH_RANDOM => Some(RuleFields::RandomProbability(u(json, "probability")? as u32)),
+        MATCH_TAGS_DIFFERENCE
+        | MATCH_TAGS_BITWISE_AND
+        | MATCH_TAGS_BITWISE_OR
+        | MATCH_TAGS_BITWISE_XOR
+        | MATCH_TAGS_EQUAL
+        | MATCH_TAG_SENDER
+        | MATCH_TAG_RECEIVER => Some(RuleFields::Tag {
+            id: u(json, "id")? as u32,
+            value: u(json, "value")? as u32,
+        }),
+        MATCH_INTEGER_RANGE => Some(RuleFields::IntegerRange {
+            start: hex_u64(json, "start")?,
+            end: hex_u64(json, "end")?,
+            idx: u(json, "idx")? as u16,
+            little: json
+                .get("little")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            bits: u(json, "bits")? as u8,
+        }),
+        _ => None,
+    }
+}
+
+fn addr_u64_to_bytes(addr: u64) -> [u8; 5] {
+    [
+        (addr >> 32) as u8,
+        (addr >> 24) as u8,
+        (addr >> 16) as u8,
+        (addr >> 8) as u8,
+        addr as u8,
+    ]
 }
 
 fn capability_to_response(
@@ -721,5 +946,166 @@ fn member_to_response(
         v_proto: -1,
         capabilities: member.capabilities.clone(),
         tags: member.tags.iter().map(tag_to_response).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zerotier_node::controller::rules::{
+        Rule, MATCH_ETHERTYPE, MATCH_IP_PROTOCOL, MATCH_TAGS_EQUAL,
+    };
+
+    #[test]
+    fn rule_to_response_decodes_named_fields_and_keeps_raw_value() {
+        let rule = Rule {
+            rule_type: MATCH_IP_PROTOCOL,
+            not_flag: false,
+            or_flag: false,
+            value: vec![6],
+        };
+        let resp = rule_to_response(&rule);
+        assert_eq!(resp.value, vec![6]);
+        assert_eq!(resp.type_name, "MATCH_IP_PROTOCOL");
+        assert_eq!(resp.fields, Some(serde_json::json!({ "ipProtocol": 6 })));
+    }
+
+    #[test]
+    fn rule_to_response_has_no_fields_for_valueless_action() {
+        let rule = Rule {
+            rule_type: zerotier_node::controller::rules::ACTION_ACCEPT,
+            not_flag: false,
+            or_flag: false,
+            value: vec![],
+        };
+        let resp = rule_to_response(&rule);
+        assert_eq!(resp.fields, None);
+    }
+
+    #[test]
+    fn rule_from_response_prefers_explicit_value_over_fields() {
+        let resp = RuleResponse {
+            rule_type: MATCH_ETHERTYPE,
+            type_name: "MATCH_ETHERTYPE".to_string(),
+            not: false,
+            or_flag: false,
+            value: vec![0x08, 0x00],
+            fields: Some(serde_json::json!({ "etherType": 0x86dd })),
+        };
+        let rule = rule_from_response(&resp);
+        // value is non-empty, so it wins over the (mismatched) fields.
+        assert_eq!(rule.value, vec![0x08, 0x00]);
+    }
+
+    #[test]
+    fn rule_from_response_encodes_fields_when_value_is_empty() {
+        let resp = RuleResponse {
+            rule_type: MATCH_TAGS_EQUAL,
+            type_name: "MATCH_TAGS_EQUAL".to_string(),
+            not: false,
+            or_flag: false,
+            value: vec![],
+            fields: Some(serde_json::json!({ "id": 9, "value": 12345 })),
+        };
+        let rule = rule_from_response(&resp);
+        assert_eq!(rule.value, vec![0, 0, 0, 9, 0, 0, 48, 57]);
+    }
+
+    #[test]
+    fn rule_fields_round_trip_through_json_for_every_named_type() {
+        use zerotier_node::controller::rules::*;
+        let cases = [
+            (
+                ACTION_TEE,
+                Rule {
+                    rule_type: ACTION_TEE,
+                    not_flag: false,
+                    or_flag: false,
+                    value: encode_rule_fields(&RuleFields::Forward {
+                        address: 0x0102030405,
+                        flags: 7,
+                        length: 200,
+                    }),
+                },
+            ),
+            (
+                MATCH_VLAN_ID,
+                Rule {
+                    rule_type: MATCH_VLAN_ID,
+                    not_flag: false,
+                    or_flag: false,
+                    value: encode_rule_fields(&RuleFields::VlanId(42)),
+                },
+            ),
+            (
+                MATCH_MAC_SOURCE,
+                Rule {
+                    rule_type: MATCH_MAC_SOURCE,
+                    not_flag: false,
+                    or_flag: false,
+                    value: encode_rule_fields(&RuleFields::Mac([0, 0x11, 0x22, 0x33, 0x44, 0x55])),
+                },
+            ),
+            (
+                MATCH_IPV4_SOURCE,
+                Rule {
+                    rule_type: MATCH_IPV4_SOURCE,
+                    not_flag: true,
+                    or_flag: false,
+                    value: encode_rule_fields(&RuleFields::Ipv4 {
+                        ip: [10, 0, 0, 1],
+                        mask: 24,
+                    }),
+                },
+            ),
+            (
+                MATCH_IPV6_DEST,
+                Rule {
+                    rule_type: MATCH_IPV6_DEST,
+                    not_flag: false,
+                    or_flag: true,
+                    value: encode_rule_fields(&RuleFields::Ipv6 {
+                        ip: [0xfd; 16],
+                        mask: 64,
+                    }),
+                },
+            ),
+            (
+                MATCH_INTEGER_RANGE,
+                Rule {
+                    rule_type: MATCH_INTEGER_RANGE,
+                    not_flag: false,
+                    or_flag: false,
+                    value: encode_rule_fields(&RuleFields::IntegerRange {
+                        start: 100,
+                        end: 200,
+                        idx: 4,
+                        little: true,
+                        bits: 32,
+                    }),
+                },
+            ),
+        ];
+        for (rule_type, rule) in cases {
+            let resp = rule_to_response(&rule);
+            assert!(
+                resp.fields.is_some(),
+                "expected decoded fields for rule_type {rule_type:#x}"
+            );
+            // Simulate a client round-trip: re-encode value from fields alone.
+            let resp_via_fields = RuleResponse {
+                rule_type: resp.rule_type,
+                type_name: resp.type_name.clone(),
+                not: resp.not,
+                or_flag: resp.or_flag,
+                value: vec![],
+                fields: resp.fields.clone(),
+            };
+            let round_tripped = rule_from_response(&resp_via_fields);
+            assert_eq!(
+                round_tripped.value, rule.value,
+                "mismatch for rule_type {rule_type:#x}"
+            );
+        }
     }
 }
