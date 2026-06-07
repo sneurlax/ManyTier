@@ -20,12 +20,33 @@ use zerotier_protocol::verbs::network_config::CertificateOfMembership;
 ///
 /// Required text keys: nwid, n, t, v, ts, r, id, f, mtu, ml
 /// Required binary keys: C (COM), R (rules), I (IP assignments), RT (routes)
+///
+/// `capabilities_raw`/`tags_raw` are pre-signed, concatenated
+/// `Capability`/`Tag` object bytes (see
+/// `super::rules::serialize_capabilities_signed`/`serialize_tags_signed`) for
+/// *this requesting member's own* granted capabilities/tags. Per upstream
+/// `node/NetworkConfig.cpp` (`NetworkConfig::fromDictionary`), official reads
+/// its own `_config.capabilities`/`_config.tags` -- which its own outbound
+/// VL2 rule filter (`Network::filterOutgoingPacket`, via `_doZtFilter` in
+/// `node/Network.cpp`) consults directly -- exclusively from the `CAP`/`TAG`
+/// keys of *its own* network config dictionary, not from any other
+/// packet-level field. A separate `VERB_NETWORK_CREDENTIALS` push (see
+/// `NetworkCredentialsPayload` elsewhere in this controller) is a distinct,
+/// additional mechanism official peers use to tell EACH OTHER about their
+/// own credentials once a P2P session exists; it does not substitute for
+/// embedding a member's own capabilities/tags in that same member's own
+/// network config dictionary, which is what populates its own
+/// `_config.capabilities`/`_config.tags` for its own outbound filter to act
+/// on. Passing `&[]` omits the key entirely, matching official's own
+/// behavior of omitting `CAP`/`TAG` when a member holds none.
 pub fn build_network_config(
     network: &NetworkRecord,
     member: &MemberRecord,
     routes: &[ManagedRoute],
     com: &CertificateOfMembership,
     now_ms: u64,
+    capabilities_raw: &[u8],
+    tags_raw: &[u8],
 ) -> Vec<u8> {
     let mut dict = Dictionary::new();
 
@@ -80,6 +101,17 @@ pub fn build_network_config(
 
     // RT: Routes binary
     dict.add_binary("RT", serialize_routes(routes, &member.ip_assignments));
+
+    // CAP: this member's own granted capabilities (see doc comment above for
+    // why this must live here rather than only in a NETWORK_CREDENTIALS push).
+    if !capabilities_raw.is_empty() {
+        dict.add_binary("CAP", capabilities_raw.to_vec());
+    }
+
+    // TAG: this member's own assigned tags.
+    if !tags_raw.is_empty() {
+        dict.add_binary("TAG", tags_raw.to_vec());
+    }
 
     dict.serialize()
 }
@@ -413,7 +445,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000, &[], &[]);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         assert_eq!(dict.get_text("nwid"), Some("ff00001234560001"));
@@ -496,7 +528,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000, &[], &[]);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         assert_eq!(dict.get_text("t"), Some("1")); // public = 1
@@ -508,7 +540,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000, &[], &[]);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         let com_binary = dict.get_binary("C").expect("C key missing");
@@ -523,7 +555,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000, &[], &[]);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         let rules = dict.get_binary("R").expect("R key missing");
@@ -536,7 +568,7 @@ mod tests {
         let member = test_member();
         let com = test_com();
 
-        let bytes = build_network_config(&network, &member, &[], &com, 5000000);
+        let bytes = build_network_config(&network, &member, &[], &com, 5000000, &[], &[]);
         let dict = Dictionary::deserialize(&bytes).unwrap();
 
         assert_eq!(dict.get_text("ctmd"), Some("1b7740"));

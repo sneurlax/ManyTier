@@ -220,8 +220,59 @@ impl<S: ControllerStorage> Controller<S> {
             now_ms,
         );
 
+        // Only the capability definitions this member is granted are
+        // issued to it, signed with the controller's key. These must be
+        // embedded directly in *this member's own* network config dictionary
+        // (`CAP`/`TAG` keys, below) -- not only carried in the separate
+        // `NetworkCredentialsPayload` -- because upstream
+        // `NetworkConfig::fromDictionary` populates a node's own
+        // `_config.capabilities`/`_config.tags` (which its own outbound VL2
+        // rule filter consults) exclusively from its own network config
+        // dictionary. See `build_network_config`'s doc comment for the full
+        // citation; this was confirmed live via
+        // `test_official_capability_gates_data_plane_frame_delivery`, which
+        // observed zero data-plane delivery until this embedding was added.
+        let member_caps: Vec<super::rules::Capability> = network
+            .capabilities
+            .iter()
+            .filter(|cap| member.capabilities.contains(&cap.id))
+            .cloned()
+            .collect();
+        let capabilities_raw = if member_caps.is_empty() {
+            Vec::new()
+        } else {
+            super::rules::serialize_capabilities_signed(
+                &member_caps,
+                network_id,
+                requester,
+                &self.address,
+                now_ms,
+                &self.signing_key,
+            )
+        };
+        let tags_raw = if member.tags.is_empty() {
+            Vec::new()
+        } else {
+            super::rules::serialize_tags_signed(
+                &member.tags,
+                network_id,
+                requester,
+                &self.address,
+                now_ms,
+                &self.signing_key,
+            )
+        };
+
         // Build network config dictionary
-        let dict_data = build_network_config(&network, &member, &routes, &com, now_ms);
+        let dict_data = build_network_config(
+            &network,
+            &member,
+            &routes,
+            &com,
+            now_ms,
+            &capabilities_raw,
+            &tags_raw,
+        );
         let member_ids = self
             .storage
             .list_members(network_id)
@@ -258,39 +309,8 @@ impl<S: ControllerStorage> Controller<S> {
             signature: None,
         };
 
-        // Only the capability definitions this member is actually granted are
-        // issued to it, signed with the controller's key.
-        let member_caps: Vec<super::rules::Capability> = network
-            .capabilities
-            .iter()
-            .filter(|cap| member.capabilities.contains(&cap.id))
-            .cloned()
-            .collect();
-        let capabilities_raw = if member_caps.is_empty() {
-            Vec::new()
-        } else {
-            super::rules::serialize_capabilities_signed(
-                &member_caps,
-                network_id,
-                requester,
-                &self.address,
-                now_ms,
-                &self.signing_key,
-            )
-        };
-        let tags_raw = if member.tags.is_empty() {
-            Vec::new()
-        } else {
-            super::rules::serialize_tags_signed(
-                &member.tags,
-                network_id,
-                requester,
-                &self.address,
-                now_ms,
-                &self.signing_key,
-            )
-        };
-
+        // `capabilities_raw`/`tags_raw` were already computed above (needed
+        // earlier now to embed into this member's own network config dict).
         let credentials = NetworkCredentialsPayload {
             com: Some(com),
             capabilities_raw,
@@ -451,7 +471,10 @@ pub fn u64_to_zt_address(addr: u64) -> [u8; 5] {
 /// Qualifiers:
 /// - id=0: timestamp with max_delta=360000 (6 minutes)
 /// - id=1: network_id with max_delta=0
-/// - id=2: issued_to (node address as u64) with max_delta=0
+/// - id=2: issued_to (node address as u64) with max_delta=u64::MAX (matches
+///   upstream `CertificateOfMembership::CertificateOfMembership` -- this
+///   qualifier differs for every member by definition, so it must not
+///   participate in `agreesWith`'s delta check)
 ///
 /// Signature is computed over canonical qualifier data (sorted by ID,
 /// each as id + value + max_delta in big-endian).
@@ -476,7 +499,22 @@ pub fn build_signed_com(
         ComQualifier {
             id: 2,
             value: issued_to,
-            max_delta: 0,
+            // Upstream `CertificateOfMembership::CertificateOfMembership(timestamp,
+            // timestampMaxDelta, nwid, issuedTo)` (node/CertificateOfMembership.cpp)
+            // sets this qualifier's max_delta to `0xffffffffffffffff` (u64::MAX),
+            // not 0. `CertificateOfMembership::agreesWith` requires
+            // `|mine - theirs| <= max_delta` for every qualifier ID present, and
+            // "issued to" is by definition a different ZT address for every pair
+            // of members -- a max_delta of 0 here made `agreesWith` fail for any
+            // two distinct members, permanently blocking member-to-member COM
+            // agreement (and therefore all VL2 frame delivery) once more than one
+            // member ever tried to talk to another. Confirmed live: this was
+            // masked in every prior single-peer test (a lone official talking
+            // only to the controller never exercises peer-to-peer COM
+            // cross-validation) and only surfaced once a real two-official-peer
+            // data-plane test was added (the privileged-Docker capability
+            // rule-enforcement check).
+            max_delta: u64::MAX,
         },
     ];
 
@@ -795,7 +833,7 @@ mod tests {
         assert_eq!(com.qualifiers[1].max_delta, 0);
         assert_eq!(com.qualifiers[2].id, 2);
         assert_eq!(com.qualifiers[2].value, 0xABCDEF); // issued_to
-        assert_eq!(com.qualifiers[2].max_delta, 0);
+        assert_eq!(com.qualifiers[2].max_delta, u64::MAX);
         assert_eq!(com.signature.len(), 96);
         assert_eq!(com.signer_address, addr);
 
