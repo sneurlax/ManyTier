@@ -2015,6 +2015,232 @@ fn authorize_member_with_capability_and_tag_via_manytier_api(
     output.map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Define a network-level rule chain that never delivers an explicit
+/// ACTION_ACCEPT/ACTION_DROP verdict at network scope, plus a capability
+/// (`id: 1`) whose own embedded rule set is an unconditional `ACTION_ACCEPT`.
+///
+/// Per upstream `node/Capability.hpp` (ZeroTierOne 1.14.2): "capability rules
+/// ... [are evaluated] after evaluation of network scope rules and only if
+/// network scope rules do not deliver an explicit match." A single
+/// `MATCH_IP_PROTOCOL` rule with no following `ACTION_*` rule can never
+/// deliver an explicit verdict (see `node/Network.cpp` `_doZtFilter`: an
+/// `ACTION_*` rule only fires `if (thisSetMatches)`, and with no `ACTION_*`
+/// rule present at all the loop falls through to
+/// `DOZTFILTER_NO_MATCH`), so this reliably forces every packet down into
+/// per-capability evaluation. A member holding capability 1 is then
+/// unconditionally accepted (both on its own outbound filter and on a
+/// receiving peer's inbound filter, once that peer's `Membership` has the
+/// capability credential); a member without it is unconditionally dropped by
+/// `_doZtFilter`'s final `NO_MATCH` -> drop fallback in
+/// `Network::filterOutgoingPacket`/`filterIncomingPacket`.
+///
+/// Used by `test_official_capability_gates_data_plane_frame_delivery`
+/// (privileged-Docker live interop check).
+fn set_network_capability_gated_rules_via_manytier_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+) -> bool {
+    let url = format!(
+        "http://127.0.0.1:{}/controller/network/{}",
+        api_port, network_id
+    );
+    let body = serde_json::json!({
+        "rules": [
+            {"ruleType": 36, "not": false, "or": false, "value": [6]}
+        ],
+        "capabilities": [
+            {"id": 1, "rules": [{"ruleType": 1, "not": false, "or": false, "value": []}]}
+        ]
+    });
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body.to_string(),
+            &url,
+        ])
+        .output();
+    output.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Authorize a member and set its exact capability-id assignment list (may be
+/// empty) via the ManyTier controller API. Unlike
+/// `authorize_member_with_capability_and_tag_via_manytier_api`, this always
+/// sends an explicit `capabilities` array (including `[]`), so it can also be
+/// used to *revoke* a previously granted capability by re-POSTing an empty
+/// list.
+fn authorize_member_with_capabilities_via_manytier_api(
+    api_port: u16,
+    authtoken: &str,
+    network_id: &str,
+    member_addr_hex: &str,
+    capability_ids: &[u32],
+) -> bool {
+    let url = format!(
+        "http://127.0.0.1:{}/controller/network/{}/member/{}",
+        api_port, network_id, member_addr_hex
+    );
+    let body = serde_json::json!({
+        "authorized": true,
+        "capabilities": capability_ids,
+    });
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            &format!("X-ZT1-Auth: {}", authtoken),
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body.to_string(),
+            &url,
+        ])
+        .output();
+    output.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Read the link-layer (MAC) address of a network interface via `ip -o link
+/// show <iface>`.
+fn mac_address_for_interface(interface: &str) -> Option<String> {
+    let output = Command::new("ip")
+        .args(["-o", "link", "show", interface])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let idx = text.find("link/ether ")?;
+    let rest = &text[idx + "link/ether ".len()..];
+    rest.split_whitespace().next().map(|s| s.to_string())
+}
+
+/// Pre-populate the kernel neighbor (ARP) cache entry for `dest_ip` on
+/// `interface` so a subsequent `ping` emits a unicast Ethernet frame
+/// immediately, without first needing an ARP broadcast to resolve `dest_ip`'s
+/// MAC. This is done because ZeroTier's rule/capability filter (see
+/// `_doZtFilter` in upstream `node/Network.cpp`) applies uniformly to every
+/// Ethernet frame regardless of type, so an unresolved ARP broadcast would
+/// also be gated by the same capability check as the ICMP frame this test
+/// wants to observe -- conflating "capability gates unicast
+/// delivery" (what this test verifies) with "capability/network config also
+/// gates ARP broadcast resolution" (a related but distinct claim about
+/// ZeroTier's multicast/broadcast subsystem that this test does not attempt
+/// to verify). Best-effort: failures are logged but not fatal, since a
+/// missing neighbor entry just means the capture may show nothing for a
+/// different (ARP-related) reason, which the report text still surfaces.
+fn prime_static_neighbor(interface: &str, dest_ip: &str, dest_mac: &str) -> bool {
+    let output = Command::new("ip")
+        .args([
+            "neigh", "replace", dest_ip, "lladdr", dest_mac, "dev", interface,
+        ])
+        .output();
+    match output {
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "[cap-dp] ip neigh replace {} lladdr {} dev {} failed: {}",
+                    dest_ip,
+                    dest_mac,
+                    interface,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            output.status.success()
+        }
+        Err(error) => {
+            eprintln!("[cap-dp] ip neigh replace could not start: {}", error);
+            false
+        }
+    }
+}
+
+/// Capture ICMP traffic destined for `dest_ip` arriving on `interface` for up
+/// to `capture_secs` seconds (via `timeout(1) tcpdump`), then run `ping` from
+/// `source_ip`'s interface to `dest_ip` as a stimulus so any frames that make
+/// it past the ZeroTier VL2 filter show up in the capture. Returns the raw
+/// tcpdump stdout text (`-n`, so `src_ip > dest_ip` lines are what to look
+/// for) regardless of whether `ping` itself reported success -- ping RTT
+/// success/failure conflates the outbound and reply direction, which is not
+/// what this test needs to distinguish.
+fn spawn_icmp_tcpdump(interface: &str, capture_secs: u64) -> Result<Child, std::io::Error> {
+    Command::new("timeout")
+        .args([
+            "--signal=INT",
+            &capture_secs.to_string(),
+            "tcpdump",
+            "-i",
+            interface,
+            "-n",
+            "-l",
+            "-U",
+            "icmp",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+}
+
+fn read_tcpdump_output(child: Result<Child, std::io::Error>) -> String {
+    match child {
+        Ok(child) => match child.wait_with_output() {
+            Ok(output) => format!(
+                "stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(error) => format!("<failed to read tcpdump output: {}>", error),
+        },
+        Err(error) => format!("<failed to spawn tcpdump: {}>", error),
+    }
+}
+
+/// Capture ICMP traffic on *both* `source_interface` (the sender's own TUN
+/// device -- did the frame even leave the sender's ZeroTier process at all?)
+/// and `capture_interface` (the receiver's TUN device -- did it actually
+/// arrive?) for up to `capture_secs` seconds, then run `ping` from
+/// `source_interface` to `dest_ip` as a stimulus. Capturing on both ends
+/// distinguishes "sender's own outbound filter/ARP/routing never emitted
+/// anything" from "sender emitted a frame but it was dropped somewhere
+/// between the two nodes (network-scope filter, capability filter, or
+/// receiver's inbound filter)". Returns `(source_capture, dest_capture)`;
+/// regardless of whether `ping` itself reported success, since ping RTT
+/// success/failure conflates the outbound and reply direction, which is not
+/// what this test needs to distinguish.
+fn capture_icmp_delivery_evidence(
+    capture_interface: &str,
+    source_interface: &str,
+    dest_ip: &str,
+    capture_secs: u64,
+) -> (String, String) {
+    let source_child = spawn_icmp_tcpdump(source_interface, capture_secs);
+    let dest_child = spawn_icmp_tcpdump(capture_interface, capture_secs);
+
+    // Give tcpdump a moment to attach to both interfaces before we generate traffic.
+    std::thread::sleep(std::time::Duration::from_millis(750));
+
+    let _ = trigger_ping_over_interface(source_interface, dest_ip);
+    std::thread::sleep(std::time::Duration::from_millis(750));
+
+    // `timeout` will signal tcpdump once capture_secs elapses (SIGINT rather
+    // than the default SIGTERM, so tcpdump takes its normal
+    // print-summary-and-exit path instead of being killed mid-write); wait
+    // for that rather than killing it ourselves, so buffered stdout gets
+    // flushed.
+    let source_capture = read_tcpdump_output(source_child);
+    let dest_capture = read_tcpdump_output(dest_child);
+    (source_capture, dest_capture)
+}
+
 /// Join a network via the ManyTier local service API.
 fn join_network_via_manytier_api(api_port: u16, authtoken: &str, network_id: &str) -> bool {
     let url = format!("http://127.0.0.1:{}/network/{}", api_port, network_id);
@@ -7791,5 +8017,606 @@ pub mod tests {
 
         let _ = official_child.kill();
         let _ = official_child.wait();
+    }
+
+    /// Privileged-Docker live interop: proves
+    /// that a real official `zerotier-one` (1.14.2 fixture) *enforces*
+    /// a ManyTier-controller-issued capability's embedded rule set on the data
+    /// plane -- not just that it accepts the credential's wire format (that was
+    /// already established by `test_official_client_accepts_capability_and_tag_credentials`).
+    ///
+    /// Requires two real TUN devices (one per official node), so unlike the
+    /// wire-acceptance test above this needs the privileged-Docker lane; see
+    /// `tests/shadow/run-privileged-live-docker.sh`.
+    ///
+    /// Setup: the network's own rule chain is a single `MATCH_IP_PROTOCOL`
+    /// rule with no following `ACTION_*` rule, which (per upstream
+    /// `node/Network.cpp` `_doZtFilter`) can never deliver an explicit
+    /// verdict and so always falls through to per-capability evaluation
+    /// (see `set_network_capability_gated_rules_via_manytier_api`).
+    /// Capability `1`'s own rule set is an unconditional `ACTION_ACCEPT`.
+    ///
+    /// Two official members join: "sender" (`s`) and "receiver" (`r`). `r`
+    /// never holds the capability (its own capability state does not gate
+    /// frames it *receives* -- per upstream, only the *sender's* capability
+    /// is consulted, both on the sender's own outbound filter and on the
+    /// receiver's inbound filter via `Membership::CapabilityIterator`).
+    ///
+    /// Phase A: `s` has no capability. `_doZtFilter` on `s`'s own outbound
+    /// path falls through network-scope NO_MATCH, finds no accepting
+    /// capability, and drops -- so ICMP frames from `s` should never even
+    /// reach `r`'s TUN interface.
+    ///
+    /// Phase B: `s` is granted capability `1` and refreshes its network
+    /// config. Its own outbound filter now gets an explicit ACCEPT from the
+    /// capability, and (assuming official propagates `s`'s capability
+    /// credential to `r` so `r`'s `Membership` can independently evaluate it
+    /// on the inbound side) frames from `s` should now arrive at `r`.
+    ///
+    /// Evidence is captured with `tcpdump` on `r`'s TUN interface rather than
+    /// relying on `ping` RTT success, because `ping` conflates the outbound
+    /// and reply direction: `r` never holds the capability, so even once `s`
+    /// can reach `r`, `r`'s own ICMP-reply frames going back out are still
+    /// subject to `r`'s (capability-less) outbound filter and may not return.
+    /// That asymmetry is real ZeroTier behavior, not a test bug -- see the
+    /// evidence report emitted by this test for the precise breakdown.
+    #[test]
+    #[ignore] // Requires two real TUN devices; privileged-Docker lane only.
+    fn test_official_capability_gates_data_plane_frame_delivery() {
+        const CONTROLLER_UDP_PORT: u16 = 31989;
+        const SENDER_UDP_PORT: u16 = 31988;
+        const RECEIVER_UDP_PORT: u16 = 31987;
+        const CONTROLLER_API_PORT: u16 = 31189;
+
+        let work_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let status = Command::new("cargo")
+            .args(["build", "-p", "zerotier-cli", "--bin", "manytier"])
+            .status()
+            .expect("cargo build failed");
+        assert!(status.success(), "Failed to build manytier");
+
+        if !zerotier_one_available(&work_dir) {
+            eprintln!(
+                "SKIP: zerotier-one binary not found. Run tests/fixtures/download-zerotier.sh first."
+            );
+            return;
+        }
+
+        if !host_tun_tap_available() {
+            eprintln!(
+                "SKIP: this environment cannot create a real TUN device (needs CAP_NET_ADMIN + \
+                 /dev/net/tun). Run via tests/shadow/run-privileged-live-docker.sh."
+            );
+            return;
+        }
+
+        let shadow_test_dir =
+            prepare_shadow_test_dir(&work_dir, "official-capability-gates-data-plane");
+
+        // Step 1: Start the ManyTier controller.
+        let controller_process = spawn_manytier_with_planet_and_env(
+            &shadow_test_dir,
+            "manytier-controller",
+            CONTROLLER_API_PORT,
+            CONTROLLER_UDP_PORT,
+            true,
+            None,
+            vec![("MANYTIER_DUMP_UDP".to_string(), "1".to_string())],
+        );
+        let controller_data_dir = controller_process.layout.home_dir.clone();
+        let controller_ready =
+            wait_for_manytier_ready(&controller_data_dir, std::time::Duration::from_secs(30));
+        if !controller_ready {
+            let controller_result = finish_host_native_process(controller_process);
+            panic!(
+                "ManyTier controller did not finish identity/API startup in 30s.\n{}",
+                format_host_native_check(&controller_result)
+            );
+        }
+        let controller_addr =
+            read_manytier_address(&controller_data_dir).expect("controller address not readable");
+        let controller_authtoken = read_manytier_authtoken(&controller_data_dir)
+            .expect("controller authtoken not readable");
+        let controller_identity_str =
+            std::fs::read_to_string(controller_data_dir.join("identity.secret"))
+                .unwrap_or_default();
+
+        let zt_one_bin =
+            zerotier_one_binary_path(&work_dir).expect("failed to locate zerotier-one fixture");
+
+        // Step 2: Build a localhost planet + moon pointing at the ManyTier controller.
+        let _planet_path = build_planet_for_localhost(
+            &shadow_test_dir,
+            &controller_identity_str,
+            CONTROLLER_UDP_PORT,
+        );
+        let id_secret_path = shadow_test_dir.join("controller.secret");
+        std::fs::write(&id_secret_path, &controller_identity_str).unwrap();
+        let output = Command::new(&zt_one_bin)
+            .args(["-i", "initmoon", id_secret_path.to_str().unwrap()])
+            .current_dir(&shadow_test_dir)
+            .output()
+            .expect("failed to execute initmoon");
+        let moon_json_path = shadow_test_dir.join("moon.json");
+        let mut moon_json = load_initmoon_json(&shadow_test_dir, &moon_json_path, &output)
+            .unwrap_or_else(|message| panic!("{message}"));
+        if let Some(roots) = moon_json.get_mut("roots") {
+            if let Some(root_obj) = roots[0].as_object_mut() {
+                root_obj.insert(
+                    "stableEndpoints".to_string(),
+                    serde_json::json!([format!("127.0.0.1/{}", CONTROLLER_UDP_PORT)]),
+                );
+            }
+        }
+        std::fs::write(&moon_json_path, serde_json::to_string(&moon_json).unwrap()).unwrap();
+        let _ = Command::new(&zt_one_bin)
+            .args(["-i", "genmoon", moon_json_path.to_str().unwrap()])
+            .current_dir(&shadow_test_dir)
+            .status();
+        let moon_id = (controller_addr[0] as u64) << 32
+            | (controller_addr[1] as u64) << 24
+            | (controller_addr[2] as u64) << 16
+            | (controller_addr[3] as u64) << 8
+            | (controller_addr[4] as u64);
+        let moon_src = shadow_test_dir.join(format!("{:016x}.moon", moon_id));
+
+        // Step 3: Create the network and install the capability-gated rule chain.
+        let network_id = (0..10)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                create_network_via_manytier_api(
+                    CONTROLLER_API_PORT,
+                    &controller_authtoken,
+                    &hex_encode_address(&controller_addr),
+                )
+            })
+            .expect("failed to create network via ManyTier controller API");
+        let network_id_u64 = u64::from_str_radix(&network_id, 16).ok();
+        let rules_set = set_network_capability_gated_rules_via_manytier_api(
+            CONTROLLER_API_PORT,
+            &controller_authtoken,
+            &network_id,
+        );
+        assert!(
+            rules_set,
+            "failed to install capability-gated network rule chain via controller API"
+        );
+
+        // Step 4: Prepare and start both official members: "sender" (s) and
+        // "receiver" (r). Only s's capability grant changes between phases.
+        let prepare_official = |label: &str, udp_port: u16| -> (HostNativeLayout, Child, [u8; 5]) {
+            let layout = prepare_host_native_layout(&shadow_test_dir, label, "zerotier-one-home");
+            prepare_zerotier_home(&layout.home_dir, network_id_u64);
+            let moons_dir = layout.home_dir.join("moons.d");
+            std::fs::create_dir_all(&moons_dir).expect("failed to create moons.d");
+            std::fs::copy(&moon_src, moons_dir.join(format!("{:016x}.moon", moon_id)))
+                .expect("failed to copy moon file");
+            let local_conf = serde_json::json!({
+                "settings": {
+                    "primaryPort": udp_port,
+                    "portMappingEnabled": false,
+                    "allowSecondaryPort": false,
+                    "softwareUpdate": "disable",
+                    "allowLocalNetworks": true
+                }
+            });
+            std::fs::write(layout.home_dir.join("local.conf"), local_conf.to_string())
+                .expect("failed to write official local.conf");
+
+            let stdout_file =
+                File::create(&layout.stdout_path).expect("failed to create official stdout log");
+            let stderr_file =
+                File::create(&layout.stderr_path).expect("failed to create official stderr log");
+            let child = Command::new(&zt_one_bin)
+                .args(["-U", layout.home_dir.to_str().unwrap()])
+                .current_dir(workspace_root(&work_dir))
+                .stdout(Stdio::from(stdout_file))
+                .stderr(Stdio::from(stderr_file))
+                .spawn()
+                .expect("failed to start official zerotier-one client");
+
+            let addr = (0..20)
+                .find_map(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    read_zerotier_identity_address(&layout.home_dir)
+                })
+                .expect("official client did not generate an identity in time");
+
+            (layout, child, addr)
+        };
+
+        let (sender_layout, mut sender_child, sender_addr) =
+            prepare_official("official-capability-sender", SENDER_UDP_PORT);
+        let (receiver_layout, mut receiver_child, receiver_addr) =
+            prepare_official("official-capability-receiver", RECEIVER_UDP_PORT);
+
+        let join_official = |layout: &HostNativeLayout, node_addr_hex: &str| {
+            let authorized = authorize_member_with_capabilities_via_manytier_api(
+                CONTROLLER_API_PORT,
+                &controller_authtoken,
+                &network_id,
+                node_addr_hex,
+                &[],
+            );
+            eprintln!(
+                "[cap-dp] authorize (no capability yet) {} -> {}",
+                node_addr_hex, authorized
+            );
+            let orbit_status = Command::new(&zt_one_bin)
+                .args([
+                    "-q",
+                    &format!("-D{}", layout.home_dir.to_str().unwrap()),
+                    "orbit",
+                    &format!("{:010x}", moon_id),
+                    &format!("{:010x}", moon_id),
+                ])
+                .status()
+                .expect("failed to execute official orbit command");
+            eprintln!(
+                "[cap-dp] orbit status for {}: {:?}",
+                node_addr_hex, orbit_status
+            );
+            let join_status = Command::new(&zt_one_bin)
+                .args([
+                    "-q",
+                    &format!("-D{}", layout.home_dir.to_str().unwrap()),
+                    "join",
+                    &network_id,
+                ])
+                .status()
+                .expect("failed to execute official join command");
+            eprintln!(
+                "[cap-dp] join status for {}: {:?}",
+                node_addr_hex, join_status
+            );
+        };
+
+        join_official(&sender_layout, &hex_encode_address(&sender_addr));
+        join_official(&receiver_layout, &hex_encode_address(&receiver_addr));
+
+        // Re-invoking `join` on an already-joined network is a local no-op for
+        // official (it just rewrites networks.d locally) and does NOT force a
+        // fresh NETWORK_CONFIG_REQUEST -- confirmed live: the controller log
+        // showed zero additional `network_config_request_received` events
+        // after a plain re-`join` in earlier iterations of this test. `leave`
+        // then `join` forces a real new join sequence, including a fresh NCR.
+        let refresh_join = |layout: &HostNativeLayout, node_addr_hex: &str| {
+            let leave_status = Command::new(&zt_one_bin)
+                .args([
+                    "-q",
+                    &format!("-D{}", layout.home_dir.to_str().unwrap()),
+                    "leave",
+                    &network_id,
+                ])
+                .status()
+                .expect("failed to execute official leave command");
+            eprintln!(
+                "[cap-dp] refresh leave status for {}: {:?}",
+                node_addr_hex, leave_status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let refresh_status = Command::new(&zt_one_bin)
+                .args([
+                    "-q",
+                    &format!("-D{}", layout.home_dir.to_str().unwrap()),
+                    "join",
+                    &network_id,
+                ])
+                .status()
+                .expect("failed to execute official refresh join command");
+            eprintln!(
+                "[cap-dp] refresh join status for {}: {:?}",
+                node_addr_hex, refresh_status
+            );
+        };
+
+        let wait_assigned = |node_addr_hex: &str| -> Option<String> {
+            let mut assigned = wait_for_assigned_ipv4_via_manytier_controller_member_api(
+                CONTROLLER_API_PORT,
+                &controller_authtoken,
+                &network_id,
+                node_addr_hex,
+                std::time::Duration::from_secs(10),
+            );
+            if assigned.is_none() {
+                refresh_join(
+                    if node_addr_hex == hex_encode_address(&sender_addr) {
+                        &sender_layout
+                    } else {
+                        &receiver_layout
+                    },
+                    node_addr_hex,
+                );
+                assigned = wait_for_assigned_ipv4_via_manytier_controller_member_api(
+                    CONTROLLER_API_PORT,
+                    &controller_authtoken,
+                    &network_id,
+                    node_addr_hex,
+                    std::time::Duration::from_secs(10),
+                );
+            }
+            assigned
+        };
+
+        let sender_addr_hex = hex_encode_address(&sender_addr);
+        let receiver_addr_hex = hex_encode_address(&receiver_addr);
+        let sender_ipv4 = wait_assigned(&sender_addr_hex);
+        let receiver_ipv4 = wait_assigned(&receiver_addr_hex);
+
+        let sender_interface = sender_ipv4.as_deref().and_then(|ip| {
+            wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10))
+                .or_else(|| fallback_tun_name(&network_id, &sender_addr))
+        });
+        let receiver_interface = receiver_ipv4.as_deref().and_then(|ip| {
+            wait_for_interface_name_for_ipv4(ip, std::time::Duration::from_secs(10))
+                .or_else(|| fallback_tun_name(&network_id, &receiver_addr))
+        });
+
+        let mut report_lines = vec![format!(
+            "=== Privileged-Docker live data-plane check: capability rule enforcement ===\n\
+             Network: {}\n\
+             Sender node: {} assigned {:?} on {:?}\n\
+             Receiver node: {} assigned {:?} on {:?}\n",
+            network_id,
+            sender_addr_hex,
+            sender_ipv4,
+            sender_interface,
+            receiver_addr_hex,
+            receiver_ipv4,
+            receiver_interface,
+        )];
+
+        let (phase_a_capture, phase_a_delivered, phase_b_capture, phase_b_delivered) = match (
+            sender_ipv4.as_deref(),
+            receiver_ipv4.as_deref(),
+            sender_interface.as_deref(),
+            receiver_interface.as_deref(),
+        ) {
+            (Some(sender_ip), Some(receiver_ip), Some(sender_iface), Some(receiver_iface)) => {
+                // Pre-resolve L2 addressing in both directions so `ping`
+                // emits a unicast frame immediately instead of blocking
+                // on an ARP broadcast first -- see `prime_static_neighbor`.
+                if let Some(receiver_mac) = mac_address_for_interface(receiver_iface) {
+                    prime_static_neighbor(sender_iface, receiver_ip, &receiver_mac);
+                }
+                if let Some(sender_mac) = mac_address_for_interface(sender_iface) {
+                    prime_static_neighbor(receiver_iface, sender_ip, &sender_mac);
+                }
+
+                let sender_parity_before = capture_official_tool_parity_artifacts(
+                    &sender_layout.artifact_root,
+                    &zt_one_bin,
+                    &sender_layout.home_dir,
+                );
+                let receiver_parity_before = capture_official_tool_parity_artifacts(
+                    &receiver_layout.artifact_root,
+                    &zt_one_bin,
+                    &receiver_layout.home_dir,
+                );
+                report_lines.push(format!(
+                        "Pre-phase-A sender listpeers:\n{}\nPre-phase-A sender listnetworks:\n{}\n\
+                         Pre-phase-A receiver listpeers:\n{}\nPre-phase-A receiver listnetworks:\n{}\n",
+                        sender_parity_before.peers_cli.stdout,
+                        sender_parity_before.listnetworks_cli.stdout,
+                        receiver_parity_before.peers_cli.stdout,
+                        receiver_parity_before.listnetworks_cli.stdout,
+                    ));
+
+                // Phase A: sender has no capability. Its own outbound filter
+                // should drop everything before it ever reaches the receiver.
+                let (phase_a_source, phase_a_dest) =
+                    capture_icmp_delivery_evidence(receiver_iface, sender_iface, receiver_ip, 6);
+                let icmp_needle = format!("{} > {}", sender_ip, receiver_ip);
+                let phase_a_left_sender = phase_a_source.contains(&icmp_needle);
+                let phase_a_seen = phase_a_dest.contains(&icmp_needle);
+                let phase_a = format!(
+                    "sender-side capture ({}):\n{}\ndest-side capture ({}):\n{}",
+                    sender_iface, phase_a_source, receiver_iface, phase_a_dest
+                );
+                report_lines.push(format!(
+                        "Phase A (sender capability=[]): tcpdump on both ends \
+                         (stimulus: ping from {} via {}):\n{}\nLeft sender: {}\nDelivered to receiver: {}\n",
+                        sender_ip, sender_iface, phase_a, phase_a_left_sender, phase_a_seen
+                    ));
+
+                // Phase B: grant the sender capability 1 and refresh.
+                let granted = authorize_member_with_capabilities_via_manytier_api(
+                    CONTROLLER_API_PORT,
+                    &controller_authtoken,
+                    &network_id,
+                    &sender_addr_hex,
+                    &[1],
+                );
+                report_lines.push(format!(
+                    "Granted capability 1 to sender via controller API: {}\n",
+                    granted
+                ));
+                refresh_join(&sender_layout, &sender_addr_hex);
+                // Also refresh the receiver: official may only push a
+                // sender's updated capability credential to peers that
+                // themselves re-request/refresh their network config.
+                refresh_join(&receiver_layout, &receiver_addr_hex);
+                std::thread::sleep(std::time::Duration::from_secs(4));
+
+                // `leave`+`join` tears down and recreates the TUN device's
+                // kernel state, which flushes the neighbor cache entries
+                // primed above -- redo them before the Phase B stimulus.
+                if let Some(receiver_mac) = mac_address_for_interface(receiver_iface) {
+                    prime_static_neighbor(sender_iface, receiver_ip, &receiver_mac);
+                }
+                if let Some(sender_mac) = mac_address_for_interface(sender_iface) {
+                    prime_static_neighbor(receiver_iface, sender_ip, &sender_mac);
+                }
+
+                let controller_combined_after_grant = strip_ansi_escape_sequences(&format!(
+                    "{}\n{}",
+                    std::fs::read_to_string(&controller_process.layout.stdout_path)
+                        .unwrap_or_default(),
+                    std::fs::read_to_string(&controller_process.layout.stderr_path)
+                        .unwrap_or_default(),
+                ));
+                report_lines.push(format!(
+                    "Controller log tail after capability grant + refresh:\n{}\n",
+                    summarize_text_block(&controller_combined_after_grant, 60)
+                ));
+
+                // Diagnostic: capture raw UDP traffic between the two
+                // officials' own listen ports (independent of the TUN/VL2
+                // layer) so the report can distinguish "sender never even
+                // attempted to transmit anything" from "sender
+                // transmitted but receiver's VL2 filter dropped it".
+                let udp_child = Command::new("timeout")
+                    .args([
+                        "--signal=INT",
+                        "8",
+                        "tcpdump",
+                        "-i",
+                        "any",
+                        "-n",
+                        "-l",
+                        &format!(
+                            "udp port {} or udp port {}",
+                            SENDER_UDP_PORT, RECEIVER_UDP_PORT
+                        ),
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn();
+
+                // First attempt may race the P2P session/credential
+                // handshake between sender and receiver (WHOIS + initial
+                // COM/capability credential push can take a beat past the
+                // fixed-count `ping` stimulus). Retry once with a fresh
+                // stimulus on an already-warm session before concluding.
+                let mut phase_b_attempt =
+                    capture_icmp_delivery_evidence(receiver_iface, sender_iface, receiver_ip, 6);
+                let mut phase_b_seen = phase_b_attempt.1.contains(&icmp_needle);
+                let mut phase_b_retries = 0;
+                while !phase_b_seen && phase_b_retries < 2 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    phase_b_attempt = capture_icmp_delivery_evidence(
+                        receiver_iface,
+                        sender_iface,
+                        receiver_ip,
+                        6,
+                    );
+                    phase_b_seen = phase_b_attempt.1.contains(&icmp_needle);
+                    phase_b_retries += 1;
+                }
+                let (phase_b_source, phase_b_dest) = phase_b_attempt;
+                let phase_b_left_sender = phase_b_source.contains(&icmp_needle);
+                let phase_b = format!(
+                    "sender-side capture ({}):\n{}\ndest-side capture ({}):\n{}",
+                    sender_iface, phase_b_source, receiver_iface, phase_b_dest
+                );
+
+                let udp_capture = read_tcpdump_output(udp_child);
+                report_lines.push(format!(
+                    "Raw UDP traffic between sender:{} and receiver:{} during Phase B:\n{}\n",
+                    SENDER_UDP_PORT, RECEIVER_UDP_PORT, udp_capture
+                ));
+                report_lines.push(format!(
+                    "Phase B (sender capability=[1], refreshed, {} retries): tcpdump on both \
+                         ends (stimulus: ping from {} via {}):\n{}\nLeft sender: {}\nDelivered to \
+                         receiver: {}\n",
+                    phase_b_retries,
+                    sender_ip,
+                    sender_iface,
+                    phase_b,
+                    phase_b_left_sender,
+                    phase_b_seen
+                ));
+
+                let sender_parity_after = capture_official_tool_parity_artifacts(
+                    &sender_layout.artifact_root,
+                    &zt_one_bin,
+                    &sender_layout.home_dir,
+                );
+                let receiver_parity_after = capture_official_tool_parity_artifacts(
+                    &receiver_layout.artifact_root,
+                    &zt_one_bin,
+                    &receiver_layout.home_dir,
+                );
+                report_lines.push(format!(
+                        "Post-phase-B sender listpeers:\n{}\nPost-phase-B sender listnetworks:\n{}\n\
+                         Post-phase-B receiver listpeers:\n{}\nPost-phase-B receiver listnetworks:\n{}\n",
+                        sender_parity_after.peers_cli.stdout,
+                        sender_parity_after.listnetworks_cli.stdout,
+                        receiver_parity_after.peers_cli.stdout,
+                        receiver_parity_after.listnetworks_cli.stdout,
+                    ));
+
+                (phase_a, phase_a_seen, phase_b, phase_b_seen)
+            }
+            _ => {
+                report_lines.push(
+                    "Could not determine both nodes' assigned IPv4/TUN interface -- \
+                         skipping tcpdump phases entirely."
+                        .to_string(),
+                );
+                (String::new(), false, String::new(), false)
+            }
+        };
+
+        let report = report_lines.join("\n");
+        let report_path = shadow_test_dir.join("api-01-capability-data-plane-evidence.txt");
+        std::fs::write(&report_path, &report)
+            .expect("failed to write capability data-plane evidence report");
+        eprintln!("{}", report);
+
+        let controller_result = finish_host_native_process(controller_process);
+        let _ = sender_child.kill();
+        let _ = sender_child.wait();
+        let _ = receiver_child.kill();
+        let _ = receiver_child.wait();
+
+        assert!(
+            sender_ipv4.is_some() && receiver_ipv4.is_some(),
+            "both official members must reach assigned-IP joined state before the data-plane \
+             capability check can run. See {}\nController log:\n{}",
+            report_path.display(),
+            summarize_shadow_stdout(&controller_result.stdout, "manytier-controller")
+        );
+        assert!(
+            sender_interface.is_some() && receiver_interface.is_some(),
+            "could not determine both nodes' ZeroTier TUN interface names. See {}",
+            report_path.display()
+        );
+
+        assert!(
+            !phase_a_delivered,
+            "expected NO ICMP frames from sender to reach receiver while sender held no \
+             capability (network-scope rules never deliver an explicit verdict, so official \
+             should fall through to per-capability evaluation and drop for a capability-less \
+             sender) -- but tcpdump observed delivery anyway. See {}\n{}",
+            report_path.display(),
+            phase_a_capture
+        );
+        assert!(
+            phase_b_delivered,
+            "expected ICMP frames from sender to reach receiver once sender was granted \
+             capability 1 (embedded ACTION_ACCEPT), but tcpdump observed no delivery even \
+             after a refresh join. Either official is not propagating the sender's capability \
+             credential to the receiver's Membership, or the refresh did not pick up the new \
+             grant in time. See {}\n{}",
+            report_path.display(),
+            phase_b_capture
+        );
+
+        eprintln!(
+            "[cap-dp] Confirmed live: official's own rule engine drops a capability-gated \
+             frame from a capability-less sender and delivers it once the sender is granted \
+             the capability, via a real second official zerotier-one peer over a real TUN \
+             device. See {}",
+            report_path.display()
+        );
     }
 }
