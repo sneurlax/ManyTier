@@ -8,6 +8,7 @@ tests/fixtures/zerotier-one-*
 tests/fixtures/planet.bin.new
 tests/shadow/artifacts/run-*/
 tests/shadow/artifacts/verify-*/
+tests/shadow/artifacts/priv-*/
 tests/shadow/artifacts/scratch/
 tests/shadow/shadow-node/tests/shadow/
 tests/upstream-dohello-replay/vendored/
