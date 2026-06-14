@@ -33,18 +33,26 @@ fn aes_ctr_encrypt(cipher: &Aes256, nonce_counter: &mut [u8; 16], data: &mut [u8
     }
 }
 
-/// Compute GMAC over (IV || AAD || data), returning the 8-byte truncated tag.
+/// Compute the 16-byte AES-GMAC-SIV tag over (IV || AAD || data), byte-verified against
+/// upstream `AES::GMAC::finish` / `AES::GMACSIVEncryptor::finish1` (node/AES.cpp, node/AES.hpp,
+/// ZeroTierOne 1.14.2).
 ///
-/// GMAC construction:
-/// 1. Derive GHash key H = AES-ECB(K0_first_16, 0^128): standard GMAC
-/// 2. Start with 96-bit IV: [packet_iv(8) | 0x00 0x00 0x00 0x00]: 64-bit IV padded to 96 bits
-///    Then the GHASH initial block J0 = IV || 0x00000001 (standard GCM J0)
+/// GMAC construction (matches upstream exactly, including its deviations from textbook GCM):
+/// 1. Derive GHash key H = AES-ECB(K0, 0^128): standard GMAC
+/// 2. J0 = [packet_iv(8) | 0x00 0x00 0x00 0x00 | 0x00 0x00 0x00 0x01] (96-bit IV padded to
+///    96 bits, then the standard GCM J0 counter=1 block)
 /// 3. Feed AAD into GHASH, pad to 16-byte boundary with zeros
 /// 4. Feed data into GHASH, pad to 16-byte boundary with zeros
-/// 5. Feed length block: [AAD_len_bits(64) || data_len_bits(64)]
-/// 6. XOR GHASH result with AES-ECB(K0_first_16, J0) to get GMAC tag
-/// 7. XOR upper and lower 64-bit halves -> 8-byte shortened MAC
-fn gmac_compute(k0: &[u8; 32], iv: &[u8; 8], aad: &[u8], data: &[u8]) -> [u8; 8] {
+/// 5. Feed ONE final block: [combined_bits_be(8) | 0x00 * 8]: upstream folds a single combined
+///    bit-length into the low 64 bits of one more GHASH block, NOT two separate 64-bit AAD/data
+///    lengths as in textbook GCM. The combined length is NOT `aad_len + data_len`: it
+///    counts the *padded* AAD length (upstream's `aad()` re-feeds its own zero padding through
+///    the same length-accumulating `update()` call) but only the *raw* data length (the final
+///    data block's padding happens inline inside `finish()`, bypassing the length accumulator).
+/// 6. tag128 = GHASH result XOR AES-ECB(K0, J0)
+/// 7. combined_mac (8 bytes) = tag128[0..8] XOR tag128[8..16] (plain bytewise XOR: endian
+///    independent, matches upstream's raw-native-reinterpret XOR of the two halves)
+fn gmac_compute(k0: &[u8; 32], iv: &[u8; 8], aad: &[u8], data: &[u8]) -> [u8; 16] {
     let cipher = Aes256::new(k0.into());
 
     // Derive H = AES(K0, 0^128)
@@ -60,12 +68,18 @@ fn gmac_compute(k0: &[u8; 32], iv: &[u8; 8], aad: &[u8], data: &[u8]) -> [u8; 8]
     // Feed data into GHASH
     feed_padded(&mut ghash, data);
 
-    // Feed the length block: [aad_bits_be(8) || data_bits_be(8)]
-    let aad_bits = (aad.len() as u64) * 8;
-    let data_bits = (data.len() as u64) * 8;
+    // Feed the final combined-length block: [combined_bits_be(8) | 0^8].
+    // AAD contributes its zero-padded (rounded up to 16 bytes) length; empty AAD contributes
+    // nothing (upstream never calls `aad()` at all for empty AAD). Data contributes its raw,
+    // unpadded length.
+    let padded_aad_len = if aad.is_empty() {
+        0
+    } else {
+        aad.len().div_ceil(16) * 16
+    };
+    let combined_bits = ((padded_aad_len + data.len()) as u64) * 8;
     let mut len_block = [0u8; 16];
-    len_block[0..8].copy_from_slice(&aad_bits.to_be_bytes());
-    len_block[8..16].copy_from_slice(&data_bits.to_be_bytes());
+    len_block[0..8].copy_from_slice(&combined_bits.to_be_bytes());
     ghash.update(&[len_block.into()]);
 
     // GHASH result
@@ -86,13 +100,16 @@ fn gmac_compute(k0: &[u8; 32], iv: &[u8; 8], aad: &[u8], data: &[u8]) -> [u8; 8]
     for i in 0..16 {
         tag[i] = ghash_bytes[i] ^ j0_bytes[i];
     }
+    tag
+}
 
-    // XOR upper and lower 64-bit halves -> 8-byte shortened MAC
-    // Use native byte order for the XOR, matching vendor behavior
-    let upper = u64::from_ne_bytes(tag[0..8].try_into().unwrap());
-    let lower = u64::from_ne_bytes(tag[8..16].try_into().unwrap());
-    let shortened = upper ^ lower;
-    shortened.to_ne_bytes()
+/// Shorten a 128-bit GMAC tag to 64 bits by XORing its two halves (bytewise, endian-independent).
+fn shorten_tag(tag128: &[u8; 16]) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    for i in 0..8 {
+        out[i] = tag128[i] ^ tag128[8 + i];
+    }
+    out
 }
 
 /// Feed data into GHASH, padding the final partial block with zeros.
@@ -133,8 +150,13 @@ pub fn armor_packet(
     let mut original_iv = [0u8; 8];
     original_iv.copy_from_slice(&packet[PACKET_IV_OFFSET..PACKET_IV_OFFSET + PACKET_IV_LEN]);
 
-    // Pass 1: Compute GMAC over plaintext payload
-    let mac = gmac_compute(k0, &original_iv, aad, &packet[payload_start..]);
+    // Pass 1: Compute GMAC over plaintext payload, then shorten to the 8-byte wire MAC
+    let mac = shorten_tag(&gmac_compute(
+        k0,
+        &original_iv,
+        aad,
+        &packet[payload_start..],
+    ));
 
     // Store MAC in header
     packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN].copy_from_slice(&mac);
@@ -156,14 +178,11 @@ pub fn armor_packet(
     packet[PACKET_MAC_OFFSET..PACKET_MAC_OFFSET + PACKET_MAC_LEN]
         .copy_from_slice(&encrypted_tag[8..16]);
 
-    // Build CTR nonce from the encrypted IV:
-    // [encrypted_IV(8) | 0x00 0x00 0x00 0x00 | 0x00 0x00 0x00 0x00]
-    // Mask bit 63 (MSB of lower 32-bit counter) to zero
-    let mut nonce_counter = [0u8; 16];
-    nonce_counter[0..8].copy_from_slice(&encrypted_tag[0..8]);
-    // Mask: 0xffffffff7fffffff in big-endian -> bit 31 of byte offset 4..8
-    // Byte 4 bit 7 (MSB) must be cleared
-    nonce_counter[4] &= 0x7f;
+    // CTR nonce is the full 16-byte encrypted [IV | MAC] block, with the MSB of byte 12
+    // (the top bit of the big-endian 32-bit counter at bytes 12..16) masked to zero: matches
+    // upstream's `tmp[1] = _tag[1] & ZT_CONST_TO_BE_UINT64(0xffffffff7fffffffULL)`.
+    let mut nonce_counter = encrypted_tag;
+    nonce_counter[12] &= 0x7f;
 
     // Pass 2: AES-CTR encrypt payload with K1
     if payload_len > 0 {
@@ -207,10 +226,9 @@ pub fn dearmor_packet(
     let mut original_mac = [0u8; 8];
     original_mac.copy_from_slice(&decrypted_tag[8..16]);
 
-    // Build CTR nonce from the still-encrypted IV
-    let mut nonce_counter = [0u8; 16];
-    nonce_counter[0..8].copy_from_slice(&encrypted_tag[0..8]);
-    nonce_counter[4] &= 0x7f; // mask bit 63
+    // Build CTR nonce from the still-encrypted [IV | MAC] block (see armor_packet for the mask)
+    let mut nonce_counter = encrypted_tag;
+    nonce_counter[12] &= 0x7f;
 
     // AES-CTR decrypt payload with K1
     if payload_len > 0 {
@@ -218,7 +236,12 @@ pub fn dearmor_packet(
     }
 
     // Compute GMAC over decrypted plaintext
-    let computed_mac = gmac_compute(k0, &original_iv, aad, &packet[payload_start..]);
+    let computed_mac = shorten_tag(&gmac_compute(
+        k0,
+        &original_iv,
+        aad,
+        &packet[payload_start..],
+    ));
 
     // Constant-time compare MACs
     let mut diff = 0u8;
@@ -265,6 +288,100 @@ mod tests {
         0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D,
         0x3E, 0x3F,
     ];
+
+    fn hex_to_vec(hex: &str) -> alloc::vec::Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Known-answer tests generated from a standalone oracle built directly against upstream
+    /// `node/AES.cpp`/`node/AES.hpp` (ZeroTierOne 1.14.2, compiled with `-DZT_AES_NO_ACCEL` to
+    /// force the portable software path) -- not re-derived from this crate's own logic. K0 =
+    /// bytes 0x01..=0x20, K1 = bytes 0xA0..=0xBF, message IV = the raw wire bytes of the u64
+    /// literal 0x0102030405060708 as stored on a little-endian host.
+    #[test]
+    fn known_answer_upstream_oracle_case_a() {
+        let k0: [u8; 32] = core::array::from_fn(|i| (i + 1) as u8);
+        let k1: [u8; 32] = core::array::from_fn(|i| (0xA0 + i) as u8);
+        let iv: [u8; 8] = [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        let data: [u8; 32] = core::array::from_fn(|i| i as u8);
+
+        let mac = shorten_tag(&gmac_compute(&k0, &iv, &[], &data));
+        let mut tag_block = [0u8; 16];
+        tag_block[0..8].copy_from_slice(&iv);
+        tag_block[8..16].copy_from_slice(&mac);
+        let k1_cipher = Aes256::new((&k1).into());
+        let mut aes_block: aes::Block = tag_block.into();
+        k1_cipher.encrypt_block(&mut aes_block);
+        let encrypted_tag: [u8; 16] = aes_block.into();
+        assert_eq!(
+            encrypted_tag.to_vec(),
+            hex_to_vec("f3d7abff05132bcea70d9434dd50e200")
+        );
+
+        let mut nonce_counter = encrypted_tag;
+        nonce_counter[12] &= 0x7f;
+        let mut ciphertext = data;
+        aes_ctr_encrypt(&k1_cipher, &mut nonce_counter, &mut ciphertext);
+        assert_eq!(
+            ciphertext.to_vec(),
+            hex_to_vec("f028915981be8c144350d4754d13b55784c5a61f3398cd0ab2954d33c589fb7b")
+        );
+    }
+
+    #[test]
+    fn known_answer_upstream_oracle_case_b_with_aad_and_partial_block() {
+        let k0: [u8; 32] = core::array::from_fn(|i| (i + 1) as u8);
+        let k1: [u8; 32] = core::array::from_fn(|i| (0xA0 + i) as u8);
+        let iv: [u8; 8] = [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        let aad: [u8; 5] = [0xde, 0xad, 0xbe, 0xef, 0x01];
+        let data: [u8; 17] = core::array::from_fn(|i| (0x30 + i) as u8);
+
+        let mac = shorten_tag(&gmac_compute(&k0, &iv, &aad, &data));
+        let mut tag_block = [0u8; 16];
+        tag_block[0..8].copy_from_slice(&iv);
+        tag_block[8..16].copy_from_slice(&mac);
+        let k1_cipher = Aes256::new((&k1).into());
+        let mut aes_block: aes::Block = tag_block.into();
+        k1_cipher.encrypt_block(&mut aes_block);
+        let encrypted_tag: [u8; 16] = aes_block.into();
+        assert_eq!(
+            encrypted_tag.to_vec(),
+            hex_to_vec("866e56595e044ee1027ff0c0990bfad5")
+        );
+
+        let mut nonce_counter = encrypted_tag;
+        nonce_counter[12] &= 0x7f;
+        let mut ciphertext = data;
+        aes_ctr_encrypt(&k1_cipher, &mut nonce_counter, &mut ciphertext);
+        assert_eq!(
+            ciphertext.to_vec(),
+            hex_to_vec("eb81243c143103276b9a23ad0ecb29b4a7")
+        );
+    }
+
+    #[test]
+    fn known_answer_upstream_oracle_case_c_aad_only_empty_plaintext() {
+        let k0: [u8; 32] = core::array::from_fn(|i| (i + 1) as u8);
+        let k1: [u8; 32] = core::array::from_fn(|i| (0xA0 + i) as u8);
+        let iv: [u8; 8] = [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        let aad: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        let mac = shorten_tag(&gmac_compute(&k0, &iv, &aad, &[]));
+        let mut tag_block = [0u8; 16];
+        tag_block[0..8].copy_from_slice(&iv);
+        tag_block[8..16].copy_from_slice(&mac);
+        let k1_cipher = Aes256::new((&k1).into());
+        let mut aes_block: aes::Block = tag_block.into();
+        k1_cipher.encrypt_block(&mut aes_block);
+        let encrypted_tag: [u8; 16] = aes_block.into();
+        assert_eq!(
+            encrypted_tag.to_vec(),
+            hex_to_vec("95561eaafb1129af96c44aadf10c5a4c")
+        );
+    }
 
     #[test]
     fn roundtrip_basic() {
