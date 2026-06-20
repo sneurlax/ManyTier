@@ -20,3 +20,5 @@ pub mod memory_hard;
 pub mod poly;
 pub mod salsa;
 pub mod signing;
+#[cfg(feature = "v2")]
+pub mod v2;

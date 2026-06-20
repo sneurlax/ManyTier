@@ -15,6 +15,8 @@ pub mod fragment;
 pub mod header;
 pub mod identity_wire;
 pub mod inet_address;
+#[cfg(feature = "v2")]
+pub mod v2;
 pub mod verb;
 pub mod verbs;
 pub mod world;
