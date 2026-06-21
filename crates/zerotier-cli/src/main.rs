@@ -10,7 +10,11 @@ mod client;
 mod commands;
 
 #[derive(Parser)]
-#[command(name = "manytier", about = "ManyTier ZeroTier-compatible network tool")]
+#[command(
+    name = "manytier",
+    about = "ManyTier ZeroTier-compatible network tool",
+    version
+)]
 struct Cli {
     /// Auth token (reads from authtoken.secret if not provided)
     #[arg(long, env = "ZT_AUTH_TOKEN")]

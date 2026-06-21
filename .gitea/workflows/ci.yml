@@ -95,3 +95,41 @@ jobs:
         run: cargo check --target wasm32-wasip1 -p zerotier-protocol --no-default-features
       - name: Check zerotier-node (wasm32-wasip1)
         run: cargo check --target wasm32-wasip1 -p zerotier-node --no-default-features
+
+  release-linux:
+    name: Release Binary (${{ matrix.target }})
+    needs: [fmt, clippy, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p zerotier-cli
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          out="manytier-${version}-${{ matrix.target }}"
+          mkdir -p "$out"
+          cp "target/${{ matrix.target }}/release/manytier" "$out/"
+          cp README.md LICENSE "$out/" 2>/dev/null || true
+          tar czf "${out}.tar.gz" "$out"
+          sha256sum "${out}.tar.gz" > "${out}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manytier-${{ matrix.target }}
+          path: |
+            manytier-*.tar.gz
+            manytier-*.tar.gz.sha256
+          retention-days: 90

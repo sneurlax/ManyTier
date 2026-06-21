@@ -18,14 +18,22 @@ A free public ManyTier root and controller runs at
 
 ## Status
 
-V1 protocol (Salsa20/12 + Poly1305, C25519/Ed25519 identities) is implemented
-and interop-proven. This codebase is in a pre-release hardening pass; the V2
-protocol (P-384/Kyber/ZSSP) is future work. Not affiliated with or endorsed
-by ZeroTier, Inc.
+V1 protocol (Salsa20/12 + Poly1305, C25519/Ed25519 identities, AES-GMAC-SIV)
+is implemented and tested for interoperability. The `v1.9` tag records the
+V1 baseline. V2 (P-384/Kyber/ZSSP) is future work with no code beyond an
+empty, feature-gated placeholder module; it will not be built out until it's
+explicitly scoped. Not affiliated with or endorsed by ZeroTier, Inc.
 
-## Quick start
+## Install
 
-Requires Rust 1.85.1 or newer.
+**Download a release binary** (Linux/macOS/Windows, no Rust toolchain needed):
+see the [releases page](https://git.manymath.com/sneurlax/manytier/releases)
+(or [GitHub releases](https://github.com/sneurlax/manytier/releases) for
+macOS/Windows builds), download the archive for your platform, verify it
+against the accompanying `.sha256` file, and extract the `manytier` binary
+onto your `PATH`.
+
+**Or build from source**: requires Rust 1.85.1 or newer:
 
 ```bash
 cargo build --release
