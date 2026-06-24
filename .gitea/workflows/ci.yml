@@ -115,6 +115,11 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build release binary
+        env:
+          # Ubuntu's musl-tools package only ships an unprefixed `musl-gcc`,
+          # not the `x86_64-linux-musl-gcc` name cc-rs looks for by default
+          # (needed to cross-compile rusqlite's bundled sqlite3 C sources).
+          CC_x86_64_unknown_linux_musl: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }} -p zerotier-cli
       - name: Package
         run: |
