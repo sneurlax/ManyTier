@@ -41,6 +41,18 @@ cargo build --release
 ./target/release/manytier --help
 ```
 
+**Or build the Docker image** (no local Rust toolchain needed):
+
+```bash
+docker build -t manytier .
+docker run -d --name manytier -v manytier-data:/data -p 9993:9993/udp manytier \
+  service --data-dir /data --controller-mode
+docker exec manytier manytier status
+```
+
+The image isn't published to a registry yet, so build it locally from the
+repo's `Dockerfile` for now.
+
 Run a node:
 
 ```bash

@@ -1,0 +1,7 @@
+target/
+target-user/
+tests/shadow/artifacts/
+tests/fixtures/zerotier-one*
+vendor/
+.git/
+.planning/
