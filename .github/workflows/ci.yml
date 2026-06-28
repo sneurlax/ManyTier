@@ -57,6 +57,23 @@ jobs:
       - name: Check zerotier-node (wasm32-unknown-unknown)
         run: cargo check --target wasm32-unknown-unknown -p zerotier-node --no-default-features
 
+  wasm-test:
+    name: WASM Test (wasm-pack test --node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: "latest"
+      - name: Test zerotier-crypto (wasm-pack test --node)
+        run: wasm-pack test --node crates/zerotier-crypto
+      - name: Test zerotier-protocol (wasm-pack test --node)
+        run: wasm-pack test --node crates/zerotier-protocol
+
   audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
