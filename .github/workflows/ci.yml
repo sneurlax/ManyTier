@@ -103,3 +103,30 @@ jobs:
         run: cargo check --target wasm32-wasip1 -p zerotier-protocol --no-default-features
       - name: Check zerotier-node (wasm32-wasip1)
         run: cargo check --target wasm32-wasip1 -p zerotier-node --no-default-features
+
+  docker-build:
+    name: Docker Build & Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t manytier:ci .
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name manytier-ci -v manytier-ci-data:/data manytier:ci \
+            service --data-dir /data --controller-mode
+          for _ in $(seq 1 20); do
+            if docker exec manytier-ci manytier status >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec manytier-ci manytier --version
+          docker exec manytier-ci manytier status
+          docker logs manytier-ci
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f manytier-ci 2>/dev/null || true
+          docker volume rm manytier-ci-data 2>/dev/null || true
