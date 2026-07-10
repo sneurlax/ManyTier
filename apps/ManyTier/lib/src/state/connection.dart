@@ -5,13 +5,16 @@ library;
 import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/manytier_client.dart';
 import '../api/token_discovery.dart';
 
+const _prefsHostKey = 'manytier.connection.host';
+const _prefsPortKey = 'manytier.connection.port';
+const _prefsManualTokenKey = 'manytier.connection.manualToken';
+
 /// Where and how to reach the local service.
-///
-// TODO(manytier): persist these (and the manual token) in prefs later.
 class ConnectionSettings {
   const ConnectionSettings({
     this.host = '127.0.0.1',
@@ -36,6 +39,37 @@ class ConnectionSettings {
 
 final connectionSettingsProvider =
     StateProvider<ConnectionSettings>((ref) => const ConnectionSettings());
+
+/// Loads previously persisted connection settings, if any, and applies them
+/// to [connectionSettingsProvider] exactly once. `app.dart` reads this via
+/// `ref.watch` so the load kicks off at startup; the `AsyncValue` itself is
+/// discarded; only the one-time side effect of updating
+/// [connectionSettingsProvider] matters.
+final connectionSettingsLoaderProvider = FutureProvider<void>((ref) async {
+  final prefs = await SharedPreferences.getInstance();
+  const defaults = ConnectionSettings();
+  ref.read(connectionSettingsProvider.notifier).state = ConnectionSettings(
+    host: prefs.getString(_prefsHostKey) ?? defaults.host,
+    port: prefs.getInt(_prefsPortKey) ?? defaults.port,
+    manualToken: prefs.getString(_prefsManualTokenKey),
+  );
+});
+
+/// Persists every settings change so host/port/manual token survive restart.
+final connectionSettingsPersistenceProvider = Provider<void>((ref) {
+  ref.listen<ConnectionSettings>(connectionSettingsProvider,
+      (previous, next) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsHostKey, next.host);
+    await prefs.setInt(_prefsPortKey, next.port);
+    final manualToken = next.manualToken;
+    if (manualToken == null || manualToken.isEmpty) {
+      await prefs.remove(_prefsManualTokenKey);
+    } else {
+      await prefs.setString(_prefsManualTokenKey, manualToken);
+    }
+  }, fireImmediately: false);
+});
 
 /// Token read from `authtoken.secret` in one of the known data dirs
 /// (always `null` on the web).
