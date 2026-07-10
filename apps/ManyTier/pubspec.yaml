@@ -1,0 +1,36 @@
+name: manytier_app
+description: ManyTier, a cross-platform ZeroTier-compatible network manager built on manyui.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+  flutter: ">=3.38.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.0
+  flutter_hooks: ^0.20.5
+  hooks_riverpod: ^2.5.0
+  http: ^1.2.0
+  manyui:
+    path: ../../../ManyUI/manyui
+  manyui_hooks:
+    path: ../../../ManyUI/manyui_hooks
+  manyui_riverpod:
+    path: ../../../ManyUI/manyui_riverpod
+
+# manyui is unpublished and developed in lockstep from the sibling
+# ../../../ManyUI checkout, so pin every resolution of it to that path.
+dependency_overrides:
+  manyui:
+    path: ../../../ManyUI/manyui
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: false
