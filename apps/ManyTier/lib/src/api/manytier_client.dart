@@ -81,9 +81,9 @@ class ManyTierNetwork {
       id: json['id'] as String,
       name: json['name'] as String? ?? '',
       status: json['status'] as String,
-      assignedAddresses: (json['assignedAddresses'] as List<dynamic>? ??
-              const <dynamic>[])
-          .cast<String>(),
+      assignedAddresses:
+          (json['assignedAddresses'] as List<dynamic>? ?? const <dynamic>[])
+              .cast<String>(),
       mac: json['mac'] as String? ?? '',
       mtu: (json['mtu'] as num?)?.toInt() ?? 0,
     );
@@ -133,8 +133,9 @@ class ManyTierPeer {
     return ManyTierPeer(
       address: json['address'] as String,
       paths: (json['paths'] as List<dynamic>? ?? const <dynamic>[])
-          .map((dynamic p) =>
-              ManyTierPeerPath.fromJson(p as Map<String, dynamic>))
+          .map(
+            (dynamic p) => ManyTierPeerPath.fromJson(p as Map<String, dynamic>),
+          )
           .toList(),
       latency: (json['latency'] as num?)?.toInt() ?? -1,
       role: json['role'] as String? ?? 'LEAF',
@@ -184,14 +185,311 @@ class Moon {
   final List<MoonRoot> roots;
 }
 
+/// An IP auto-assignment range in a controller network config.
+class ControllerIpPool {
+  const ControllerIpPool({
+    required this.ipRangeStart,
+    required this.ipRangeEnd,
+  });
+
+  factory ControllerIpPool.fromJson(Map<String, dynamic> json) {
+    return ControllerIpPool(
+      ipRangeStart: json['ipRangeStart'] as String,
+      ipRangeEnd: json['ipRangeEnd'] as String,
+    );
+  }
+
+  final String ipRangeStart;
+  final String ipRangeEnd;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'ipRangeStart': ipRangeStart,
+    'ipRangeEnd': ipRangeEnd,
+  };
+}
+
+/// A controller-managed route.
+class ControllerRoute {
+  const ControllerRoute({required this.target, required this.via});
+
+  factory ControllerRoute.fromJson(Map<String, dynamic> json) {
+    return ControllerRoute(
+      target: json['target'] as String,
+      via: json['via'] as String?,
+    );
+  }
+
+  final String target;
+
+  /// Gateway address, or null for routes owned directly by the network.
+  final String? via;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'target': target,
+    'via': via,
+  };
+}
+
+/// A member tag assignment.
+class ControllerTag {
+  const ControllerTag({required this.id, required this.value});
+
+  factory ControllerTag.fromJson(Map<String, dynamic> json) {
+    return ControllerTag(
+      id: (json['id'] as num).toInt(),
+      value: (json['value'] as num).toInt(),
+    );
+  }
+
+  final int id;
+  final int value;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{'id': id, 'value': value};
+}
+
+/// GET/POST/DELETE /controller/network/:nwid response body.
+class ControllerNetwork {
+  const ControllerNetwork({
+    required this.id,
+    required this.name,
+    required this.private,
+    required this.creationTime,
+    required this.revision,
+    required this.multicastLimit,
+    required this.mtu,
+    required this.v4AssignMode,
+    required this.v6AssignMode,
+    required this.ipAssignmentPools,
+    required this.enableBroadcast,
+    required this.routes,
+    required this.rules,
+    required this.capabilities,
+    required this.tags,
+  });
+
+  factory ControllerNetwork.fromJson(Map<String, dynamic> json) {
+    return ControllerNetwork(
+      id: json['id'] as String,
+      name: json['name'] as String? ?? '',
+      private: json['private'] as bool? ?? true,
+      creationTime: (json['creationTime'] as num?)?.toInt() ?? 0,
+      revision: (json['revision'] as num?)?.toInt() ?? 0,
+      multicastLimit: (json['multicastLimit'] as num?)?.toInt() ?? 0,
+      mtu: (json['mtu'] as num?)?.toInt() ?? 0,
+      v4AssignMode: _jsonMap(json['v4AssignMode'] ?? const <String, dynamic>{}),
+      v6AssignMode: _jsonMap(json['v6AssignMode'] ?? const <String, dynamic>{}),
+      ipAssignmentPools:
+          (json['ipAssignmentPools'] as List<dynamic>? ?? const <dynamic>[])
+              .map(
+                (dynamic p) =>
+                    ControllerIpPool.fromJson(p as Map<String, dynamic>),
+              )
+              .toList(),
+      enableBroadcast: json['enableBroadcast'] as bool? ?? false,
+      routes: (json['routes'] as List<dynamic>? ?? const <dynamic>[])
+          .map(
+            (dynamic r) => ControllerRoute.fromJson(r as Map<String, dynamic>),
+          )
+          .toList(),
+      rules: _jsonMapList(json['rules']),
+      capabilities: _jsonMapList(json['capabilities']),
+      tags: _jsonMapList(json['tags']),
+    );
+  }
+
+  final String id;
+  final String name;
+  final bool private;
+  final int creationTime;
+  final int revision;
+  final int multicastLimit;
+  final int mtu;
+  final Map<String, dynamic> v4AssignMode;
+  final Map<String, dynamic> v6AssignMode;
+  final List<ControllerIpPool> ipAssignmentPools;
+  final bool enableBroadcast;
+  final List<ControllerRoute> routes;
+
+  /// Raw controller rule JSON. The daemon keeps this shape lossless.
+  final List<Map<String, dynamic>> rules;
+
+  /// Raw capability definition JSON.
+  final List<Map<String, dynamic>> capabilities;
+
+  /// Raw tag definition JSON.
+  final List<Map<String, dynamic>> tags;
+}
+
+/// Partial body for POST /controller/network/:nwid.
+class ControllerNetworkUpdate {
+  const ControllerNetworkUpdate({
+    this.name,
+    this.private,
+    this.multicastLimit,
+    this.mtu,
+    this.v4AssignMode,
+    this.ipAssignmentPools,
+    this.routes,
+    this.enableBroadcast,
+    this.rules,
+    this.capabilities,
+    this.tags,
+  });
+
+  final String? name;
+  final bool? private;
+  final int? multicastLimit;
+  final int? mtu;
+  final Map<String, dynamic>? v4AssignMode;
+  final List<ControllerIpPool>? ipAssignmentPools;
+  final List<ControllerRoute>? routes;
+  final bool? enableBroadcast;
+  final List<Map<String, dynamic>>? rules;
+  final List<Map<String, dynamic>>? capabilities;
+  final List<Map<String, dynamic>>? tags;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    if (name != null) 'name': name,
+    if (private != null) 'private': private,
+    if (multicastLimit != null) 'multicastLimit': multicastLimit,
+    if (mtu != null) 'mtu': mtu,
+    if (v4AssignMode != null) 'v4AssignMode': v4AssignMode,
+    if (ipAssignmentPools != null)
+      'ipAssignmentPools': ipAssignmentPools!
+          .map((ControllerIpPool p) => p.toJson())
+          .toList(),
+    if (routes != null)
+      'routes': routes!.map((ControllerRoute r) => r.toJson()).toList(),
+    if (enableBroadcast != null) 'enableBroadcast': enableBroadcast,
+    if (rules != null) 'rules': rules,
+    if (capabilities != null) 'capabilities': capabilities,
+    if (tags != null) 'tags': tags,
+  };
+}
+
+/// GET/POST /controller/network/:nwid/member/:nodeId response body.
+class ControllerMember {
+  const ControllerMember({
+    required this.id,
+    required this.networkId,
+    required this.authorized,
+    required this.ipAssignments,
+    required this.creationTime,
+    required this.lastSeen,
+    required this.name,
+    required this.revision,
+    required this.activeBridge,
+    required this.noAutoAssignIps,
+    required this.lastAuthorizedTime,
+    required this.lastDeauthorizedTime,
+    required this.vMajor,
+    required this.vMinor,
+    required this.vRev,
+    required this.vProto,
+    required this.capabilities,
+    required this.tags,
+  });
+
+  factory ControllerMember.fromJson(Map<String, dynamic> json) {
+    return ControllerMember(
+      id: json['id'] as String,
+      networkId: json['networkId'] as String,
+      authorized: json['authorized'] as bool? ?? false,
+      ipAssignments:
+          (json['ipAssignments'] as List<dynamic>? ?? const <dynamic>[])
+              .cast<String>(),
+      creationTime: (json['creationTime'] as num?)?.toInt() ?? 0,
+      lastSeen: (json['lastSeen'] as num?)?.toInt() ?? 0,
+      name: json['name'] as String? ?? '',
+      revision: (json['revision'] as num?)?.toInt() ?? 0,
+      activeBridge: json['activeBridge'] as bool? ?? false,
+      noAutoAssignIps: json['noAutoAssignIps'] as bool? ?? false,
+      lastAuthorizedTime: (json['lastAuthorizedTime'] as num?)?.toInt() ?? 0,
+      lastDeauthorizedTime:
+          (json['lastDeauthorizedTime'] as num?)?.toInt() ?? 0,
+      vMajor: (json['vMajor'] as num?)?.toInt() ?? -1,
+      vMinor: (json['vMinor'] as num?)?.toInt() ?? -1,
+      vRev: (json['vRev'] as num?)?.toInt() ?? -1,
+      vProto: (json['vProto'] as num?)?.toInt() ?? -1,
+      capabilities:
+          (json['capabilities'] as List<dynamic>? ?? const <dynamic>[])
+              .map((dynamic c) => (c as num).toInt())
+              .toList(),
+      tags: (json['tags'] as List<dynamic>? ?? const <dynamic>[])
+          .map((dynamic t) => ControllerTag.fromJson(t as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  final String id;
+  final String networkId;
+  final bool authorized;
+  final List<String> ipAssignments;
+  final int creationTime;
+  final int lastSeen;
+  final String name;
+  final int revision;
+  final bool activeBridge;
+  final bool noAutoAssignIps;
+  final int lastAuthorizedTime;
+  final int lastDeauthorizedTime;
+  final int vMajor;
+  final int vMinor;
+  final int vRev;
+  final int vProto;
+  final List<int> capabilities;
+  final List<ControllerTag> tags;
+}
+
+/// Partial body for POST /controller/network/:nwid/member/:nodeId.
+class ControllerMemberUpdate {
+  const ControllerMemberUpdate({
+    this.authorized,
+    this.ipAssignments,
+    this.name,
+    this.activeBridge,
+    this.noAutoAssignIps,
+    this.capabilities,
+    this.tags,
+  });
+
+  final bool? authorized;
+  final List<String>? ipAssignments;
+  final String? name;
+  final bool? activeBridge;
+  final bool? noAutoAssignIps;
+  final List<int>? capabilities;
+  final List<ControllerTag>? tags;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    if (authorized != null) 'authorized': authorized,
+    if (ipAssignments != null) 'ipAssignments': ipAssignments,
+    if (name != null) 'name': name,
+    if (activeBridge != null) 'activeBridge': activeBridge,
+    if (noAutoAssignIps != null) 'noAutoAssignIps': noAutoAssignIps,
+    if (capabilities != null) 'capabilities': capabilities,
+    if (tags != null)
+      'tags': tags!.map((ControllerTag t) => t.toJson()).toList(),
+  };
+}
+
+Map<String, dynamic> _jsonMap(Object? value) =>
+    Map<String, dynamic>.from(value as Map);
+
+List<Map<String, dynamic>> _jsonMapList(Object? value) =>
+    (value as List<dynamic>? ?? const <dynamic>[])
+        .map((dynamic item) => _jsonMap(item))
+        .toList();
+
 /// Matches a well-formed 16-hex network (or moon) id.
 final RegExp networkIdPattern = RegExp(r'^[0-9a-fA-F]{16}$');
+
+/// Matches a well-formed 10-hex node/controller address.
+final RegExp nodeAddressPattern = RegExp(r'^[0-9a-fA-F]{10}$');
 
 /// Small typed client over the daemon's REST surface.
 ///
 /// All methods throw [ServiceUnreachable], [Unauthorized], or [ApiError].
-// TODO(manytier): controller-mode endpoints (/controller/network CRUD and
-// member authorization) are deferred to a later phase.
 abstract class ManyTierClient {
   Future<ManyTierStatus> status();
   Future<List<ManyTierPeer>> peers();
@@ -201,6 +499,25 @@ abstract class ManyTierClient {
   Future<List<Moon>> moons();
   Future<Moon> orbitMoon(String moonId);
   Future<void> deorbitMoon(String moonId);
+  Future<List<String>> controllerNetworkIds();
+  Future<ControllerNetwork> controllerNetwork(String networkId);
+  Future<ControllerNetwork> createControllerNetwork(
+    String controllerAddress, {
+    ControllerNetworkUpdate update = const ControllerNetworkUpdate(),
+  });
+  Future<ControllerNetwork> updateControllerNetwork(
+    String networkId,
+    ControllerNetworkUpdate update,
+  );
+  Future<ControllerNetwork> deleteControllerNetwork(String networkId);
+  Future<List<String>> controllerMemberIds(String networkId);
+  Future<ControllerMember> controllerMember(String networkId, String memberId);
+  Future<ControllerMember> updateControllerMember(
+    String networkId,
+    String memberId,
+    ControllerMemberUpdate update,
+  );
+  Future<void> deleteControllerMember(String networkId, String memberId);
   void close();
 }
 
@@ -218,64 +535,83 @@ class HttpManyTierClient implements ManyTierClient {
   final int port;
   final String? token;
 
-  Uri _uri(String path) => Uri(scheme: 'http', host: host, port: port, path: path);
+  Uri _uri(String path) =>
+      Uri(scheme: 'http', host: host, port: port, path: path);
 
-  Map<String, String> get _headers =>
-      <String, String>{if (token != null) 'X-ZT1-Auth': token!};
+  Map<String, String> get _headers => <String, String>{
+    if (token != null) 'X-ZT1-Auth': token!,
+  };
 
   @override
   Future<ManyTierStatus> status() async {
     final http.Response res = await _get('/status');
-    return _parse(res, (dynamic j) =>
-        ManyTierStatus.fromJson(j as Map<String, dynamic>));
+    return _parse(
+      res,
+      (dynamic j) => ManyTierStatus.fromJson(j as Map<String, dynamic>),
+    );
   }
 
   @override
   Future<List<ManyTierPeer>> peers() async {
     final http.Response res = await _get('/peer');
-    return _parse(res, (dynamic j) => (j as List<dynamic>)
-        .map((dynamic p) => ManyTierPeer.fromJson(p as Map<String, dynamic>))
-        .toList());
+    return _parse(
+      res,
+      (dynamic j) => (j as List<dynamic>)
+          .map((dynamic p) => ManyTierPeer.fromJson(p as Map<String, dynamic>))
+          .toList(),
+    );
   }
 
   @override
   Future<List<ManyTierNetwork>> networks() async {
     final http.Response res = await _get('/network');
-    return _parse(res, (dynamic j) => (j as List<dynamic>)
-        .map((dynamic n) =>
-            ManyTierNetwork.fromJson(n as Map<String, dynamic>))
-        .toList());
+    return _parse(
+      res,
+      (dynamic j) => (j as List<dynamic>)
+          .map(
+            (dynamic n) => ManyTierNetwork.fromJson(n as Map<String, dynamic>),
+          )
+          .toList(),
+    );
   }
 
   @override
   Future<ManyTierNetwork> joinNetwork(String networkId) async {
     _requireHexId(networkId);
-    final http.Response res =
-        await _run(() => _http.post(_uri('/network/$networkId'), headers: _headers));
-    return _parse(res, (dynamic j) =>
-        ManyTierNetwork.fromJson(j as Map<String, dynamic>));
+    final http.Response res = await _run(
+      () => _http.post(_uri('/network/$networkId'), headers: _headers),
+    );
+    return _parse(
+      res,
+      (dynamic j) => ManyTierNetwork.fromJson(j as Map<String, dynamic>),
+    );
   }
 
   @override
   Future<void> leaveNetwork(String networkId) async {
     _requireHexId(networkId);
     await _run(
-        () => _http.delete(_uri('/network/$networkId'), headers: _headers));
+      () => _http.delete(_uri('/network/$networkId'), headers: _headers),
+    );
   }
 
   @override
   Future<List<Moon>> moons() async {
     final http.Response res = await _get('/moon');
-    return _parse(res, (dynamic j) => (j as List<dynamic>)
-        .map((dynamic m) => Moon.fromJson(m as Map<String, dynamic>))
-        .toList());
+    return _parse(
+      res,
+      (dynamic j) => (j as List<dynamic>)
+          .map((dynamic m) => Moon.fromJson(m as Map<String, dynamic>))
+          .toList(),
+    );
   }
 
   @override
   Future<Moon> orbitMoon(String moonId) async {
     _requireHexId(moonId);
-    final http.Response res =
-        await _run(() => _http.post(_uri('/moon/$moonId'), headers: _headers));
+    final http.Response res = await _run(
+      () => _http.post(_uri('/moon/$moonId'), headers: _headers),
+    );
     return _parse(res, (dynamic j) => Moon.fromJson(j as Map<String, dynamic>));
   }
 
@@ -283,6 +619,128 @@ class HttpManyTierClient implements ManyTierClient {
   Future<void> deorbitMoon(String moonId) async {
     _requireHexId(moonId);
     await _run(() => _http.delete(_uri('/moon/$moonId'), headers: _headers));
+  }
+
+  @override
+  Future<List<String>> controllerNetworkIds() async {
+    final http.Response res = await _get('/controller/network');
+    return _parse(res, (dynamic j) => (j as List<dynamic>).cast<String>());
+  }
+
+  @override
+  Future<ControllerNetwork> controllerNetwork(String networkId) async {
+    _requireHexId(networkId);
+    final http.Response res = await _get('/controller/network/$networkId');
+    return _parse(
+      res,
+      (dynamic j) => ControllerNetwork.fromJson(j as Map<String, dynamic>),
+    );
+  }
+
+  @override
+  Future<ControllerNetwork> createControllerNetwork(
+    String controllerAddress, {
+    ControllerNetworkUpdate update = const ControllerNetworkUpdate(),
+  }) async {
+    _requireNodeAddress(controllerAddress);
+    final http.Response res = await _postJson(
+      '/controller/network/${controllerAddress}______',
+      update.toJson(),
+    );
+    return _parse(
+      res,
+      (dynamic j) => ControllerNetwork.fromJson(j as Map<String, dynamic>),
+    );
+  }
+
+  @override
+  Future<ControllerNetwork> updateControllerNetwork(
+    String networkId,
+    ControllerNetworkUpdate update,
+  ) async {
+    _requireHexId(networkId);
+    final http.Response res = await _postJson(
+      '/controller/network/$networkId',
+      update.toJson(),
+    );
+    return _parse(
+      res,
+      (dynamic j) => ControllerNetwork.fromJson(j as Map<String, dynamic>),
+    );
+  }
+
+  @override
+  Future<ControllerNetwork> deleteControllerNetwork(String networkId) async {
+    _requireHexId(networkId);
+    final http.Response res = await _run(
+      () => _http.delete(
+        _uri('/controller/network/$networkId'),
+        headers: _headers,
+      ),
+    );
+    return _parse(
+      res,
+      (dynamic j) => ControllerNetwork.fromJson(j as Map<String, dynamic>),
+    );
+  }
+
+  @override
+  Future<List<String>> controllerMemberIds(String networkId) async {
+    _requireHexId(networkId);
+    final http.Response res = await _get(
+      '/controller/network/$networkId/member',
+    );
+    return _parse(res, (dynamic j) {
+      final ids = Map<String, dynamic>.from(j as Map).keys.toList();
+      ids.sort();
+      return ids;
+    });
+  }
+
+  @override
+  Future<ControllerMember> controllerMember(
+    String networkId,
+    String memberId,
+  ) async {
+    _requireHexId(networkId);
+    _requireNodeAddress(memberId);
+    final http.Response res = await _get(
+      '/controller/network/$networkId/member/$memberId',
+    );
+    return _parse(
+      res,
+      (dynamic j) => ControllerMember.fromJson(j as Map<String, dynamic>),
+    );
+  }
+
+  @override
+  Future<ControllerMember> updateControllerMember(
+    String networkId,
+    String memberId,
+    ControllerMemberUpdate update,
+  ) async {
+    _requireHexId(networkId);
+    _requireNodeAddress(memberId);
+    final http.Response res = await _postJson(
+      '/controller/network/$networkId/member/$memberId',
+      update.toJson(),
+    );
+    return _parse(
+      res,
+      (dynamic j) => ControllerMember.fromJson(j as Map<String, dynamic>),
+    );
+  }
+
+  @override
+  Future<void> deleteControllerMember(String networkId, String memberId) async {
+    _requireHexId(networkId);
+    _requireNodeAddress(memberId);
+    await _run(
+      () => _http.delete(
+        _uri('/controller/network/$networkId/member/$memberId'),
+        headers: _headers,
+      ),
+    );
   }
 
   @override
@@ -294,11 +752,32 @@ class HttpManyTierClient implements ManyTierClient {
     }
   }
 
+  void _requireNodeAddress(String address) {
+    if (!nodeAddressPattern.hasMatch(address)) {
+      throw ArgumentError.value(
+        address,
+        'address',
+        'must be a 10-character hex node address',
+      );
+    }
+  }
+
   Future<http.Response> _get(String path) =>
       _run(() => _http.get(_uri(path), headers: _headers));
 
-  Future<http.Response> _run(
-      Future<http.Response> Function() request) async {
+  Future<http.Response> _postJson(String path, Map<String, dynamic> body) =>
+      _run(
+        () => _http.post(
+          _uri(path),
+          headers: <String, String>{
+            ..._headers,
+            'content-type': 'application/json',
+          },
+          body: jsonEncode(body),
+        ),
+      );
+
+  Future<http.Response> _run(Future<http.Response> Function() request) async {
     final http.Response res;
     try {
       res = await request();
