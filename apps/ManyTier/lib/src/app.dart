@@ -15,8 +15,8 @@ class ManyTierApp extends ConsumerWidget {
     // Neither provider holds widget-visible state -- watching just
     // instantiates them: one loads persisted settings at startup, the
     // other listens for changes and writes them back.
-    ref.watch(connectionSettingsLoaderProvider);
-    ref.watch(connectionSettingsPersistenceProvider);
+    ref.watch(connectionsLoaderProvider);
+    ref.watch(connectionsPersistenceProvider);
     return MWidgetsApp(
       title: 'ManyTier',
       theme: MThemeData.light(),

@@ -5,6 +5,7 @@ import 'package:manyui/manyui.dart';
 
 import '../api/manytier_client.dart';
 import '../api/token_discovery.dart';
+import '../connections/connections_dialog.dart';
 import '../state/connection.dart';
 import '../state/moons.dart';
 import '../theme.dart';
@@ -28,6 +29,12 @@ class NetworksPage extends HookConsumerWidget {
           const SizedBox(width: 12),
           _connectionBadge(connection),
           const Spacer(),
+          MButton(
+            variant: MButtonVariant.ghost,
+            onPressed: () => showConnectionsDialog(context),
+            semanticLabel: 'Connections',
+            child: const Text('Connections'),
+          ),
           MButton(
             variant: MButtonVariant.ghost,
             onPressed: () {
@@ -188,8 +195,9 @@ class _UnauthorizedCard extends HookConsumerWidget {
                   ? null
                   : () {
                       final settings = ref.read(connectionSettingsProvider);
-                      ref.read(connectionSettingsProvider.notifier).state =
-                          settings.copyWith(manualToken: token.value.trim());
+                      ref.read(connectionsControllerProvider).update(
+                            settings.copyWith(manualToken: token.value.trim()),
+                          );
                     },
               child: const Text('Use token'),
             ),
