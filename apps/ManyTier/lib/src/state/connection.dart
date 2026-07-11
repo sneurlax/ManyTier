@@ -14,6 +14,7 @@ import '../api/token_discovery.dart';
 
 const _prefsConnectionsKey = 'manytier.connections';
 const _prefsActiveIdKey = 'manytier.connections.activeId';
+const _maxPeerLatencySamples = 24;
 
 /// One saved host/port/token combo, identified by [id] so switching doesn't
 /// depend on matching the tuple itself (a user may want two saved
@@ -271,11 +272,13 @@ final class DaemonConnected extends DaemonConnection {
     required this.status,
     required this.networks,
     required this.peers,
+    this.peerLatencyHistory = const <String, List<int>>{},
   });
 
   final ManyTierStatus status;
   final List<ManyTierNetwork> networks;
   final List<ManyTierPeer> peers;
+  final Map<String, List<int>> peerLatencyHistory;
 }
 
 /// Polls status + networks + peers every 3 seconds.
@@ -299,6 +302,7 @@ class DaemonPoller extends StateNotifier<AsyncValue<DaemonConnection>>
   final ManyTierClient _client;
   final WidgetsBinding _binding;
   final Duration _pollInterval;
+  final Map<String, List<int>> _peerLatencyHistory = <String, List<int>>{};
   Timer? _timer;
   bool _refreshing = false;
 
@@ -343,9 +347,15 @@ class DaemonPoller extends StateNotifier<AsyncValue<DaemonConnection>>
       final ManyTierStatus status = await _client.status();
       final List<ManyTierNetwork> networks = await _client.networks();
       final List<ManyTierPeer> peers = await _client.peers();
+      _recordPeerLatency(peers);
       if (!mounted) return;
       state = AsyncValue.data(
-        DaemonConnected(status: status, networks: networks, peers: peers),
+        DaemonConnected(
+          status: status,
+          networks: networks,
+          peers: peers,
+          peerLatencyHistory: _latencyHistorySnapshot(),
+        ),
       );
     } on ServiceUnreachable {
       if (!mounted) return;
@@ -359,6 +369,35 @@ class DaemonPoller extends StateNotifier<AsyncValue<DaemonConnection>>
     } finally {
       _refreshing = false;
     }
+  }
+
+  void _recordPeerLatency(List<ManyTierPeer> peers) {
+    final Set<String> activePeers = peers
+        .map((ManyTierPeer peer) => peer.address)
+        .toSet();
+    _peerLatencyHistory.removeWhere(
+      (String address, _) => !activePeers.contains(address),
+    );
+
+    for (final ManyTierPeer peer in peers) {
+      if (peer.latency < 0) continue;
+      final List<int> samples = _peerLatencyHistory.putIfAbsent(
+        peer.address,
+        () => <int>[],
+      );
+      samples.add(peer.latency);
+      if (samples.length > _maxPeerLatencySamples) {
+        samples.removeRange(0, samples.length - _maxPeerLatencySamples);
+      }
+    }
+  }
+
+  Map<String, List<int>> _latencyHistorySnapshot() {
+    return Map<String, List<int>>.unmodifiable(<String, List<int>>{
+      for (final MapEntry<String, List<int>> entry
+          in _peerLatencyHistory.entries)
+        entry.key: List<int>.unmodifiable(entry.value),
+    });
   }
 
   @override

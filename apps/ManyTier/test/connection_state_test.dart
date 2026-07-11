@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:manytier_app/src/api/manytier_client.dart';
 import 'package:manytier_app/src/state/connection.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -227,6 +228,63 @@ void main() {
         expect(client.peersCalls, 3);
       },
     );
+
+    test('records bounded latency history per active peer', () async {
+      ManyTierPeer peer(int latency) => ManyTierPeer(
+        address: 'abcdef0123',
+        paths: const <ManyTierPeerPath>[],
+        latency: latency,
+        role: 'LEAF',
+      );
+
+      final client = FakeManyTierClient(peers: <ManyTierPeer>[peer(10)]);
+      final poller = DaemonPoller(
+        client,
+        binding: binding,
+        pollInterval: const Duration(hours: 1),
+      );
+      addTearDown(poller.dispose);
+
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        (poller.state.requireValue as DaemonConnected)
+            .peerLatencyHistory['abcdef0123'],
+        <int>[10],
+      );
+
+      client.peers_ = <ManyTierPeer>[peer(20)];
+      await poller.refresh();
+      expect(
+        (poller.state.requireValue as DaemonConnected)
+            .peerLatencyHistory['abcdef0123'],
+        <int>[10, 20],
+      );
+
+      client.peers_ = <ManyTierPeer>[peer(-1)];
+      await poller.refresh();
+      expect(
+        (poller.state.requireValue as DaemonConnected)
+            .peerLatencyHistory['abcdef0123'],
+        <int>[10, 20],
+      );
+
+      for (int i = 0; i < 30; i++) {
+        client.peers_ = <ManyTierPeer>[peer(100 + i)];
+        await poller.refresh();
+      }
+      expect(
+        (poller.state.requireValue as DaemonConnected)
+            .peerLatencyHistory['abcdef0123'],
+        List<int>.generate(24, (int i) => 106 + i),
+      );
+
+      client.peers_ = const <ManyTierPeer>[];
+      await poller.refresh();
+      expect(
+        (poller.state.requireValue as DaemonConnected).peerLatencyHistory,
+        isNot(contains('abcdef0123')),
+      );
+    });
   });
 
   group('SavedConnection JSON round-trip', () {

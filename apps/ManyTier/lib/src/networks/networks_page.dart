@@ -291,7 +291,10 @@ class _Dashboard extends StatelessWidget {
       children: <Widget>[
         _StatusCard(status: connection.status),
         const SizedBox(height: 16),
-        _PeersSection(peers: connection.peers),
+        _PeersSection(
+          peers: connection.peers,
+          latencyHistory: connection.peerLatencyHistory,
+        ),
         const SizedBox(height: 16),
         const _MoonsSection(),
       ],
@@ -609,9 +612,10 @@ class _JoinCard extends HookConsumerWidget {
 }
 
 class _PeersSection extends StatelessWidget {
-  const _PeersSection({required this.peers});
+  const _PeersSection({required this.peers, required this.latencyHistory});
 
   final List<ManyTierPeer> peers;
+  final Map<String, List<int>> latencyHistory;
 
   @override
   Widget build(BuildContext context) {
@@ -637,7 +641,11 @@ class _PeersSection extends StatelessWidget {
                 children: <Widget>[
                   for (int i = 0; i < peers.length; i++) ...<Widget>[
                     if (i > 0) const MDivider(),
-                    _PeerRow(peer: peers[i]),
+                    _PeerRow(
+                      peer: peers[i],
+                      latencyHistory:
+                          latencyHistory[peers[i].address] ?? const <int>[],
+                    ),
                   ],
                 ],
               ),
@@ -649,9 +657,10 @@ class _PeersSection extends StatelessWidget {
 }
 
 class _PeerRow extends StatelessWidget {
-  const _PeerRow({required this.peer});
+  const _PeerRow({required this.peer, required this.latencyHistory});
 
   final ManyTierPeer peer;
+  final List<int> latencyHistory;
 
   @override
   Widget build(BuildContext context) {
@@ -669,6 +678,11 @@ class _PeerRow extends StatelessWidget {
                 ? MBadgeVariant.secondary
                 : MBadgeVariant.outline,
             child: Text(peer.role),
+          ),
+          const SizedBox(width: 12),
+          _PeerLatencySparkline(
+            peerAddress: peer.address,
+            samples: latencyHistory,
           ),
           const SizedBox(width: 12),
           SizedBox(
@@ -691,6 +705,116 @@ class _PeerRow extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _PeerLatencySparkline extends StatelessWidget {
+  const _PeerLatencySparkline({
+    required this.peerAddress,
+    required this.samples,
+  });
+
+  final String peerAddress;
+  final List<int> samples;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = MTheme.of(context);
+    return Semantics(
+      label: 'Latency trend for $peerAddress',
+      value: _latencyTrendValue(samples),
+      child: SizedBox(
+        width: 84,
+        height: 24,
+        child: CustomPaint(
+          painter: _PeerLatencySparklinePainter(
+            samples: samples,
+            lineColor: theme.colors.primary,
+            mutedColor: theme.colors.mutedForeground.withValues(alpha: 0.35),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _latencyTrendValue(List<int> samples) {
+    if (samples.isEmpty) return 'No latency samples';
+    if (samples.length == 1) return '${samples.single} milliseconds';
+    return '${samples.first} to ${samples.last} milliseconds';
+  }
+}
+
+class _PeerLatencySparklinePainter extends CustomPainter {
+  const _PeerLatencySparklinePainter({
+    required this.samples,
+    required this.lineColor,
+    required this.mutedColor,
+  });
+
+  final List<int> samples;
+  final Color lineColor;
+  final Color mutedColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint baselinePaint = Paint()
+      ..color = mutedColor
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    final double centerY = size.height / 2;
+    canvas.drawLine(
+      Offset(0, centerY),
+      Offset(size.width, centerY),
+      baselinePaint,
+    );
+
+    if (samples.isEmpty) return;
+
+    final Paint linePaint = Paint()
+      ..color = lineColor
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+    final Paint dotPaint = Paint()
+      ..color = lineColor
+      ..style = PaintingStyle.fill;
+
+    final int minSample = samples.reduce((int a, int b) => a < b ? a : b);
+    final int maxSample = samples.reduce((int a, int b) => a > b ? a : b);
+    final double range = (maxSample - minSample).toDouble();
+    final double stepX = samples.length == 1
+        ? 0
+        : size.width / (samples.length - 1);
+
+    Offset pointAt(int index) {
+      final double normalized = range == 0
+          ? 0.5
+          : (samples[index] - minSample) / range;
+      return Offset(
+        samples.length == 1 ? size.width / 2 : stepX * index,
+        size.height - normalized * size.height,
+      );
+    }
+
+    if (samples.length == 1) {
+      canvas.drawCircle(pointAt(0), 2.5, dotPaint);
+      return;
+    }
+
+    final Path path = Path()..moveTo(pointAt(0).dx, pointAt(0).dy);
+    for (int i = 1; i < samples.length; i++) {
+      final Offset point = pointAt(i);
+      path.lineTo(point.dx, point.dy);
+    }
+    canvas.drawPath(path, linePaint);
+  }
+
+  @override
+  bool shouldRepaint(_PeerLatencySparklinePainter oldDelegate) {
+    return samples != oldDelegate.samples ||
+        lineColor != oldDelegate.lineColor ||
+        mutedColor != oldDelegate.mutedColor;
   }
 }
 
