@@ -8,7 +8,7 @@ import 'package:manytier_app/src/api/manytier_client.dart';
 final String testToken = 'a' * 48;
 
 ManyTierClient clientWith(MockClient mock, {String? token}) {
-  return ManyTierClient(httpClient: mock, token: token ?? testToken);
+  return HttpManyTierClient(httpClient: mock, token: token ?? testToken);
 }
 
 void main() {

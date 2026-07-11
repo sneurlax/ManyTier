@@ -233,7 +233,7 @@ final effectiveTokenProvider = Provider<String?>((ref) {
 /// The client used by both the poller and one-shot actions (join/leave).
 final manyTierClientProvider = Provider<ManyTierClient>((ref) {
   final SavedConnection settings = ref.watch(connectionSettingsProvider);
-  final ManyTierClient client = ManyTierClient(
+  final ManyTierClient client = HttpManyTierClient(
     host: settings.host,
     port: settings.port,
     token: ref.watch(effectiveTokenProvider),

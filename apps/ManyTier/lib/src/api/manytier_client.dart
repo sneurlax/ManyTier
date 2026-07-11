@@ -192,8 +192,21 @@ final RegExp networkIdPattern = RegExp(r'^[0-9a-fA-F]{16}$');
 /// All methods throw [ServiceUnreachable], [Unauthorized], or [ApiError].
 // TODO(manytier): controller-mode endpoints (/controller/network CRUD and
 // member authorization) are deferred to a later phase.
-class ManyTierClient {
-  ManyTierClient({
+abstract class ManyTierClient {
+  Future<ManyTierStatus> status();
+  Future<List<ManyTierPeer>> peers();
+  Future<List<ManyTierNetwork>> networks();
+  Future<ManyTierNetwork> joinNetwork(String networkId);
+  Future<void> leaveNetwork(String networkId);
+  Future<List<Moon>> moons();
+  Future<Moon> orbitMoon(String moonId);
+  Future<void> deorbitMoon(String moonId);
+  void close();
+}
+
+/// [ManyTierClient] backed by real HTTP calls to a local `manytier service`.
+class HttpManyTierClient implements ManyTierClient {
+  HttpManyTierClient({
     http.Client? httpClient,
     this.host = '127.0.0.1',
     this.port = 9993,
@@ -210,12 +223,14 @@ class ManyTierClient {
   Map<String, String> get _headers =>
       <String, String>{if (token != null) 'X-ZT1-Auth': token!};
 
+  @override
   Future<ManyTierStatus> status() async {
     final http.Response res = await _get('/status');
     return _parse(res, (dynamic j) =>
         ManyTierStatus.fromJson(j as Map<String, dynamic>));
   }
 
+  @override
   Future<List<ManyTierPeer>> peers() async {
     final http.Response res = await _get('/peer');
     return _parse(res, (dynamic j) => (j as List<dynamic>)
@@ -223,6 +238,7 @@ class ManyTierClient {
         .toList());
   }
 
+  @override
   Future<List<ManyTierNetwork>> networks() async {
     final http.Response res = await _get('/network');
     return _parse(res, (dynamic j) => (j as List<dynamic>)
@@ -231,6 +247,7 @@ class ManyTierClient {
         .toList());
   }
 
+  @override
   Future<ManyTierNetwork> joinNetwork(String networkId) async {
     _requireHexId(networkId);
     final http.Response res =
@@ -239,12 +256,14 @@ class ManyTierClient {
         ManyTierNetwork.fromJson(j as Map<String, dynamic>));
   }
 
+  @override
   Future<void> leaveNetwork(String networkId) async {
     _requireHexId(networkId);
     await _run(
         () => _http.delete(_uri('/network/$networkId'), headers: _headers));
   }
 
+  @override
   Future<List<Moon>> moons() async {
     final http.Response res = await _get('/moon');
     return _parse(res, (dynamic j) => (j as List<dynamic>)
@@ -252,6 +271,7 @@ class ManyTierClient {
         .toList());
   }
 
+  @override
   Future<Moon> orbitMoon(String moonId) async {
     _requireHexId(moonId);
     final http.Response res =
@@ -259,11 +279,13 @@ class ManyTierClient {
     return _parse(res, (dynamic j) => Moon.fromJson(j as Map<String, dynamic>));
   }
 
+  @override
   Future<void> deorbitMoon(String moonId) async {
     _requireHexId(moonId);
     await _run(() => _http.delete(_uri('/moon/$moonId'), headers: _headers));
   }
 
+  @override
   void close() => _http.close();
 
   void _requireHexId(String id) {
