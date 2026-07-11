@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:manyui/manyui.dart';
+import 'package:manyui_hooks/manyui_hooks.dart';
 
 import '../state/connection.dart';
 
@@ -73,7 +74,10 @@ class _ConnectionRow extends HookConsumerWidget {
       title: Text(connection.label),
       subtitle: Text('${connection.host}:${connection.port}'),
       selected: active,
-      onTap: active ? null : () => ref.read(connectionsControllerProvider).switchTo(connection.id),
+      onTap: active
+          ? null
+          : () =>
+                ref.read(connectionsControllerProvider).switchTo(connection.id),
       semanticLabel: 'Switch to ${connection.label}',
       trailing: connections.length > 1
           ? MButton(
@@ -89,10 +93,15 @@ class _ConnectionRow extends HookConsumerWidget {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        Text('Forget connection?',
-                            style: dialogTheme.typography.headlineSmall),
+                        Text(
+                          'Forget connection?',
+                          style: dialogTheme.typography.headlineSmall,
+                        ),
                         const SizedBox(height: 8),
-                        Text(connection.label, style: dialogTheme.typography.code),
+                        Text(
+                          connection.label,
+                          style: dialogTheme.typography.code,
+                        ),
                         const SizedBox(height: 24),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.end,
@@ -132,12 +141,9 @@ class _AddConnectionForm extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final labelController = useMemoized(() => MController<String>(''));
-    final hostController = useMemoized(() => MController<String>('127.0.0.1'));
-    final portController = useMemoized(() => MController<String>('9993'));
-    useEffect(() => labelController.dispose, <Object?>[labelController]);
-    useEffect(() => hostController.dispose, <Object?>[hostController]);
-    useEffect(() => portController.dispose, <Object?>[portController]);
+    final labelController = useMController<String>('');
+    final hostController = useMController<String>('127.0.0.1');
+    final portController = useMController<String>('9993');
 
     final label = useState('');
     final host = useState('127.0.0.1');
@@ -145,16 +151,22 @@ class _AddConnectionForm extends HookConsumerWidget {
 
     final int? parsedPort = int.tryParse(port.value.trim());
     final bool valid =
-        label.value.trim().isNotEmpty && host.value.trim().isNotEmpty && parsedPort != null;
+        label.value.trim().isNotEmpty &&
+        host.value.trim().isNotEmpty &&
+        parsedPort != null;
 
     void add() {
       if (!valid) return;
-      ref.read(connectionsControllerProvider).add(SavedConnection(
-            id: '${DateTime.now().microsecondsSinceEpoch}',
-            label: label.value.trim(),
-            host: host.value.trim(),
-            port: parsedPort,
-          ));
+      ref
+          .read(connectionsControllerProvider)
+          .add(
+            SavedConnection(
+              id: '${DateTime.now().microsecondsSinceEpoch}',
+              label: label.value.trim(),
+              host: host.value.trim(),
+              port: parsedPort,
+            ),
+          );
       onDone();
     }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:manyui/manyui.dart';
+import 'package:manyui_riverpod/manyui_riverpod.dart';
 
 import 'networks/networks_page.dart';
 import 'state/connection.dart';
@@ -11,7 +12,7 @@ class ManyTierApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mode = ref.watch(themeModeProvider);
+    final mode = ref.watchMThemeMode(themeModeProvider);
     // Neither provider holds widget-visible state -- watching just
     // instantiates them: one loads persisted settings at startup, the
     // other listens for changes and writes them back.

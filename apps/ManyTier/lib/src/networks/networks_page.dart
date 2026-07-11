@@ -2,6 +2,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:manyui/manyui.dart';
+import 'package:manyui_hooks/manyui_hooks.dart';
+import 'package:manyui_riverpod/manyui_riverpod.dart';
 
 import '../api/manytier_client.dart';
 import '../api/token_discovery.dart';
@@ -37,34 +39,35 @@ class NetworksPage extends HookConsumerWidget {
           ),
           MButton(
             variant: MButtonVariant.ghost,
-            onPressed: () {
-              final mode = ref.read(themeModeProvider);
-              ref.read(themeModeProvider.notifier).state =
-                  mode == MThemeMode.dark ? MThemeMode.light : MThemeMode.dark;
-            },
+            onPressed: () => ref.toggleMThemeMode(themeModeProvider),
             semanticLabel: 'Toggle theme',
-            child: MIcon(ref.watch(themeModeProvider) == MThemeMode.dark
-                ? MIconData.sun
-                : MIconData.moon),
+            child: MIcon(
+              ref.watchMThemeMode(themeModeProvider) == MThemeMode.dark
+                  ? MIconData.sun
+                  : MIconData.moon,
+            ),
           ),
         ],
       ),
       body: switch (connection) {
         AsyncData<DaemonConnection>(:final value) => switch (value) {
-            DaemonNotRunning() => const _CenteredCard(child: _NotRunningCard()),
-            DaemonUnauthorized() =>
-              const _CenteredCard(child: _UnauthorizedCard()),
-            DaemonConnected() => _Dashboard(connection: value),
-          },
-        AsyncError<DaemonConnection>(:final error) =>
-          _CenteredCard(child: _ErrorCard(error: error)),
+          DaemonNotRunning() => const _CenteredCard(child: _NotRunningCard()),
+          DaemonUnauthorized() => const _CenteredCard(
+            child: _UnauthorizedCard(),
+          ),
+          DaemonConnected() => _Dashboard(connection: value),
+        },
+        AsyncError<DaemonConnection>(:final error) => _CenteredCard(
+          child: _ErrorCard(error: error),
+        ),
         _ => Center(
-            child: Text(
-              'Connecting to local service…',
-              style: theme.typography.bodySmall
-                  .copyWith(color: theme.colors.mutedForeground),
+          child: Text(
+            'Connecting to local service...',
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.mutedForeground,
             ),
           ),
+        ),
       },
     );
   }
@@ -72,26 +75,26 @@ class NetworksPage extends HookConsumerWidget {
   Widget _connectionBadge(AsyncValue<DaemonConnection> connection) {
     return switch (connection) {
       AsyncData<DaemonConnection>(:final value) => switch (value) {
-          DaemonNotRunning() => const MBadge(
-              variant: MBadgeVariant.outline,
-              child: Text('Service not running'),
-            ),
-          DaemonUnauthorized() => const MBadge(
-              variant: MBadgeVariant.destructive,
-              child: Text('Unauthorized'),
-            ),
-          DaemonConnected(:final status) => MBadge(
-              child: Text('Connected ${status.address}'),
-            ),
-        },
-      AsyncError<DaemonConnection>() => const MBadge(
+        DaemonNotRunning() => const MBadge(
+          variant: MBadgeVariant.outline,
+          child: Text('Service not running'),
+        ),
+        DaemonUnauthorized() => const MBadge(
           variant: MBadgeVariant.destructive,
-          child: Text('Error'),
+          child: Text('Unauthorized'),
         ),
+        DaemonConnected(:final status) => MBadge(
+          child: Text('Connected ${status.address}'),
+        ),
+      },
+      AsyncError<DaemonConnection>() => const MBadge(
+        variant: MBadgeVariant.destructive,
+        child: Text('Error'),
+      ),
       _ => const MBadge(
-          variant: MBadgeVariant.secondary,
-          child: Text('Connecting…'),
-        ),
+        variant: MBadgeVariant.secondary,
+        child: Text('Connecting...'),
+      ),
     };
   }
 }
@@ -134,8 +137,9 @@ class _NotRunningCard extends ConsumerWidget {
             Text(
               'ManyTier could not reach the local control service. '
               'Start it in a terminal, then retry:',
-              style: theme.typography.bodySmall
-                  .copyWith(color: theme.colors.mutedForeground),
+              style: theme.typography.bodySmall.copyWith(
+                color: theme.colors.mutedForeground,
+              ),
             ),
             const SizedBox(height: 12),
             Text(
@@ -177,8 +181,9 @@ class _UnauthorizedCard extends HookConsumerWidget {
             Text(
               'The service rejected the auth token. Paste the contents of '
               'authtoken.secret from the service data directory.',
-              style: theme.typography.bodySmall
-                  .copyWith(color: theme.colors.mutedForeground),
+              style: theme.typography.bodySmall.copyWith(
+                color: theme.colors.mutedForeground,
+              ),
             ),
             const SizedBox(height: 16),
             const MLabel('Auth token'),
@@ -195,7 +200,9 @@ class _UnauthorizedCard extends HookConsumerWidget {
                   ? null
                   : () {
                       final settings = ref.read(connectionSettingsProvider);
-                      ref.read(connectionsControllerProvider).update(
+                      ref
+                          .read(connectionsControllerProvider)
+                          .update(
                             settings.copyWith(manualToken: token.value.trim()),
                           );
                     },
@@ -205,15 +212,17 @@ class _UnauthorizedCard extends HookConsumerWidget {
               const SizedBox(height: 16),
               Text(
                 'Probed for authtoken.secret at:',
-                style: theme.typography.caption
-                    .copyWith(color: theme.colors.mutedForeground),
+                style: theme.typography.caption.copyWith(
+                  color: theme.colors.mutedForeground,
+                ),
               ),
               const SizedBox(height: 4),
               for (final String path in probed)
                 Text(
                   path,
-                  style: theme.typography.caption
-                      .copyWith(color: theme.colors.mutedForeground),
+                  style: theme.typography.caption.copyWith(
+                    color: theme.colors.mutedForeground,
+                  ),
                 ),
             ],
           ],
@@ -242,8 +251,9 @@ class _ErrorCard extends ConsumerWidget {
             const SizedBox(height: 12),
             Text(
               '$error',
-              style: theme.typography.bodySmall
-                  .copyWith(color: theme.colors.destructive),
+              style: theme.typography.bodySmall.copyWith(
+                color: theme.colors.destructive,
+              ),
             ),
             const SizedBox(height: 24),
             MButton(
@@ -352,8 +362,7 @@ class _StatusCard extends StatelessWidget {
     );
   }
 
-  Widget _kv(MThemeData theme, String key, String value,
-      {bool code = false}) {
+  Widget _kv(MThemeData theme, String key, String value, {bool code = false}) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.baseline,
       textBaseline: TextBaseline.alphabetic,
@@ -361,8 +370,9 @@ class _StatusCard extends StatelessWidget {
         Expanded(
           child: Text(
             key,
-            style: theme.typography.bodySmall
-                .copyWith(color: theme.colors.mutedForeground),
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.mutedForeground,
+            ),
           ),
         ),
         Text(
@@ -390,8 +400,9 @@ class _NetworksSection extends StatelessWidget {
         if (networks.isEmpty)
           Text(
             'No networks joined yet.',
-            style: theme.typography.bodySmall
-                .copyWith(color: theme.colors.mutedForeground),
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.mutedForeground,
+            ),
           )
         else
           for (final ManyTierNetwork network in networks) ...<Widget>[
@@ -423,8 +434,10 @@ class _NetworkCard extends HookConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Text('Leave network?',
-                  style: dialogTheme.typography.headlineSmall),
+              Text(
+                'Leave network?',
+                style: dialogTheme.typography.headlineSmall,
+              ),
               const SizedBox(height: 8),
               Text(network.id, style: dialogTheme.typography.code),
               const SizedBox(height: 24),
@@ -491,16 +504,18 @@ class _NetworkCard extends HookConsumerWidget {
               const SizedBox(height: 8),
               Text(
                 network.assignedAddresses.join('  '),
-                style: theme.typography.bodySmall
-                    .copyWith(color: theme.colors.mutedForeground),
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.mutedForeground,
+                ),
               ),
             ],
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
               Text(
                 error.value!,
-                style: theme.typography.bodySmall
-                    .copyWith(color: theme.colors.destructive),
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.destructive,
+                ),
               ),
             ],
             const SizedBox(height: 16),
@@ -528,8 +543,7 @@ class _JoinCard extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = MTheme.of(context);
-    final controller = useMemoized(() => MController<String>(''));
-    useEffect(() => controller.dispose, <Object?>[controller]);
+    final controller = useMController<String>('');
     final networkId = useState('');
     final joining = useState(false);
     final error = useState<String?>(null);
@@ -577,8 +591,9 @@ class _JoinCard extends HookConsumerWidget {
               const SizedBox(height: 8),
               Text(
                 error.value!,
-                style: theme.typography.bodySmall
-                    .copyWith(color: theme.colors.destructive),
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.destructive,
+                ),
               ),
             ],
             const SizedBox(height: 16),
@@ -609,14 +624,14 @@ class _PeersSection extends StatelessWidget {
         if (peers.isEmpty)
           Text(
             'No peers yet.',
-            style: theme.typography.bodySmall
-                .copyWith(color: theme.colors.mutedForeground),
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.mutedForeground,
+            ),
           )
         else
           MCard(
             child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
@@ -641,8 +656,9 @@ class _PeerRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = MTheme.of(context);
-    final muted =
-        theme.typography.bodySmall.copyWith(color: theme.colors.mutedForeground);
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10),
       child: Row(
@@ -710,37 +726,43 @@ class _MoonsSection extends HookConsumerWidget {
         ),
         const SizedBox(height: 12),
         switch (moons) {
-          AsyncData<List<Moon>>(:final value) => value.isEmpty
-              ? Text(
-                  'Not orbiting any moons.',
-                  style: theme.typography.bodySmall
-                      .copyWith(color: theme.colors.mutedForeground),
-                )
-              : MCard(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 20, vertical: 8),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: <Widget>[
-                        for (int i = 0; i < value.length; i++) ...<Widget>[
-                          if (i > 0) const MDivider(),
-                          _MoonRow(moon: value[i]),
+          AsyncData<List<Moon>>(:final value) =>
+            value.isEmpty
+                ? Text(
+                    'Not orbiting any moons.',
+                    style: theme.typography.bodySmall.copyWith(
+                      color: theme.colors.mutedForeground,
+                    ),
+                  )
+                : MCard(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 8,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: <Widget>[
+                          for (int i = 0; i < value.length; i++) ...<Widget>[
+                            if (i > 0) const MDivider(),
+                            _MoonRow(moon: value[i]),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
                   ),
-                ),
           AsyncError<List<Moon>>(:final error) => Text(
-              '$error',
-              style: theme.typography.bodySmall
-                  .copyWith(color: theme.colors.destructive),
+            '$error',
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.destructive,
             ),
+          ),
           _ => Text(
-              'Loading moons…',
-              style: theme.typography.bodySmall
-                  .copyWith(color: theme.colors.mutedForeground),
+            'Loading moons…',
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.mutedForeground,
             ),
+          ),
         },
         const SizedBox(height: 12),
         const _OrbitMoonCard(),
@@ -769,13 +791,17 @@ class _MoonRow extends HookConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Text('Deorbit moon?', style: dialogTheme.typography.headlineSmall),
+              Text(
+                'Deorbit moon?',
+                style: dialogTheme.typography.headlineSmall,
+              ),
               const SizedBox(height: 8),
               Text(
                 'This may affect connectivity if this moon provides your '
                 'only route to other members.',
-                style: dialogTheme.typography.bodySmall
-                    .copyWith(color: dialogTheme.colors.mutedForeground),
+                style: dialogTheme.typography.bodySmall.copyWith(
+                  color: dialogTheme.colors.mutedForeground,
+                ),
               ),
               const SizedBox(height: 8),
               Text(moon.id, style: dialogTheme.typography.code),
@@ -814,8 +840,9 @@ class _MoonRow extends HookConsumerWidget {
       }
     }
 
-    final muted = theme.typography.bodySmall
-        .copyWith(color: theme.colors.mutedForeground);
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10),
@@ -828,7 +855,8 @@ class _MoonRow extends HookConsumerWidget {
               MBadge(
                 variant: MBadgeVariant.secondary,
                 child: Text(
-                    '${moon.roots.length} root${moon.roots.length == 1 ? '' : 's'}'),
+                  '${moon.roots.length} root${moon.roots.length == 1 ? '' : 's'}',
+                ),
               ),
               const SizedBox(width: 8),
               MButton(
@@ -843,9 +871,11 @@ class _MoonRow extends HookConsumerWidget {
             const SizedBox(height: 4),
             Text(
               moon.roots
-                  .map((MoonRoot r) => r.endpoints.isEmpty
-                      ? r.address
-                      : '${r.address} (${r.endpoints.join(', ')})')
+                  .map(
+                    (MoonRoot r) => r.endpoints.isEmpty
+                        ? r.address
+                        : '${r.address} (${r.endpoints.join(', ')})',
+                  )
                   .join('  '),
               style: muted,
             ),
@@ -854,8 +884,9 @@ class _MoonRow extends HookConsumerWidget {
             const SizedBox(height: 4),
             Text(
               error.value!,
-              style: theme.typography.bodySmall
-                  .copyWith(color: theme.colors.destructive),
+              style: theme.typography.bodySmall.copyWith(
+                color: theme.colors.destructive,
+              ),
             ),
           ],
         ],
@@ -870,8 +901,7 @@ class _OrbitMoonCard extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = MTheme.of(context);
-    final controller = useMemoized(() => MController<String>(''));
-    useEffect(() => controller.dispose, <Object?>[controller]);
+    final controller = useMController<String>('');
     final moonId = useState('');
     final orbiting = useState(false);
     final error = useState<String?>(null);
@@ -917,8 +947,9 @@ class _OrbitMoonCard extends HookConsumerWidget {
               const SizedBox(height: 8),
               Text(
                 error.value!,
-                style: theme.typography.bodySmall
-                    .copyWith(color: theme.colors.destructive),
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.destructive,
+                ),
               ),
             ],
             const SizedBox(height: 16),

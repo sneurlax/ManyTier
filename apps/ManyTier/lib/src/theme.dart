@@ -1,4 +1,3 @@
-import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:manyui/manyui.dart';
+import 'package:manyui_riverpod/manyui_riverpod.dart';
 
-final themeModeProvider = StateProvider<MThemeMode>((ref) => MThemeMode.system);
+final themeModeProvider = mThemeModeProvider;
