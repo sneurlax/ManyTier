@@ -6,6 +6,7 @@ import 'package:manyui/manyui.dart';
 import '../api/manytier_client.dart';
 import '../api/token_discovery.dart';
 import '../state/connection.dart';
+import '../state/moons.dart';
 import '../theme.dart';
 
 /// Daemon-control dashboard: service status, joined networks, peers.
@@ -273,6 +274,8 @@ class _Dashboard extends StatelessWidget {
         _StatusCard(status: connection.status),
         const SizedBox(height: 16),
         _PeersSection(peers: connection.peers),
+        const SizedBox(height: 16),
+        const _MoonsSection(),
       ],
     );
 
@@ -662,6 +665,261 @@ class _PeerRow extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Read-only moon status + orbit/deorbit actions.
+///
+/// Moon *file generation* stays CLI-side (`manytier moon generate`); this UI
+/// only surfaces currently-orbited moons and lets the user orbit an existing
+/// moon by ID or deorbit one already in the list.
+class _MoonsSection extends HookConsumerWidget {
+  const _MoonsSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final moons = ref.watch(moonsProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text('Moons', style: theme.typography.headlineSmall),
+            ),
+            MButton(
+              variant: MButtonVariant.ghost,
+              size: MButtonSize.sm,
+              onPressed: () => ref.read(moonsProvider.notifier).refresh(),
+              semanticLabel: 'Refresh moons',
+              child: const Text('Refresh'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        switch (moons) {
+          AsyncData<List<Moon>>(:final value) => value.isEmpty
+              ? Text(
+                  'Not orbiting any moons.',
+                  style: theme.typography.bodySmall
+                      .copyWith(color: theme.colors.mutedForeground),
+                )
+              : MCard(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        for (int i = 0; i < value.length; i++) ...<Widget>[
+                          if (i > 0) const MDivider(),
+                          _MoonRow(moon: value[i]),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+          AsyncError<List<Moon>>(:final error) => Text(
+              '$error',
+              style: theme.typography.bodySmall
+                  .copyWith(color: theme.colors.destructive),
+            ),
+          _ => Text(
+              'Loading moons…',
+              style: theme.typography.bodySmall
+                  .copyWith(color: theme.colors.mutedForeground),
+            ),
+        },
+        const SizedBox(height: 12),
+        const _OrbitMoonCard(),
+      ],
+    );
+  }
+}
+
+class _MoonRow extends HookConsumerWidget {
+  const _MoonRow({required this.moon});
+
+  final Moon moon;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final deorbiting = useState(false);
+    final error = useState<String?>(null);
+
+    Future<void> deorbit() async {
+      final bool? confirmed = await showMDialog<bool>(
+        context,
+        builder: (BuildContext ctx) {
+          final dialogTheme = MTheme.of(ctx);
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text('Deorbit moon?', style: dialogTheme.typography.headlineSmall),
+              const SizedBox(height: 8),
+              Text(
+                'This may affect connectivity if this moon provides your '
+                'only route to other members.',
+                style: dialogTheme.typography.bodySmall
+                    .copyWith(color: dialogTheme.colors.mutedForeground),
+              ),
+              const SizedBox(height: 8),
+              Text(moon.id, style: dialogTheme.typography.code),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: <Widget>[
+                  MButton(
+                    variant: MButtonVariant.ghost,
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                  const SizedBox(width: 8),
+                  MButton(
+                    variant: MButtonVariant.destructive,
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    child: const Text('Deorbit'),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      );
+      if (confirmed != true) return;
+
+      deorbiting.value = true;
+      error.value = null;
+      try {
+        await ref.read(manyTierClientProvider).deorbitMoon(moon.id);
+        await ref.read(moonsProvider.notifier).refresh();
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        deorbiting.value = false;
+      }
+    }
+
+    final muted = theme.typography.bodySmall
+        .copyWith(color: theme.colors.mutedForeground);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(child: Text(moon.id, style: theme.typography.code)),
+              MBadge(
+                variant: MBadgeVariant.secondary,
+                child: Text(
+                    '${moon.roots.length} root${moon.roots.length == 1 ? '' : 's'}'),
+              ),
+              const SizedBox(width: 8),
+              MButton(
+                variant: MButtonVariant.destructive,
+                size: MButtonSize.sm,
+                onPressed: deorbiting.value ? null : deorbit,
+                child: Text(deorbiting.value ? 'Deorbiting...' : 'Deorbit'),
+              ),
+            ],
+          ),
+          if (moon.roots.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              moon.roots
+                  .map((MoonRoot r) => r.endpoints.isEmpty
+                      ? r.address
+                      : '${r.address} (${r.endpoints.join(', ')})')
+                  .join('  '),
+              style: muted,
+            ),
+          ],
+          if (error.value != null) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              error.value!,
+              style: theme.typography.bodySmall
+                  .copyWith(color: theme.colors.destructive),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _OrbitMoonCard extends HookConsumerWidget {
+  const _OrbitMoonCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final controller = useMemoized(() => MController<String>(''));
+    useEffect(() => controller.dispose, <Object?>[controller]);
+    final moonId = useState('');
+    final orbiting = useState(false);
+    final error = useState<String?>(null);
+
+    final bool valid = networkIdPattern.hasMatch(moonId.value.trim());
+
+    Future<void> orbit() async {
+      orbiting.value = true;
+      error.value = null;
+      try {
+        await ref.read(manyTierClientProvider).orbitMoon(moonId.value.trim());
+        await ref.read(moonsProvider.notifier).refresh();
+        controller.value = '';
+        moonId.value = '';
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        orbiting.value = false;
+      }
+    }
+
+    return MCard(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text('Orbit a moon', style: theme.typography.headlineSmall),
+            const SizedBox(height: 16),
+            const MLabel('Moon ID'),
+            const SizedBox(height: 8),
+            MTextField(
+              controller: controller,
+              placeholder: '16-digit moon ID',
+              semanticLabel: 'Moon ID',
+              error: moonId.value.trim().isNotEmpty && !valid,
+              onChanged: (value) => moonId.value = value,
+              onSubmitted: (_) {
+                if (valid && !orbiting.value) orbit();
+              },
+            ),
+            if (error.value != null) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                error.value!,
+                style: theme.typography.bodySmall
+                    .copyWith(color: theme.colors.destructive),
+              ),
+            ],
+            const SizedBox(height: 16),
+            MButton(
+              onPressed: valid && !orbiting.value ? orbit : null,
+              child: Text(orbiting.value ? 'Orbiting...' : 'Orbit'),
+            ),
+          ],
+        ),
       ),
     );
   }
