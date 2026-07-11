@@ -7,16 +7,17 @@ class FakeManyTierClient implements ManyTierClient {
     List<ManyTierNetwork>? networks,
     List<ManyTierPeer>? peers,
     List<Moon>? moons,
-  })  : status_ = status ??
-            const ManyTierStatus(
-              address: 'abcdef0123',
-              version: '1.0.0',
-              online: true,
-              publicIdentity: 'abcdef0123:0:pub',
-            ),
-        networks_ = networks ?? <ManyTierNetwork>[],
-        peers_ = peers ?? <ManyTierPeer>[],
-        moons_ = moons ?? <Moon>[];
+  }) : status_ =
+           status ??
+           const ManyTierStatus(
+             address: 'abcdef0123',
+             version: '1.0.0',
+             online: true,
+             publicIdentity: 'abcdef0123:0:pub',
+           ),
+       networks_ = networks ?? <ManyTierNetwork>[],
+       peers_ = peers ?? <ManyTierPeer>[],
+       moons_ = moons ?? <Moon>[];
 
   ManyTierStatus status_;
   List<ManyTierNetwork> networks_;
@@ -26,17 +27,29 @@ class FakeManyTierClient implements ManyTierClient {
   /// If set, thrown by [orbitMoon]/[deorbitMoon] instead of mutating state.
   ManyTierException? nextActionError;
 
+  int statusCalls = 0;
+  int networksCalls = 0;
+  int peersCalls = 0;
   int orbitCalls = 0;
   int deorbitCalls = 0;
 
   @override
-  Future<ManyTierStatus> status() async => status_;
+  Future<ManyTierStatus> status() async {
+    statusCalls++;
+    return status_;
+  }
 
   @override
-  Future<List<ManyTierPeer>> peers() async => peers_;
+  Future<List<ManyTierPeer>> peers() async {
+    peersCalls++;
+    return peers_;
+  }
 
   @override
-  Future<List<ManyTierNetwork>> networks() async => networks_;
+  Future<List<ManyTierNetwork>> networks() async {
+    networksCalls++;
+    return networks_;
+  }
 
   @override
   Future<ManyTierNetwork> joinNetwork(String networkId) async {
@@ -54,7 +67,9 @@ class FakeManyTierClient implements ManyTierClient {
 
   @override
   Future<void> leaveNetwork(String networkId) async {
-    networks_ = networks_.where((ManyTierNetwork n) => n.id != networkId).toList();
+    networks_ = networks_
+        .where((ManyTierNetwork n) => n.id != networkId)
+        .toList();
   }
 
   @override

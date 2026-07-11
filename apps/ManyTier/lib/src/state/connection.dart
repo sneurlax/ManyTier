@@ -5,6 +5,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -54,12 +55,12 @@ class SavedConnection {
   }
 
   Map<String, Object?> toJson() => <String, Object?>{
-        'id': id,
-        'label': label,
-        'host': host,
-        'port': port,
-        'manualToken': manualToken,
-      };
+    'id': id,
+    'label': label,
+    'host': host,
+    'port': port,
+    'manualToken': manualToken,
+  };
 
   factory SavedConnection.fromJson(Map<String, Object?> json) {
     return SavedConnection(
@@ -93,8 +94,9 @@ const defaultConnection = SavedConnection(id: 'default', label: 'Local');
 /// All saved connections, in add order. Never empty in practice, since
 /// [connectionsLoaderProvider] seeds [defaultConnection] on first launch,
 /// but callers should not assume non-empty (e.g. a future "forget all").
-final connectionsProvider =
-    StateProvider<List<SavedConnection>>((ref) => const <SavedConnection>[]);
+final connectionsProvider = StateProvider<List<SavedConnection>>(
+  (ref) => const <SavedConnection>[],
+);
 
 /// The id of the currently-active connection, or null before the loader
 /// runs / when the list is empty.
@@ -124,7 +126,9 @@ final connectionsLoaderProvider = FutureProvider<void>((ref) async {
     try {
       final List<Object?> decoded = jsonDecode(raw) as List<Object?>;
       connections = decoded
-          .map((Object? e) => SavedConnection.fromJson(e! as Map<String, Object?>))
+          .map(
+            (Object? e) => SavedConnection.fromJson(e! as Map<String, Object?>),
+          )
           .toList();
     } catch (_) {
       // Corrupt prefs value (e.g. from a future format): fall back to the
@@ -138,14 +142,17 @@ final connectionsLoaderProvider = FutureProvider<void>((ref) async {
   ref.read(connectionsProvider.notifier).state = connections;
   final String? activeId = prefs.getString(_prefsActiveIdKey);
   final bool activeIsValid = connections.any((c) => c.id == activeId);
-  ref.read(activeConnectionIdProvider.notifier).state =
-      activeIsValid ? activeId : connections.first.id;
+  ref.read(activeConnectionIdProvider.notifier).state = activeIsValid
+      ? activeId
+      : connections.first.id;
 });
 
 /// Persists the connection list and active id on every change.
 final connectionsPersistenceProvider = Provider<void>((ref) {
-  ref.listen<List<SavedConnection>>(connectionsProvider,
-      (previous, next) async {
+  ref.listen<List<SavedConnection>>(connectionsProvider, (
+    previous,
+    next,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       _prefsConnectionsKey,
@@ -217,8 +224,9 @@ final connectionsControllerProvider = Provider<ConnectionsController>((ref) {
 
 /// Token read from `authtoken.secret` in one of the known data dirs
 /// (always `null` on the web).
-final discoveredTokenProvider =
-    FutureProvider<String?>((ref) => discoverAuthToken());
+final discoveredTokenProvider = FutureProvider<String?>(
+  (ref) => discoverAuthToken(),
+);
 
 /// The token sent: manual override first, else the discovered one.
 final effectiveTokenProvider = Provider<String?>((ref) {
@@ -275,15 +283,56 @@ final class DaemonConnected extends DaemonConnection {
 /// The timer lives as long as the provider; riverpod disposes it (via
 /// [dispose]) whenever the settings/token change rebuild the provider or the
 /// app shuts down, so a stale poller never keeps ticking.
-class DaemonPoller extends StateNotifier<AsyncValue<DaemonConnection>> {
-  DaemonPoller(this._client) : super(const AsyncValue.loading()) {
-    refresh();
-    _timer = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
+class DaemonPoller extends StateNotifier<AsyncValue<DaemonConnection>>
+    with WidgetsBindingObserver {
+  DaemonPoller(
+    this._client, {
+    WidgetsBinding? binding,
+    Duration pollInterval = const Duration(seconds: 3),
+  }) : _binding = binding ?? WidgetsBinding.instance,
+       _pollInterval = pollInterval,
+       super(const AsyncValue.loading()) {
+    _binding.addObserver(this);
+    _startPolling(refreshImmediately: true);
   }
 
   final ManyTierClient _client;
+  final WidgetsBinding _binding;
+  final Duration _pollInterval;
   Timer? _timer;
   bool _refreshing = false;
+
+  bool get isPolling => _timer?.isActive ?? false;
+
+  void _startPolling({bool refreshImmediately = false}) {
+    if (isPolling) {
+      if (refreshImmediately) unawaited(refresh());
+      return;
+    }
+    if (refreshImmediately) unawaited(refresh());
+    _timer = Timer.periodic(_pollInterval, (_) => unawaited(refresh()));
+  }
+
+  void _pausePolling() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _startPolling(refreshImmediately: true);
+        break;
+      case AppLifecycleState.inactive:
+        break;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _pausePolling();
+        break;
+    }
+  }
 
   Future<void> refresh() async {
     if (_refreshing) {
@@ -314,13 +363,13 @@ class DaemonPoller extends StateNotifier<AsyncValue<DaemonConnection>> {
 
   @override
   void dispose() {
-    _timer?.cancel();
-    _timer = null;
+    _binding.removeObserver(this);
+    _pausePolling();
     super.dispose();
   }
 }
 
 final daemonConnectionProvider =
     StateNotifierProvider<DaemonPoller, AsyncValue<DaemonConnection>>((ref) {
-  return DaemonPoller(ref.watch(manyTierClientProvider));
-});
+      return DaemonPoller(ref.watch(manyTierClientProvider));
+    });
