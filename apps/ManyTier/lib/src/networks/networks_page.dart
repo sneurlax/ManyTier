@@ -9,13 +9,11 @@ import '../api/manytier_client.dart';
 import '../api/token_discovery.dart';
 import '../connections/connections_dialog.dart';
 import '../state/connection.dart';
+import '../state/controller_networks.dart';
 import '../state/moons.dart';
 import '../theme.dart';
 
 /// Daemon-control dashboard: service status, joined networks, peers.
-///
-// TODO(manytier): controller UI (/controller/network CRUD, member
-// authorization) lands in a later phase.
 class NetworksPage extends HookConsumerWidget {
   const NetworksPage({super.key});
 
@@ -295,6 +293,8 @@ class _Dashboard extends StatelessWidget {
           peers: connection.peers,
           latencyHistory: connection.peerLatencyHistory,
         ),
+        const SizedBox(height: 16),
+        const _ControllerSection(),
         const SizedBox(height: 16),
         const _MoonsSection(),
       ],
@@ -816,6 +816,787 @@ class _PeerLatencySparklinePainter extends CustomPainter {
         lineColor != oldDelegate.lineColor ||
         mutedColor != oldDelegate.mutedColor;
   }
+}
+
+class _ControllerSection extends HookConsumerWidget {
+  const _ControllerSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final controllerNetworks = ref.watch(controllerNetworksProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text('Controller', style: theme.typography.headlineSmall),
+            ),
+            MButton(
+              variant: MButtonVariant.ghost,
+              size: MButtonSize.sm,
+              onPressed: () =>
+                  ref.read(controllerNetworksProvider.notifier).refresh(),
+              semanticLabel: 'Refresh controller networks',
+              child: const Text('Refresh'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        switch (controllerNetworks) {
+          AsyncData<List<ControllerNetworkDetail>>(:final value) =>
+            value.isEmpty
+                ? Text(
+                    'No controller networks.',
+                    style: theme.typography.bodySmall.copyWith(
+                      color: theme.colors.mutedForeground,
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      for (final ControllerNetworkDetail detail
+                          in value) ...<Widget>[
+                        _ControllerNetworkCard(detail: detail),
+                        const SizedBox(height: 12),
+                      ],
+                    ],
+                  ),
+          AsyncError<List<ControllerNetworkDetail>>(:final error) => Text(
+            '$error',
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.destructive,
+            ),
+          ),
+          _ => Text(
+            'Loading controller networks…',
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.mutedForeground,
+            ),
+          ),
+        },
+        const SizedBox(height: 12),
+        const _CreateControllerNetworkCard(),
+      ],
+    );
+  }
+}
+
+class _ControllerNetworkCard extends HookConsumerWidget {
+  const _ControllerNetworkCard({required this.detail});
+
+  final ControllerNetworkDetail detail;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final deleting = useState(false);
+    final editing = useState(false);
+    final error = useState<String?>(null);
+    final network = detail.network;
+
+    Future<void> edit() async {
+      final ControllerNetworkUpdate? update =
+          await showMDialog<ControllerNetworkUpdate>(
+            context,
+            builder: (BuildContext ctx) {
+              return _EditControllerNetworkDialog(network: network);
+            },
+          );
+      if (update == null) return;
+
+      editing.value = true;
+      error.value = null;
+      try {
+        await ref
+            .read(manyTierClientProvider)
+            .updateControllerNetwork(network.id, update);
+        await ref.read(controllerNetworksProvider.notifier).refresh();
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        editing.value = false;
+      }
+    }
+
+    Future<void> delete() async {
+      final bool? confirmed = await showMDialog<bool>(
+        context,
+        builder: (BuildContext ctx) {
+          final dialogTheme = MTheme.of(ctx);
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                'Delete controller network?',
+                style: dialogTheme.typography.headlineSmall,
+              ),
+              const SizedBox(height: 8),
+              Text(network.id, style: dialogTheme.typography.code),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: <Widget>[
+                  MButton(
+                    variant: MButtonVariant.ghost,
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                  const SizedBox(width: 8),
+                  MButton(
+                    variant: MButtonVariant.destructive,
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    child: const Text('Delete'),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      );
+      if (confirmed != true) return;
+
+      deleting.value = true;
+      error.value = null;
+      try {
+        await ref
+            .read(manyTierClientProvider)
+            .deleteControllerNetwork(network.id);
+        await ref.read(controllerNetworksProvider.notifier).refresh();
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        deleting.value = false;
+      }
+    }
+
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
+
+    return MCard(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    network.name.isEmpty ? '(unnamed)' : network.name,
+                    style: theme.typography.body,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                MBadge(
+                  variant: network.private
+                      ? MBadgeVariant.primary
+                      : MBadgeVariant.outline,
+                  child: Text(network.private ? 'Private' : 'Public'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(network.id, style: theme.typography.code),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 4,
+              children: <Widget>[
+                Text('MTU ${network.mtu}', style: muted),
+                Text('Multicast ${network.multicastLimit}', style: muted),
+                Text(
+                  '${detail.members.length} member${detail.members.length == 1 ? '' : 's'}',
+                  style: muted,
+                ),
+              ],
+            ),
+            if (network.ipAssignmentPools.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                network.ipAssignmentPools
+                    .map(
+                      (ControllerIpPool p) =>
+                          '${p.ipRangeStart}-${p.ipRangeEnd}',
+                    )
+                    .join('  '),
+                style: muted,
+              ),
+            ],
+            if (network.routes.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 4),
+              Text(
+                network.routes
+                    .map(
+                      (ControllerRoute r) =>
+                          r.via == null ? r.target : '${r.target} via ${r.via}',
+                    )
+                    .join('  '),
+                style: muted,
+              ),
+            ],
+            if (error.value != null) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                error.value!,
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.destructive,
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: <Widget>[
+                MButton(
+                  variant: MButtonVariant.outline,
+                  size: MButtonSize.sm,
+                  onPressed: editing.value ? null : edit,
+                  child: Text(editing.value ? 'Saving...' : 'Edit'),
+                ),
+                const SizedBox(width: 8),
+                MButton(
+                  variant: MButtonVariant.destructive,
+                  size: MButtonSize.sm,
+                  onPressed: deleting.value ? null : delete,
+                  child: Text(deleting.value ? 'Deleting...' : 'Delete'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            const MDivider(),
+            const SizedBox(height: 8),
+            Text('Members', style: theme.typography.body),
+            if (detail.members.isEmpty) ...<Widget>[
+              const SizedBox(height: 8),
+              Text('No members.', style: muted),
+            ] else
+              for (int i = 0; i < detail.members.length; i++) ...<Widget>[
+                if (i > 0) const MDivider(),
+                _ControllerMemberRow(
+                  network: network,
+                  member: detail.members[i],
+                ),
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EditControllerNetworkDialog extends HookWidget {
+  const _EditControllerNetworkDialog({required this.network});
+
+  final ControllerNetwork network;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = MTheme.of(context);
+    final nameController = useMController<String>(network.name);
+    final mtuController = useMController<String>(network.mtu.toString());
+    final multicastController = useMController<String>(
+      network.multicastLimit.toString(),
+    );
+    final name = useState(network.name);
+    final mtu = useState(network.mtu.toString());
+    final multicast = useState(network.multicastLimit.toString());
+    final isPrivate = useState(network.private);
+    final broadcast = useState(network.enableBroadcast);
+
+    final int? parsedMtu = int.tryParse(mtu.value.trim());
+    final int? parsedMulticast = int.tryParse(multicast.value.trim());
+    final bool valid =
+        parsedMtu != null && parsedMtu > 0 && parsedMulticast != null;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Text('Edit controller network', style: theme.typography.headlineSmall),
+        const SizedBox(height: 16),
+        const MLabel('Name'),
+        const SizedBox(height: 8),
+        MTextField(
+          controller: nameController,
+          placeholder: 'Network name',
+          semanticLabel: 'Controller network name',
+          onChanged: (value) => name.value = value,
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: _DialogNumberField(
+                label: 'MTU',
+                controller: mtuController,
+                value: mtu,
+                invalid: parsedMtu == null || parsedMtu <= 0,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _DialogNumberField(
+                label: 'Multicast limit',
+                controller: multicastController,
+                value: multicast,
+                invalid: parsedMulticast == null,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _SwitchRow(
+          label: 'Private network',
+          value: isPrivate.value,
+          semanticLabel: 'Private network',
+          onChanged: (value) => isPrivate.value = value,
+        ),
+        const SizedBox(height: 12),
+        _SwitchRow(
+          label: 'Broadcast',
+          value: broadcast.value,
+          semanticLabel: 'Broadcast',
+          onChanged: (value) => broadcast.value = value,
+        ),
+        const SizedBox(height: 24),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: <Widget>[
+            MButton(
+              variant: MButtonVariant.ghost,
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            const SizedBox(width: 8),
+            MButton(
+              onPressed: !valid
+                  ? null
+                  : () => Navigator.of(context).pop(
+                      ControllerNetworkUpdate(
+                        name: name.value.trim(),
+                        private: isPrivate.value,
+                        mtu: parsedMtu,
+                        multicastLimit: parsedMulticast,
+                        enableBroadcast: broadcast.value,
+                      ),
+                    ),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _DialogNumberField extends StatelessWidget {
+  const _DialogNumberField({
+    required this.label,
+    required this.controller,
+    required this.value,
+    required this.invalid,
+  });
+
+  final String label;
+  final MController<String> controller;
+  final ValueNotifier<String> value;
+  final bool invalid;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        MLabel(label),
+        const SizedBox(height: 8),
+        MTextField(
+          controller: controller,
+          placeholder: label,
+          semanticLabel: label,
+          keyboardType: TextInputType.number,
+          error: value.value.trim().isNotEmpty && invalid,
+          onChanged: (next) => value.value = next,
+        ),
+      ],
+    );
+  }
+}
+
+class _SwitchRow extends StatelessWidget {
+  const _SwitchRow({
+    required this.label,
+    required this.value,
+    required this.semanticLabel,
+    required this.onChanged,
+  });
+
+  final String label;
+  final bool value;
+  final String semanticLabel;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = MTheme.of(context);
+    return Row(
+      children: <Widget>[
+        Expanded(child: Text(label, style: theme.typography.bodySmall)),
+        MSwitch(
+          initialValue: value,
+          semanticLabel: semanticLabel,
+          onChanged: onChanged,
+        ),
+      ],
+    );
+  }
+}
+
+class _ControllerMemberRow extends HookConsumerWidget {
+  const _ControllerMemberRow({required this.network, required this.member});
+
+  final ControllerNetwork network;
+  final ControllerMember member;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final saving = useState(false);
+    final error = useState<String?>(null);
+
+    Future<void> toggleAuthorized() async {
+      saving.value = true;
+      error.value = null;
+      try {
+        await ref
+            .read(manyTierClientProvider)
+            .updateControllerMember(
+              network.id,
+              member.id,
+              ControllerMemberUpdate(authorized: !member.authorized),
+            );
+        await ref.read(controllerNetworksProvider.notifier).refresh();
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        saving.value = false;
+      }
+    }
+
+    Future<void> editIps() async {
+      final List<String>? ips = await showMDialog<List<String>>(
+        context,
+        builder: (BuildContext ctx) {
+          return _EditMemberIpsDialog(member: member);
+        },
+      );
+      if (ips == null) return;
+
+      saving.value = true;
+      error.value = null;
+      try {
+        await ref
+            .read(manyTierClientProvider)
+            .updateControllerMember(
+              network.id,
+              member.id,
+              ControllerMemberUpdate(ipAssignments: ips),
+            );
+        await ref.read(controllerNetworksProvider.notifier).refresh();
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        saving.value = false;
+      }
+    }
+
+    Future<void> delete() async {
+      final bool? confirmed = await showMDialog<bool>(
+        context,
+        builder: (BuildContext ctx) {
+          final dialogTheme = MTheme.of(ctx);
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                'Delete member?',
+                style: dialogTheme.typography.headlineSmall,
+              ),
+              const SizedBox(height: 8),
+              Text(member.id, style: dialogTheme.typography.code),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: <Widget>[
+                  MButton(
+                    variant: MButtonVariant.ghost,
+                    onPressed: () => Navigator.of(ctx).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                  const SizedBox(width: 8),
+                  MButton(
+                    variant: MButtonVariant.destructive,
+                    onPressed: () => Navigator.of(ctx).pop(true),
+                    child: const Text('Delete'),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      );
+      if (confirmed != true) return;
+
+      saving.value = true;
+      error.value = null;
+      try {
+        await ref
+            .read(manyTierClientProvider)
+            .deleteControllerMember(network.id, member.id);
+        await ref.read(controllerNetworksProvider.notifier).refresh();
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        saving.value = false;
+      }
+    }
+
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      member.name.isEmpty ? member.id : member.name,
+                      style: theme.typography.bodySmall,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(member.id, style: theme.typography.code),
+                  ],
+                ),
+              ),
+              MBadge(
+                variant: member.authorized
+                    ? MBadgeVariant.primary
+                    : MBadgeVariant.outline,
+                child: Text(member.authorized ? 'Authorized' : 'Pending'),
+              ),
+            ],
+          ),
+          if (member.ipAssignments.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(member.ipAssignments.join('  '), style: muted),
+          ],
+          if (error.value != null) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              error.value!,
+              style: theme.typography.bodySmall.copyWith(
+                color: theme.colors.destructive,
+              ),
+            ),
+          ],
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: WrapAlignment.end,
+            children: <Widget>[
+              MButton(
+                variant: MButtonVariant.outline,
+                size: MButtonSize.sm,
+                onPressed: saving.value ? null : editIps,
+                child: const Text('Edit IPs'),
+              ),
+              MButton(
+                variant: member.authorized
+                    ? MButtonVariant.outline
+                    : MButtonVariant.primary,
+                size: MButtonSize.sm,
+                onPressed: saving.value ? null : toggleAuthorized,
+                child: Text(member.authorized ? 'Deauthorize' : 'Authorize'),
+              ),
+              MButton(
+                variant: MButtonVariant.destructive,
+                size: MButtonSize.sm,
+                onPressed: saving.value ? null : delete,
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EditMemberIpsDialog extends HookWidget {
+  const _EditMemberIpsDialog({required this.member});
+
+  final ControllerMember member;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = MTheme.of(context);
+    final controller = useMController<String>(member.ipAssignments.join('\n'));
+    final value = useState(member.ipAssignments.join('\n'));
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Text('Edit member IPs', style: theme.typography.headlineSmall),
+        const SizedBox(height: 16),
+        const MLabel('IP assignments'),
+        const SizedBox(height: 8),
+        MTextField(
+          controller: controller,
+          placeholder: 'IP assignments',
+          semanticLabel: 'IP assignments',
+          minLines: 3,
+          maxLines: 5,
+          onChanged: (next) => value.value = next,
+        ),
+        const SizedBox(height: 24),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: <Widget>[
+            MButton(
+              variant: MButtonVariant.ghost,
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            const SizedBox(width: 8),
+            MButton(
+              onPressed: () =>
+                  Navigator.of(context).pop(_parseIpList(value.value)),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _CreateControllerNetworkCard extends HookConsumerWidget {
+  const _CreateControllerNetworkCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final addressController = useMController<String>('');
+    final nameController = useMController<String>('');
+    final address = useState('');
+    final name = useState('');
+    final creating = useState(false);
+    final error = useState<String?>(null);
+
+    final bool validAddress = nodeAddressPattern.hasMatch(address.value.trim());
+
+    Future<void> create() async {
+      creating.value = true;
+      error.value = null;
+      try {
+        await ref
+            .read(manyTierClientProvider)
+            .createControllerNetwork(
+              address.value.trim(),
+              update: ControllerNetworkUpdate(
+                name: name.value.trim(),
+                private: true,
+              ),
+            );
+        await ref.read(controllerNetworksProvider.notifier).refresh();
+        addressController.value = '';
+        nameController.value = '';
+        address.value = '';
+        name.value = '';
+      } on ManyTierException catch (e) {
+        error.value = e.message;
+      } finally {
+        creating.value = false;
+      }
+    }
+
+    return MCard(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              'Create controller network',
+              style: theme.typography.headlineSmall,
+            ),
+            const SizedBox(height: 16),
+            const MLabel('Controller address'),
+            const SizedBox(height: 8),
+            MTextField(
+              controller: addressController,
+              placeholder: '10-digit node address',
+              semanticLabel: 'Controller address',
+              error: address.value.trim().isNotEmpty && !validAddress,
+              onChanged: (value) => address.value = value,
+              onSubmitted: (_) {
+                if (validAddress && !creating.value) create();
+              },
+            ),
+            const SizedBox(height: 12),
+            const MLabel('Name'),
+            const SizedBox(height: 8),
+            MTextField(
+              controller: nameController,
+              placeholder: 'Network name',
+              semanticLabel: 'New controller network name',
+              onChanged: (value) => name.value = value,
+              onSubmitted: (_) {
+                if (validAddress && !creating.value) create();
+              },
+            ),
+            if (error.value != null) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(
+                error.value!,
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.destructive,
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            MButton(
+              onPressed: validAddress && !creating.value ? create : null,
+              child: Text(creating.value ? 'Creating...' : 'Create'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+List<String> _parseIpList(String value) {
+  return value
+      .split(RegExp(r'[\s,]+'))
+      .map((String part) => part.trim())
+      .where((String part) => part.isNotEmpty)
+      .toList();
 }
 
 /// Read-only moon status + orbit/deorbit actions.
