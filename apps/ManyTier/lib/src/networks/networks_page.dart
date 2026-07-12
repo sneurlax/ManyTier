@@ -10,6 +10,7 @@ import '../api/token_discovery.dart';
 import '../connections/connections_dialog.dart';
 import '../state/connection.dart';
 import '../state/controller_networks.dart';
+import '../state/embedded_runtime_lifecycle.dart';
 import '../state/moons.dart';
 import '../state/service_lifecycle.dart';
 import '../state/service_registration.dart';
@@ -168,6 +169,8 @@ class _NotRunningCard extends HookConsumerWidget {
               registration: registration,
               unavailableReason: registrationUnavailableReason,
             ),
+            const SizedBox(height: 16),
+            const _EmbeddedRuntimePanel(),
             if (unavailableReason != null) ...<Widget>[
               const SizedBox(height: 12),
               Text(
@@ -403,6 +406,7 @@ class _Dashboard extends StatelessWidget {
         _StatusCard(status: connection.status),
         const _ManagedServiceCard(),
         const _SystemServiceCard(),
+        const _EmbeddedRuntimeCard(),
         const SizedBox(height: 16),
         _PeersSection(
           peers: connection.peers,
@@ -491,6 +495,131 @@ class _LaunchAgentStatus extends StatelessWidget {
             ),
           ),
         ],
+      ],
+    );
+  }
+}
+
+class _EmbeddedRuntimeCard extends ConsumerWidget {
+  const _EmbeddedRuntimeCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final lifecycle = ref.watch(embeddedRuntimeLifecycleProvider);
+    if (!lifecycle.isRunning &&
+        lifecycle.error == null &&
+        !lifecycle.starting &&
+        !lifecycle.stopping) {
+      return const SizedBox.shrink();
+    }
+
+    return const Padding(
+      padding: EdgeInsets.only(top: 16),
+      child: MCard(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: _EmbeddedRuntimePanel(),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmbeddedRuntimePanel extends ConsumerWidget {
+  const _EmbeddedRuntimePanel();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = MTheme.of(context);
+    final lifecycle = ref.watch(embeddedRuntimeLifecycleProvider);
+    final controller = ref.read(embeddedRuntimeLifecycleProvider.notifier);
+    final runtime = lifecycle.runtime;
+    final unavailableReason = controller.unavailableReason();
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text('Embedded runtime', style: theme.typography.title),
+            ),
+            MBadge(
+              variant: runtime == null
+                  ? MBadgeVariant.outline
+                  : MBadgeVariant.secondary,
+              child: Text(runtime == null ? 'Stopped' : runtime.addressHex),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          runtime == null
+              ? 'Embedded UDP host is stopped.'
+              : 'Embedded UDP host is listening on '
+                    '${runtime.config.udpHost}:${runtime.config.udpPort}.',
+          style: muted,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          controller.preview(config: runtime?.config),
+          style: theme.typography.code,
+        ),
+        if (lifecycle.actionCount > 0) ...<Widget>[
+          const SizedBox(height: 8),
+          Text('Actions observed ${lifecycle.actionCount}', style: muted),
+        ],
+        if (unavailableReason != null) ...<Widget>[
+          const SizedBox(height: 8),
+          Text(unavailableReason, style: muted),
+        ],
+        if (lifecycle.error != null) ...<Widget>[
+          const SizedBox(height: 8),
+          Text(
+            lifecycle.error!,
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.destructive,
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
+        Wrap(
+          alignment: WrapAlignment.end,
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            MButton(
+              size: MButtonSize.sm,
+              onPressed:
+                  lifecycle.starting ||
+                      runtime != null ||
+                      unavailableReason != null
+                  ? null
+                  : () => ref
+                        .read(embeddedRuntimeLifecycleProvider.notifier)
+                        .start(),
+              child: Text(
+                lifecycle.starting ? 'Starting...' : 'Start embedded node',
+              ),
+            ),
+            if (runtime != null)
+              MButton(
+                variant: MButtonVariant.destructive,
+                size: MButtonSize.sm,
+                onPressed: lifecycle.canStop
+                    ? () => ref
+                          .read(embeddedRuntimeLifecycleProvider.notifier)
+                          .stop()
+                    : null,
+                child: Text(
+                  lifecycle.stopping ? 'Stopping...' : 'Stop embedded node',
+                ),
+              ),
+          ],
+        ),
       ],
     );
   }

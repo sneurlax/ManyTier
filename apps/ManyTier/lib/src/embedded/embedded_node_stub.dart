@@ -16,3 +16,15 @@ EmbeddedNodeSession createNativeEmbeddedNodeSession({
     'Embedded node runtime is only available on native platforms.',
   );
 }
+
+Uint8List loadNativeDefaultPlanet({String? libraryPath}) {
+  throw const EmbeddedNodeException(
+    'Embedded node runtime is only available on native platforms.',
+  );
+}
+
+String generateNativeIdentitySecret({String? libraryPath}) {
+  throw const EmbeddedNodeException(
+    'Embedded node runtime is only available on native platforms.',
+  );
+}

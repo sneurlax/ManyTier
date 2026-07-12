@@ -27,6 +27,42 @@ EmbeddedNodeSession createNativeEmbeddedNodeSession({
   );
 }
 
+Uint8List loadNativeDefaultPlanet({String? libraryPath}) {
+  final bindings = _ManyTierFfiBindings(_openManyTierFfiLibrary(libraryPath));
+  final dataOut = calloc<ffi.Pointer<ffi.Uint8>>();
+  final lenOut = calloc<ffi.Size>();
+  try {
+    _checkStatus(bindings.defaultPlanet(dataOut, lenOut), 'default planet');
+    return Uint8List.fromList(dataOut.value.asTypedList(lenOut.value));
+  } finally {
+    calloc.free(lenOut);
+    calloc.free(dataOut);
+  }
+}
+
+String generateNativeIdentitySecret({String? libraryPath}) {
+  final bindings = _ManyTierFfiBindings(_openManyTierFfiLibrary(libraryPath));
+  final lenOut = calloc<ffi.Size>();
+  ffi.Pointer<ffi.Uint8>? out;
+  try {
+    var capacity = 512;
+    out = calloc<ffi.Uint8>(capacity);
+    var status = bindings.generateIdentity(out, capacity, lenOut);
+    if (status == _bufferTooSmallStatus) {
+      calloc.free(out);
+      out = null;
+      capacity = lenOut.value;
+      out = calloc<ffi.Uint8>(capacity);
+      status = bindings.generateIdentity(out, capacity, lenOut);
+    }
+    _checkStatus(status, 'generate identity');
+    return utf8.decode(out.asTypedList(lenOut.value));
+  } finally {
+    if (out != null) calloc.free(out);
+    calloc.free(lenOut);
+  }
+}
+
 final class _ManyTierNode extends ffi.Opaque {}
 
 final class _FfiSocketAddress extends ffi.Struct {
@@ -97,6 +133,17 @@ typedef _NodeNewDart =
       int,
       ffi.Pointer<ffi.Pointer<_ManyTierNode>>,
     );
+typedef _DefaultPlanetNative =
+    ffi.Int32 Function(
+      ffi.Pointer<ffi.Pointer<ffi.Uint8>>,
+      ffi.Pointer<ffi.Size>,
+    );
+typedef _DefaultPlanetDart =
+    int Function(ffi.Pointer<ffi.Pointer<ffi.Uint8>>, ffi.Pointer<ffi.Size>);
+typedef _GenerateIdentityNative =
+    ffi.Int32 Function(ffi.Pointer<ffi.Uint8>, ffi.Size, ffi.Pointer<ffi.Size>);
+typedef _GenerateIdentityDart =
+    int Function(ffi.Pointer<ffi.Uint8>, int, ffi.Pointer<ffi.Size>);
 typedef _NodeFreeNative = ffi.Void Function(ffi.Pointer<_ManyTierNode>);
 typedef _NodeFreeDart = void Function(ffi.Pointer<_ManyTierNode>);
 typedef _NodeAddressNative =
@@ -162,7 +209,15 @@ typedef _ClearActionsDart = int Function(ffi.Pointer<_ManyTierNode>);
 
 class _ManyTierFfiBindings {
   _ManyTierFfiBindings(this.library)
-    : nodeNew = library.lookupFunction<_NodeNewNative, _NodeNewDart>(
+    : defaultPlanet = library
+          .lookupFunction<_DefaultPlanetNative, _DefaultPlanetDart>(
+            'manytier_default_planet',
+          ),
+      generateIdentity = library
+          .lookupFunction<_GenerateIdentityNative, _GenerateIdentityDart>(
+            'manytier_generate_identity',
+          ),
+      nodeNew = library.lookupFunction<_NodeNewNative, _NodeNewDart>(
         'manytier_node_new',
       ),
       nodeFree = library.lookupFunction<_NodeFreeNative, _NodeFreeDart>(
@@ -201,6 +256,8 @@ class _ManyTierFfiBindings {
       );
 
   final ffi.DynamicLibrary library;
+  final _DefaultPlanetDart defaultPlanet;
+  final _GenerateIdentityDart generateIdentity;
   final _NodeNewDart nodeNew;
   final _NodeFreeDart nodeFree;
   final _NodeAddressDart nodeAddress;
@@ -511,10 +568,14 @@ void _checkStatus(int status, String operation) {
     6 => 'invalid action index',
     7 => 'invalid socket address',
     8 => 'invalid ZeroTier address list',
+    _bufferTooSmallStatus => 'output buffer is too small',
+    10 => 'random identity generation failed',
     _ => 'unknown status $status',
   };
   throw EmbeddedNodeException('$operation failed: $message');
 }
+
+const int _bufferTooSmallStatus = 9;
 
 Uint8List _flattenZtAddresses(List<List<int>> addresses) {
   final out = Uint8List(addresses.length * 5);

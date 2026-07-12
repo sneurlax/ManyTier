@@ -5,10 +5,12 @@ import 'package:manyui/manyui.dart';
 import 'package:manytier_app/src/api/manytier_client.dart';
 import 'package:manytier_app/src/networks/networks_page.dart';
 import 'package:manytier_app/src/state/connection.dart';
+import 'package:manytier_app/src/state/embedded_runtime_lifecycle.dart';
 import 'package:manytier_app/src/state/service_lifecycle.dart';
 import 'package:manytier_app/src/state/service_registration.dart';
 
 import 'fakes/fake_manytier_client.dart';
+import 'fakes/fake_embedded_runtime_starter.dart';
 import 'fakes/fake_service_registrar.dart';
 import 'fakes/fake_service_starter.dart';
 
@@ -233,6 +235,48 @@ void main() {
       final start = find.widgetWithText(MButton, 'Start service');
       expect(tester.widget<MButton>(start).onPressed, isNull);
       expect(starter.starts, isEmpty);
+    });
+
+    testWidgets('starts and stops the embedded runtime from onboarding', (
+      tester,
+    ) async {
+      final embeddedStarter = FakeEmbeddedRuntimeStarter();
+      addTearDown(embeddedStarter.dispose);
+      final client = FakeManyTierClient(
+        statusError: const ServiceUnreachable('connection refused'),
+      );
+
+      await tester.pumpWidget(
+        _app(
+          client,
+          overrides: <Override>[
+            embeddedRuntimeStarterProvider.overrideWithValue(embeddedStarter),
+          ],
+        ),
+      );
+      await _useTallSurface(tester);
+      await _settle(tester);
+
+      expect(find.text('Embedded runtime'), findsOneWidget);
+      final start = find.widgetWithText(MButton, 'Start embedded node');
+      expect(tester.widget<MButton>(start).onPressed, isNotNull);
+
+      await tester.ensureVisible(start);
+      await tester.tap(start);
+      await _settle(tester);
+
+      expect(embeddedStarter.starts, hasLength(1));
+      expect(embeddedStarter.starts.single.dataDir, '/tmp/manytier-test');
+      expect(find.text('faa900da4a'), findsOneWidget);
+
+      final stop = find.widgetWithText(MButton, 'Stop embedded node');
+      expect(tester.widget<MButton>(stop).onPressed, isNotNull);
+      await tester.ensureVisible(stop);
+      tester.widget<MButton>(stop).onPressed!();
+      await _settle(tester);
+
+      expect(embeddedStarter.closes, 1);
+      expect(find.text('faa900da4a'), findsNothing);
     });
   });
 

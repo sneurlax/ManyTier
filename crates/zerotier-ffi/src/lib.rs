@@ -7,10 +7,12 @@
 use core::ptr;
 use core::slice;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::panic;
 use std::str;
 
 use zerotier_crypto::identity::Identity;
 use zerotier_node::node::{Node, NodeAction};
+use zerotier_protocol::world::DEFAULT_PLANET;
 
 /// Status returned by every fallible C ABI entry point.
 #[repr(C)]
@@ -25,6 +27,8 @@ pub enum ManyTierFfiStatus {
     InvalidIndex = 6,
     InvalidSocketAddress = 7,
     InvalidAddressList = 8,
+    BufferTooSmall = 9,
+    RandomFailed = 10,
 }
 
 /// Pending action variant exposed across the C ABI.
@@ -114,6 +118,68 @@ impl Default for ManyTierFfiActionView {
 pub struct ManyTierNode {
     node: Node,
     actions: Vec<NodeAction>,
+}
+
+/// Return a borrowed pointer to the embedded default planet bytes.
+///
+/// The pointer has static lifetime and must not be freed by the caller.
+#[no_mangle]
+pub unsafe extern "C" fn manytier_default_planet(
+    out_data: *mut *const u8,
+    out_len: *mut usize,
+) -> ManyTierFfiStatus {
+    if out_data.is_null() || out_len.is_null() {
+        return ManyTierFfiStatus::NullPointer;
+    }
+    unsafe {
+        *out_data = DEFAULT_PLANET.as_ptr();
+        *out_len = DEFAULT_PLANET.len();
+    }
+    ManyTierFfiStatus::Ok
+}
+
+/// Generate a new `identity.secret` string into a caller-owned buffer.
+///
+/// If `out_capacity` is too small, `out_len` is set to the required byte
+/// length and [`ManyTierFfiStatus::BufferTooSmall`] is returned. Passing
+/// `out_data = NULL, out_capacity = 0` is therefore a valid size query.
+#[no_mangle]
+pub unsafe extern "C" fn manytier_generate_identity(
+    out_data: *mut u8,
+    out_capacity: usize,
+    out_len: *mut usize,
+) -> ManyTierFfiStatus {
+    if out_len.is_null() {
+        return ManyTierFfiStatus::NullPointer;
+    }
+
+    let identity = match panic::catch_unwind(|| {
+        let mut rng = GetrandomRng;
+        Identity::generate(&mut rng)
+    }) {
+        Ok(Ok(identity)) => identity,
+        Ok(Err(_)) => return ManyTierFfiStatus::InvalidIdentity,
+        Err(_) => return ManyTierFfiStatus::RandomFailed,
+    };
+    let Some(secret) = identity.to_secret_string() else {
+        return ManyTierFfiStatus::MissingIdentitySecret;
+    };
+    let bytes = secret.as_bytes();
+    unsafe {
+        *out_len = bytes.len();
+    }
+
+    if out_capacity < bytes.len() {
+        return ManyTierFfiStatus::BufferTooSmall;
+    }
+    if out_data.is_null() {
+        return ManyTierFfiStatus::NullPointer;
+    }
+
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), out_data, bytes.len());
+    }
+    ManyTierFfiStatus::Ok
 }
 
 /// Create a node from an `identity.secret` string and planet/moon world bytes.
@@ -499,12 +565,90 @@ fn socket_address_from_ffi(address: ManyTierFfiSocketAddress) -> Option<SocketAd
     }
 }
 
+struct GetrandomRng;
+
+impl rand_core::RngCore for GetrandomRng {
+    fn next_u32(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        getrandom::getrandom(&mut bytes).expect("getrandom failed");
+        u32::from_le_bytes(bytes)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut bytes = [0u8; 8];
+        getrandom::getrandom(&mut bytes).expect("getrandom failed");
+        u64::from_le_bytes(bytes)
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        getrandom::getrandom(dest).expect("getrandom failed");
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+        getrandom::getrandom(dest).map_err(|_| {
+            rand_core::Error::from(
+                core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap(),
+            )
+        })
+    }
+}
+
+impl rand_core::CryptoRng for GetrandomRng {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zerotier_protocol::world::DEFAULT_PLANET;
 
     const CLIENT_SECRET: &str = "faa900da4a:0:fd0c3dc3ff88ff7cbac1df44f638aa22e69a13d4f9cc90f9fb15c882c4f13e732af074384f2b44a3fc211ea490259bcf1d6cd3b6aefc19a92accef90f73ca9ce:254ad73a7b1478e7283e6ab40a81b017dd2c7296b53a6f5348b30a33f890bef1e015930d2b36979bb57bd0f83ccb01c21dfdadc446d641c49a0f9c478905082a";
+
+    #[test]
+    fn default_planet_returns_embedded_bytes() {
+        let mut data = ptr::null();
+        let mut len = 0usize;
+
+        let status = unsafe { manytier_default_planet(&mut data, &mut len) };
+
+        assert_eq!(status, ManyTierFfiStatus::Ok);
+        assert!(!data.is_null());
+        assert_eq!(len, DEFAULT_PLANET.len());
+        let planet = unsafe { slice::from_raw_parts(data, len) };
+        assert_eq!(planet, DEFAULT_PLANET);
+
+        let status = unsafe { manytier_default_planet(ptr::null_mut(), &mut len) };
+        assert_eq!(status, ManyTierFfiStatus::NullPointer);
+    }
+
+    #[test]
+    fn generate_identity_writes_secret_to_caller_buffer() {
+        let mut required_len = 0usize;
+        let status = unsafe { manytier_generate_identity(ptr::null_mut(), 0, &mut required_len) };
+
+        assert_eq!(status, ManyTierFfiStatus::BufferTooSmall);
+        assert!(required_len > 0);
+
+        let mut out = vec![0u8; required_len];
+        let mut written_len = out.len();
+        let status =
+            unsafe { manytier_generate_identity(out.as_mut_ptr(), out.len(), &mut written_len) };
+
+        assert_eq!(status, ManyTierFfiStatus::Ok);
+        assert_eq!(written_len, out.len());
+        let secret = str::from_utf8(&out).expect("identity should be UTF-8");
+        let identity = Identity::parse(secret).expect("identity should parse");
+        assert!(identity.secret.is_some());
+        assert!(identity.validate_address());
+
+        let mut small = vec![0u8; 4];
+        let mut small_len = small.len();
+        let status =
+            unsafe { manytier_generate_identity(small.as_mut_ptr(), small.len(), &mut small_len) };
+        assert_eq!(status, ManyTierFfiStatus::BufferTooSmall);
+        assert!(small_len > small.len());
+
+        let status =
+            unsafe { manytier_generate_identity(small.as_mut_ptr(), small.len(), ptr::null_mut()) };
+        assert_eq!(status, ManyTierFfiStatus::NullPointer);
+    }
 
     #[test]
     fn node_handle_lifecycle_bootstraps_actions() {
