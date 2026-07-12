@@ -19,6 +19,42 @@ class ManyTierServiceStartRequest {
   final bool controllerMode;
 }
 
+class ManyTierServiceCommand {
+  const ManyTierServiceCommand({
+    required this.executable,
+    required this.arguments,
+  });
+
+  final String executable;
+  final List<String> arguments;
+
+  List<String> get parts => <String>[executable, ...arguments];
+
+  String get commandLine => quoteCommand(parts);
+}
+
+List<String> manyTierServiceArguments(ManyTierServiceStartRequest request) {
+  return <String>[
+    'service',
+    '--data-dir',
+    request.dataDir,
+    '--api-port',
+    '${request.apiPort}',
+    '--udp-port',
+    '${request.udpPort}',
+    if (request.controllerMode) '--controller-mode',
+  ];
+}
+
+String quoteCommand(List<String> parts) {
+  return parts
+      .map((String part) {
+        if (!part.contains(RegExp(r'\s'))) return part;
+        return '"${part.replaceAll('"', r'\"')}"';
+      })
+      .join(' ');
+}
+
 class StartedManyTierService {
   const StartedManyTierService({
     required this.pid,

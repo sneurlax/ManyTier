@@ -4,9 +4,11 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:manytier_app/src/api/manytier_client.dart';
 import 'package:manytier_app/src/state/connection.dart';
 import 'package:manytier_app/src/state/service_lifecycle.dart';
+import 'package:manytier_app/src/state/service_registration.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fakes/fake_manytier_client.dart';
+import 'fakes/fake_service_registrar.dart';
 import 'fakes/fake_service_starter.dart';
 
 void main() {
@@ -377,6 +379,81 @@ void main() {
 
       expect(starter.stops, 1);
       expect(container.read(serviceLifecycleProvider).startedService, isNull);
+    });
+  });
+
+  group('ServiceRegistrationController', () {
+    test(
+      'installs a local LaunchAgent with the active connection port',
+      () async {
+        final registrar = FakeServiceRegistrar();
+        final container = ProviderContainer(
+          overrides: <Override>[
+            manyTierServiceRegistrarProvider.overrideWithValue(registrar),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(serviceRegistrationProvider.notifier)
+            .install(
+              const SavedConnection(id: 'local', label: 'Local', port: 4242),
+            );
+
+        expect(registrar.installs, hasLength(1));
+        expect(registrar.installs.single.apiPort, 4242);
+        expect(registrar.installs.single.udpPort, 9993);
+        expect(registrar.installs.single.dataDir, '/tmp/manytier-test');
+        expect(container.read(serviceRegistrationProvider).installed, isTrue);
+        expect(
+          container.read(serviceRegistrationProvider).snapshot?.loaded,
+          isTrue,
+        );
+      },
+    );
+
+    test('rejects remote hosts without installing a service', () async {
+      final registrar = FakeServiceRegistrar();
+      final container = ProviderContainer(
+        overrides: <Override>[
+          manyTierServiceRegistrarProvider.overrideWithValue(registrar),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(serviceRegistrationProvider.notifier)
+          .install(
+            const SavedConnection(
+              id: 'remote',
+              label: 'Remote',
+              host: '192.0.2.10',
+            ),
+          );
+
+      expect(registrar.installs, isEmpty);
+      expect(
+        container.read(serviceRegistrationProvider).error,
+        contains('local daemon'),
+      );
+    });
+
+    test('uninstall removes an installed LaunchAgent', () async {
+      final registrar = FakeServiceRegistrar(installed: true, loaded: true);
+      final container = ProviderContainer(
+        overrides: <Override>[
+          manyTierServiceRegistrarProvider.overrideWithValue(registrar),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(serviceRegistrationProvider.notifier)
+          .refresh(defaultConnection);
+      await container.read(serviceRegistrationProvider.notifier).uninstall();
+
+      expect(registrar.uninstalls, 1);
+      expect(container.read(serviceRegistrationProvider).installed, isFalse);
     });
   });
 }

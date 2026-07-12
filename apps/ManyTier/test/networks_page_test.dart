@@ -6,17 +6,22 @@ import 'package:manytier_app/src/api/manytier_client.dart';
 import 'package:manytier_app/src/networks/networks_page.dart';
 import 'package:manytier_app/src/state/connection.dart';
 import 'package:manytier_app/src/state/service_lifecycle.dart';
+import 'package:manytier_app/src/state/service_registration.dart';
 
 import 'fakes/fake_manytier_client.dart';
+import 'fakes/fake_service_registrar.dart';
 import 'fakes/fake_service_starter.dart';
 
 Widget _app(
   FakeManyTierClient client, {
+  FakeServiceRegistrar? registrar,
   List<Override> overrides = const <Override>[],
 }) {
+  final serviceRegistrar = registrar ?? FakeServiceRegistrar(supported: false);
   return ProviderScope(
     overrides: <Override>[
       manyTierClientProvider.overrideWithValue(client),
+      manyTierServiceRegistrarProvider.overrideWithValue(serviceRegistrar),
       ...overrides,
     ],
     child: const MWidgetsApp(
@@ -149,6 +154,50 @@ void main() {
 
       expect(starter.stops, 1);
       expect(find.text('Managed service'), findsNothing);
+    });
+
+    testWidgets('installs and removes the login service from onboarding', (
+      tester,
+    ) async {
+      final starter = FakeServiceStarter();
+      final registrar = FakeServiceRegistrar();
+      final client = FakeManyTierClient(
+        statusError: const ServiceUnreachable('connection refused'),
+      );
+
+      await tester.pumpWidget(
+        _app(
+          client,
+          registrar: registrar,
+          overrides: <Override>[
+            manyTierServiceStarterProvider.overrideWithValue(starter),
+          ],
+        ),
+      );
+      await _useTallSurface(tester);
+      await _settle(tester);
+
+      expect(find.text('Login service is not installed.'), findsOneWidget);
+      final install = find.widgetWithText(MButton, 'Install at login');
+      expect(tester.widget<MButton>(install).onPressed, isNotNull);
+
+      client.statusError = null;
+      await tester.tap(install);
+      await tester.pump(const Duration(milliseconds: 250));
+      await _settle(tester);
+
+      expect(registrar.installs, hasLength(1));
+      expect(registrar.installs.single.apiPort, 9993);
+      expect(find.text('Login service'), findsOneWidget);
+      expect(find.text('Loaded'), findsOneWidget);
+
+      final remove = find.widgetWithText(MButton, 'Remove login service');
+      expect(tester.widget<MButton>(remove).onPressed, isNotNull);
+      await tester.tap(remove);
+      await _settle(tester);
+
+      expect(registrar.uninstalls, 1);
+      expect(find.text('Login service'), findsNothing);
     });
 
     testWidgets('does not offer local process start for remote connections', (

@@ -12,6 +12,7 @@ import '../state/connection.dart';
 import '../state/controller_networks.dart';
 import '../state/moons.dart';
 import '../state/service_lifecycle.dart';
+import '../state/service_registration.dart';
 import '../theme.dart';
 
 /// Daemon-control dashboard: service status, joined networks, peers.
@@ -118,7 +119,7 @@ class _CenteredCard extends StatelessWidget {
   }
 }
 
-class _NotRunningCard extends ConsumerWidget {
+class _NotRunningCard extends HookConsumerWidget {
   const _NotRunningCard();
 
   @override
@@ -126,8 +127,21 @@ class _NotRunningCard extends ConsumerWidget {
     final theme = MTheme.of(context);
     final settings = ref.watch(connectionSettingsProvider);
     final lifecycle = ref.watch(serviceLifecycleProvider);
+    final registration = ref.watch(serviceRegistrationProvider);
     final lifecycleController = ref.read(serviceLifecycleProvider.notifier);
+    final registrationController = ref.read(
+      serviceRegistrationProvider.notifier,
+    );
     final unavailableReason = lifecycleController.unavailableReason(settings);
+    final registrationUnavailableReason = registrationController
+        .unavailableReason(settings);
+    useEffect(() {
+      Future<void>.microtask(
+        () => ref.read(serviceRegistrationProvider.notifier).refresh(settings),
+      );
+      return null;
+    }, <Object?>[settings.id, settings.host, settings.port]);
+
     return MCard(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -148,6 +162,11 @@ class _NotRunningCard extends ConsumerWidget {
             Text(
               lifecycleController.commandPreview(settings),
               style: theme.typography.code,
+            ),
+            const SizedBox(height: 16),
+            _LaunchAgentStatus(
+              registration: registration,
+              unavailableReason: registrationUnavailableReason,
             ),
             if (unavailableReason != null) ...<Widget>[
               const SizedBox(height: 12),
@@ -200,6 +219,49 @@ class _NotRunningCard extends ConsumerWidget {
                     lifecycle.starting ? 'Starting...' : 'Start service',
                   ),
                 ),
+                if (registration.installed)
+                  MButton(
+                    variant: MButtonVariant.destructive,
+                    onPressed: registration.busy
+                        ? null
+                        : () async {
+                            await ref
+                                .read(serviceRegistrationProvider.notifier)
+                                .uninstall();
+                            await ref
+                                .read(daemonConnectionProvider.notifier)
+                                .refresh();
+                          },
+                    child: Text(
+                      registration.uninstalling
+                          ? 'Removing...'
+                          : 'Remove login service',
+                    ),
+                  )
+                else
+                  MButton(
+                    variant: MButtonVariant.outline,
+                    onPressed:
+                        registration.busy ||
+                            registrationUnavailableReason != null
+                        ? null
+                        : () async {
+                            await ref
+                                .read(serviceRegistrationProvider.notifier)
+                                .install(settings);
+                            await Future<void>.delayed(
+                              const Duration(milliseconds: 250),
+                            );
+                            await ref
+                                .read(daemonConnectionProvider.notifier)
+                                .refresh();
+                          },
+                    child: Text(
+                      registration.installing
+                          ? 'Installing...'
+                          : 'Install at login',
+                    ),
+                  ),
               ],
             ),
           ],
@@ -340,6 +402,7 @@ class _Dashboard extends StatelessWidget {
       children: <Widget>[
         _StatusCard(status: connection.status),
         const _ManagedServiceCard(),
+        const _SystemServiceCard(),
         const SizedBox(height: 16),
         _PeersSection(
           peers: connection.peers,
@@ -376,6 +439,59 @@ class _Dashboard extends StatelessWidget {
                 ),
         );
       },
+    );
+  }
+}
+
+class _LaunchAgentStatus extends StatelessWidget {
+  const _LaunchAgentStatus({
+    required this.registration,
+    required this.unavailableReason,
+  });
+
+  final ServiceRegistrationState registration;
+  final String? unavailableReason;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = MTheme.of(context);
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
+    final error = registration.error;
+    final snapshot = registration.snapshot;
+
+    final String message;
+    if (unavailableReason != null) {
+      message = unavailableReason!;
+    } else if (registration.loading) {
+      message = 'Checking login service...';
+    } else if (snapshot == null || !snapshot.installed) {
+      message = 'Login service is not installed.';
+    } else if (snapshot.loaded) {
+      message = 'Login service is installed and loaded.';
+    } else {
+      message = 'Login service is installed but not loaded.';
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Text(message, style: muted),
+        if (snapshot?.installed ?? false) ...<Widget>[
+          const SizedBox(height: 4),
+          Text(snapshot!.plistPath, style: theme.typography.code),
+        ],
+        if (error != null) ...<Widget>[
+          const SizedBox(height: 8),
+          Text(
+            error,
+            style: theme.typography.bodySmall.copyWith(
+              color: theme.colors.destructive,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -451,6 +567,107 @@ class _ManagedServiceCard extends ConsumerWidget {
                         : null,
                     child: Text(
                       lifecycle.stopping ? 'Stopping...' : 'Stop service',
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SystemServiceCard extends HookConsumerWidget {
+  const _SystemServiceCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(connectionSettingsProvider);
+    final registration = ref.watch(serviceRegistrationProvider);
+    final snapshot = registration.snapshot;
+    useEffect(() {
+      Future<void>.microtask(
+        () => ref.read(serviceRegistrationProvider.notifier).refresh(settings),
+      );
+      return null;
+    }, <Object?>[settings.id, settings.host, settings.port]);
+
+    if (snapshot == null || !snapshot.installed) {
+      return const SizedBox.shrink();
+    }
+
+    final theme = MTheme.of(context);
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 16),
+      child: MCard(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      'Login service',
+                      style: theme.typography.headlineSmall,
+                    ),
+                  ),
+                  MBadge(
+                    variant: snapshot.loaded
+                        ? MBadgeVariant.primary
+                        : MBadgeVariant.secondary,
+                    child: Text(snapshot.loaded ? 'Loaded' : 'Installed'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(snapshot.plistPath, style: theme.typography.code),
+              if (snapshot.command != null) ...<Widget>[
+                const SizedBox(height: 8),
+                Text(snapshot.command!, style: theme.typography.code),
+              ],
+              if (registration.error != null) ...<Widget>[
+                const SizedBox(height: 8),
+                Text(
+                  registration.error!,
+                  style: theme.typography.bodySmall.copyWith(
+                    color: theme.colors.destructive,
+                  ),
+                ),
+              ] else ...<Widget>[
+                const SizedBox(height: 8),
+                Text('LaunchAgent starts the service at login.', style: muted),
+              ],
+              const SizedBox(height: 16),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  MButton(
+                    variant: MButtonVariant.destructive,
+                    size: MButtonSize.sm,
+                    onPressed: registration.busy
+                        ? null
+                        : () async {
+                            await ref
+                                .read(serviceRegistrationProvider.notifier)
+                                .uninstall();
+                            await ref
+                                .read(daemonConnectionProvider.notifier)
+                                .refresh();
+                          },
+                    child: Text(
+                      registration.uninstalling
+                          ? 'Removing...'
+                          : 'Remove login service',
                     ),
                   ),
                 ],

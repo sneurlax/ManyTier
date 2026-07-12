@@ -31,16 +31,9 @@ class IoManyTierServiceStarter implements ManyTierServiceStarter {
 
   @override
   String commandPreview(ManyTierServiceStartRequest request) {
-    return _quoteCommand(<String>[
+    return quoteCommand(<String>[
       _configuredExecutable ?? 'manytier',
-      'service',
-      '--data-dir',
-      request.dataDir,
-      '--api-port',
-      '${request.apiPort}',
-      '--udp-port',
-      '${request.udpPort}',
-      if (request.controllerMode) '--controller-mode',
+      ...manyTierServiceArguments(request),
     ]);
   }
 
@@ -50,16 +43,7 @@ class IoManyTierServiceStarter implements ManyTierServiceStarter {
   ) async {
     final String executable = await _resolveExecutable();
     await Directory(request.dataDir).create(recursive: true);
-    final List<String> args = <String>[
-      'service',
-      '--data-dir',
-      request.dataDir,
-      '--api-port',
-      '${request.apiPort}',
-      '--udp-port',
-      '${request.udpPort}',
-      if (request.controllerMode) '--controller-mode',
-    ];
+    final List<String> args = manyTierServiceArguments(request);
     final Process process = await Process.start(
       executable,
       args,
@@ -69,7 +53,10 @@ class IoManyTierServiceStarter implements ManyTierServiceStarter {
     unawaited(process.stderr.drain<void>());
     return StartedManyTierService(
       pid: process.pid,
-      command: _quoteCommand(<String>[executable, ...args]),
+      command: ManyTierServiceCommand(
+        executable: executable,
+        arguments: args,
+      ).commandLine,
       stop: () async {
         process.kill();
         try {
@@ -88,7 +75,11 @@ class IoManyTierServiceStarter implements ManyTierServiceStarter {
 
   Future<String> _resolveExecutable() async {
     final String? configured = _configuredExecutable;
-    if (configured != null) return configured;
+    if (configured != null) {
+      final String? configuredOnPath = _findOnPath(configured);
+      if (configuredOnPath != null) return configuredOnPath;
+      return File(configured).absolute.path;
+    }
     final String? path = _findOnPath('manytier');
     if (path != null) return path;
     throw const ServiceStartUnavailable(
@@ -114,14 +105,5 @@ class IoManyTierServiceStarter implements ManyTierServiceStarter {
       }
     }
     return null;
-  }
-
-  String _quoteCommand(List<String> parts) {
-    return parts
-        .map((String part) {
-          if (!part.contains(RegExp(r'\s'))) return part;
-          return '"${part.replaceAll('"', r'\"')}"';
-        })
-        .join(' ');
   }
 }

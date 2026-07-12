@@ -25,8 +25,10 @@ class FakeServiceStarter implements ManyTierServiceStarter {
 
   @override
   String commandPreview(ManyTierServiceStartRequest request) {
-    return 'manytier service --data-dir ${request.dataDir} '
-        '--api-port ${request.apiPort} --udp-port ${request.udpPort}';
+    return quoteCommand(<String>[
+      'manytier',
+      ...manyTierServiceArguments(request),
+    ]);
   }
 
   @override
