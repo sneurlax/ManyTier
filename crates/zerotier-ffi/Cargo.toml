@@ -15,4 +15,8 @@ description = "C ABI bindings for the ZeroTier node engine"
 crate-type = ["cdylib"]
 
 [dependencies]
+zerotier-crypto = { workspace = true }
 zerotier-node = { workspace = true, features = ["native"] }
+
+[dev-dependencies]
+zerotier-protocol = { workspace = true }
