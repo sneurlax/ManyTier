@@ -5,12 +5,20 @@ import 'package:manyui/manyui.dart';
 import 'package:manytier_app/src/api/manytier_client.dart';
 import 'package:manytier_app/src/networks/networks_page.dart';
 import 'package:manytier_app/src/state/connection.dart';
+import 'package:manytier_app/src/state/service_lifecycle.dart';
 
 import 'fakes/fake_manytier_client.dart';
+import 'fakes/fake_service_starter.dart';
 
-Widget _app(FakeManyTierClient client) {
+Widget _app(
+  FakeManyTierClient client, {
+  List<Override> overrides = const <Override>[],
+}) {
   return ProviderScope(
-    overrides: <Override>[manyTierClientProvider.overrideWithValue(client)],
+    overrides: <Override>[
+      manyTierClientProvider.overrideWithValue(client),
+      ...overrides,
+    ],
     child: const MWidgetsApp(
       debugShowCheckedModeBanner: false,
       home: NetworksPage(),
@@ -96,6 +104,89 @@ ControllerMember _controllerMember({
 }
 
 void main() {
+  group('NetworksPage service lifecycle', () {
+    testWidgets('starts the local daemon from the not-running card', (
+      tester,
+    ) async {
+      final starter = FakeServiceStarter();
+      final client = FakeManyTierClient(
+        statusError: const ServiceUnreachable('connection refused'),
+      );
+
+      await tester.pumpWidget(
+        _app(
+          client,
+          overrides: <Override>[
+            manyTierServiceStarterProvider.overrideWithValue(starter),
+          ],
+        ),
+      );
+      await _useTallSurface(tester);
+      await _settle(tester);
+
+      expect(find.text('Service not running'), findsWidgets);
+      expect(
+        find.textContaining('--data-dir /tmp/manytier-test'),
+        findsOneWidget,
+      );
+
+      final start = find.widgetWithText(MButton, 'Start service');
+      expect(tester.widget<MButton>(start).onPressed, isNotNull);
+      await tester.tap(start);
+      client.statusError = null;
+      await tester.pump(const Duration(milliseconds: 250));
+      await _settle(tester);
+
+      expect(starter.starts, hasLength(1));
+      expect(starter.starts.single.apiPort, 9993);
+      expect(find.text('Managed service'), findsOneWidget);
+      expect(find.text('PID 4242'), findsOneWidget);
+
+      final stop = find.widgetWithText(MButton, 'Stop service');
+      expect(tester.widget<MButton>(stop).onPressed, isNotNull);
+      await tester.tap(stop);
+      await _settle(tester);
+
+      expect(starter.stops, 1);
+      expect(find.text('Managed service'), findsNothing);
+    });
+
+    testWidgets('does not offer local process start for remote connections', (
+      tester,
+    ) async {
+      final starter = FakeServiceStarter();
+      final client = FakeManyTierClient(
+        statusError: const ServiceUnreachable('connection refused'),
+      );
+
+      await tester.pumpWidget(
+        _app(
+          client,
+          overrides: <Override>[
+            connectionsProvider.overrideWith(
+              (ref) => const <SavedConnection>[
+                SavedConnection(
+                  id: 'remote',
+                  label: 'Remote',
+                  host: '192.0.2.10',
+                ),
+              ],
+            ),
+            activeConnectionIdProvider.overrideWith((ref) => 'remote'),
+            manyTierServiceStarterProvider.overrideWithValue(starter),
+          ],
+        ),
+      );
+      await _useTallSurface(tester);
+      await _settle(tester);
+
+      expect(find.textContaining('only manage local daemon'), findsOneWidget);
+      final start = find.widgetWithText(MButton, 'Start service');
+      expect(tester.widget<MButton>(start).onPressed, isNull);
+      expect(starter.starts, isEmpty);
+    });
+  });
+
   group('NetworksPage peers', () {
     testWidgets('renders peer latency text and trend semantics', (
       tester,

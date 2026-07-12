@@ -11,6 +11,7 @@ import '../connections/connections_dialog.dart';
 import '../state/connection.dart';
 import '../state/controller_networks.dart';
 import '../state/moons.dart';
+import '../state/service_lifecycle.dart';
 import '../theme.dart';
 
 /// Daemon-control dashboard: service status, joined networks, peers.
@@ -123,6 +124,10 @@ class _NotRunningCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = MTheme.of(context);
+    final settings = ref.watch(connectionSettingsProvider);
+    final lifecycle = ref.watch(serviceLifecycleProvider);
+    final lifecycleController = ref.read(serviceLifecycleProvider.notifier);
+    final unavailableReason = lifecycleController.unavailableReason(settings);
     return MCard(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -134,22 +139,68 @@ class _NotRunningCard extends ConsumerWidget {
             const SizedBox(height: 12),
             Text(
               'ManyTier could not reach the local control service. '
-              'Start it in a terminal, then retry:',
+              'Start it from this app or in a terminal, then retry:',
               style: theme.typography.bodySmall.copyWith(
                 color: theme.colors.mutedForeground,
               ),
             ),
             const SizedBox(height: 12),
             Text(
-              'manytier service --data-dir ~/.manytier',
+              lifecycleController.commandPreview(settings),
               style: theme.typography.code,
             ),
+            if (unavailableReason != null) ...<Widget>[
+              const SizedBox(height: 12),
+              Text(
+                unavailableReason,
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.mutedForeground,
+                ),
+              ),
+            ],
+            if (lifecycle.error != null) ...<Widget>[
+              const SizedBox(height: 12),
+              Text(
+                lifecycle.error!,
+                style: theme.typography.bodySmall.copyWith(
+                  color: theme.colors.destructive,
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
-            MButton(
-              variant: MButtonVariant.outline,
-              onPressed: () =>
-                  ref.read(daemonConnectionProvider.notifier).refresh(),
-              child: const Text('Retry'),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                MButton(
+                  variant: MButtonVariant.outline,
+                  onPressed: () =>
+                      ref.read(daemonConnectionProvider.notifier).refresh(),
+                  child: const Text('Retry'),
+                ),
+                MButton(
+                  onPressed:
+                      lifecycle.starting ||
+                          unavailableReason != null ||
+                          lifecycle.startedService != null
+                      ? null
+                      : () async {
+                          await ref
+                              .read(serviceLifecycleProvider.notifier)
+                              .start(settings);
+                          await Future<void>.delayed(
+                            const Duration(milliseconds: 250),
+                          );
+                          await ref
+                              .read(daemonConnectionProvider.notifier)
+                              .refresh();
+                        },
+                  child: Text(
+                    lifecycle.starting ? 'Starting...' : 'Start service',
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -288,6 +339,7 @@ class _Dashboard extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         _StatusCard(status: connection.status),
+        const _ManagedServiceCard(),
         const SizedBox(height: 16),
         _PeersSection(
           peers: connection.peers,
@@ -324,6 +376,89 @@ class _Dashboard extends StatelessWidget {
                 ),
         );
       },
+    );
+  }
+}
+
+class _ManagedServiceCard extends ConsumerWidget {
+  const _ManagedServiceCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final lifecycle = ref.watch(serviceLifecycleProvider);
+    final service = lifecycle.startedService;
+    if (service == null) return const SizedBox.shrink();
+
+    final theme = MTheme.of(context);
+    final muted = theme.typography.bodySmall.copyWith(
+      color: theme.colors.mutedForeground,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 16),
+      child: MCard(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      'Managed service',
+                      style: theme.typography.headlineSmall,
+                    ),
+                  ),
+                  MBadge(
+                    variant: MBadgeVariant.secondary,
+                    child: Text('PID ${service.pid}'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(service.command, style: theme.typography.code),
+              if (lifecycle.error != null) ...<Widget>[
+                const SizedBox(height: 8),
+                Text(
+                  lifecycle.error!,
+                  style: theme.typography.bodySmall.copyWith(
+                    color: theme.colors.destructive,
+                  ),
+                ),
+              ] else ...<Widget>[
+                const SizedBox(height: 8),
+                Text('Started by this app session.', style: muted),
+              ],
+              const SizedBox(height: 16),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  MButton(
+                    variant: MButtonVariant.destructive,
+                    size: MButtonSize.sm,
+                    onPressed: lifecycle.canStop
+                        ? () async {
+                            await ref
+                                .read(serviceLifecycleProvider.notifier)
+                                .stop();
+                            await ref
+                                .read(daemonConnectionProvider.notifier)
+                                .refresh();
+                          }
+                        : null,
+                    child: Text(
+                      lifecycle.stopping ? 'Stopping...' : 'Stop service',
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

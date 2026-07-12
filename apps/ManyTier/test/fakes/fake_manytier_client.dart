@@ -9,6 +9,7 @@ class FakeManyTierClient implements ManyTierClient {
     List<Moon>? moons,
     List<ControllerNetwork>? controllerNetworks,
     Map<String, List<ControllerMember>>? controllerMembers,
+    this.statusError,
   }) : status_ =
            status ??
            const ManyTierStatus(
@@ -30,6 +31,7 @@ class FakeManyTierClient implements ManyTierClient {
   List<Moon> moons_;
   List<ControllerNetwork> controllerNetworks_;
   Map<String, List<ControllerMember>> controllerMembers_;
+  ManyTierException? statusError;
 
   /// If set, thrown by [orbitMoon]/[deorbitMoon] instead of mutating state.
   ManyTierException? nextActionError;
@@ -45,6 +47,10 @@ class FakeManyTierClient implements ManyTierClient {
   @override
   Future<ManyTierStatus> status() async {
     statusCalls++;
+    final ManyTierException? error = statusError;
+    if (error != null) {
+      throw error;
+    }
     return status_;
   }
 

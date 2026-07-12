@@ -3,9 +3,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:manytier_app/src/api/manytier_client.dart';
 import 'package:manytier_app/src/state/connection.dart';
+import 'package:manytier_app/src/state/service_lifecycle.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fakes/fake_manytier_client.dart';
+import 'fakes/fake_service_starter.dart';
 
 void main() {
   setUp(() {
@@ -304,6 +306,77 @@ void main() {
       expect(restored.host, original.host);
       expect(restored.port, original.port);
       expect(restored.manualToken, original.manualToken);
+    });
+  });
+
+  group('ServiceLifecycleController', () {
+    test('starts a local service with the active connection port', () async {
+      final starter = FakeServiceStarter();
+      final container = ProviderContainer(
+        overrides: <Override>[
+          manyTierServiceStarterProvider.overrideWithValue(starter),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(serviceLifecycleProvider.notifier)
+          .start(
+            const SavedConnection(id: 'local', label: 'Local', port: 4242),
+          );
+
+      expect(starter.starts, hasLength(1));
+      expect(starter.starts.single.apiPort, 4242);
+      expect(starter.starts.single.udpPort, 9993);
+      expect(starter.starts.single.dataDir, '/tmp/manytier-test');
+      expect(
+        container.read(serviceLifecycleProvider).startedService?.pid,
+        4242,
+      );
+    });
+
+    test('rejects remote hosts without starting a process', () async {
+      final starter = FakeServiceStarter();
+      final container = ProviderContainer(
+        overrides: <Override>[
+          manyTierServiceStarterProvider.overrideWithValue(starter),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(serviceLifecycleProvider.notifier)
+          .start(
+            const SavedConnection(
+              id: 'remote',
+              label: 'Remote',
+              host: '192.0.2.10',
+            ),
+          );
+
+      expect(starter.starts, isEmpty);
+      expect(
+        container.read(serviceLifecycleProvider).error,
+        contains('local daemon'),
+      );
+    });
+
+    test('stop terminates the app-started process', () async {
+      final starter = FakeServiceStarter();
+      final container = ProviderContainer(
+        overrides: <Override>[
+          manyTierServiceStarterProvider.overrideWithValue(starter),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(serviceLifecycleProvider.notifier)
+          .start(defaultConnection);
+      await container.read(serviceLifecycleProvider.notifier).stop();
+
+      expect(starter.stops, 1);
+      expect(container.read(serviceLifecycleProvider).startedService, isNull);
     });
   });
 }
