@@ -24,6 +24,7 @@ pub enum ManyTierFfiStatus {
     InvalidPlanet = 5,
     InvalidIndex = 6,
     InvalidSocketAddress = 7,
+    InvalidAddressList = 8,
 }
 
 /// Pending action variant exposed across the C ABI.
@@ -261,6 +262,47 @@ pub unsafe extern "C" fn manytier_node_receive_packet(
     let handle = unsafe { &mut *node };
     let mut packet = packet.to_vec();
     handle.actions = handle.node.receive_packet(&mut packet, from, now_ms);
+    unsafe {
+        *out_action_count = handle.actions.len();
+    }
+    ManyTierFfiStatus::Ok
+}
+
+/// Build WHOIS request packets for a flat list of 5-byte ZeroTier addresses.
+#[no_mangle]
+pub unsafe extern "C" fn manytier_node_send_whois(
+    node: *mut ManyTierNode,
+    addresses_ptr: *const u8,
+    address_count: usize,
+    now_ms: u64,
+    out_action_count: *mut usize,
+) -> ManyTierFfiStatus {
+    if node.is_null() || out_action_count.is_null() {
+        return ManyTierFfiStatus::NullPointer;
+    }
+
+    if address_count == 0 {
+        unsafe {
+            (*node).actions.clear();
+            *out_action_count = 0;
+        }
+        return ManyTierFfiStatus::Ok;
+    }
+
+    let Some(address_len) = address_count.checked_mul(5) else {
+        return ManyTierFfiStatus::InvalidAddressList;
+    };
+    let address_bytes = match unsafe_slice(addresses_ptr, address_len) {
+        Some(bytes) => bytes,
+        None => return ManyTierFfiStatus::NullPointer,
+    };
+    let addresses: Vec<[u8; 5]> = address_bytes
+        .chunks_exact(5)
+        .map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4]])
+        .collect();
+
+    let handle = unsafe { &mut *node };
+    handle.actions = handle.node.send_whois(&addresses, now_ms);
     unsafe {
         *out_action_count = handle.actions.len();
     }
@@ -558,6 +600,41 @@ mod tests {
             )
         };
         assert_eq!(status, ManyTierFfiStatus::InvalidSocketAddress);
+
+        unsafe { manytier_node_free(node) };
+    }
+
+    #[test]
+    fn send_whois_stores_send_actions() {
+        let node = new_test_node();
+        let addresses = [[0xaa, 0xbb, 0xcc, 0xdd, 0xee]];
+        let mut action_count = usize::MAX;
+
+        let status = unsafe {
+            manytier_node_send_whois(
+                node,
+                addresses.as_ptr().cast::<u8>(),
+                addresses.len(),
+                12_000,
+                &mut action_count,
+            )
+        };
+
+        assert_eq!(status, ManyTierFfiStatus::Ok);
+        assert!(action_count > 0, "WHOIS should emit a root-bound packet");
+
+        let mut view = ManyTierFfiActionView::default();
+        let status = unsafe { manytier_node_action_view(node, 0, &mut view) };
+        assert_eq!(status, ManyTierFfiStatus::Ok);
+        assert_eq!(view.kind, ManyTierFfiActionKind::SendTo);
+        assert!(!view.data_ptr.is_null());
+        assert!(view.data_len > 0);
+        assert!(matches!(view.socket_address.family, 4 | 6));
+
+        let status =
+            unsafe { manytier_node_send_whois(node, ptr::null(), 0, 12_500, &mut action_count) };
+        assert_eq!(status, ManyTierFfiStatus::Ok);
+        assert_eq!(action_count, 0);
 
         unsafe { manytier_node_free(node) };
     }
