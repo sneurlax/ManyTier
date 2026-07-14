@@ -1,5 +1,6 @@
 import Cocoa
 import FlutterMacOS
+import NetworkExtension
 
 let macOSVirtualNetworkUnsupportedMessage =
   "macOS virtual network devices require a Network Extension packet tunnel handler, which is not implemented yet."
@@ -15,7 +16,8 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
     virtualNetworkChannel = ManyTierVirtualNetworkChannel(
-      messenger: flutterViewController.engine.binaryMessenger
+      messenger: flutterViewController.engine.binaryMessenger,
+      adapter: PacketTunnelVirtualNetworkAdapter()
     )
 
     super.awakeFromNib()
@@ -44,29 +46,12 @@ final class ManyTierVirtualNetworkChannel {
       result(adapter.supportDetails)
     case "createVirtualNetwork":
       let request = VirtualNetworkRequest(arguments: call.arguments)
-      do {
-        result(try adapter.createVirtualNetwork(request))
-      } catch let error as VirtualNetworkAdapterError {
-        result(error.flutterError)
-      } catch {
-        result(FlutterError(
-          code: "native_error",
-          message: "\(error)",
-          details: nil
-        ))
+      adapter.createVirtualNetwork(request) { createResult in
+        result(flutterResult(from: createResult))
       }
     case "writeVirtualPacket":
-      do {
-        try adapter.writeVirtualPacket(VirtualNetworkPacket(arguments: call.arguments))
-        result(nil)
-      } catch let error as VirtualNetworkAdapterError {
-        result(error.flutterError)
-      } catch {
-        result(FlutterError(
-          code: "native_error",
-          message: "\(error)",
-          details: nil
-        ))
+      adapter.writeVirtualPacket(VirtualNetworkPacket(arguments: call.arguments)) { writeResult in
+        result(flutterResult(from: writeResult))
       }
     case "closeVirtualNetwork":
       adapter.closeVirtualNetwork(VirtualNetworkCloseRequest(arguments: call.arguments))
@@ -80,8 +65,14 @@ final class ManyTierVirtualNetworkChannel {
 protocol ManyTierVirtualNetworkAdapter {
   var supportDetails: [String: Any] { get }
 
-  func createVirtualNetwork(_ request: VirtualNetworkRequest) throws -> Any?
-  func writeVirtualPacket(_ packet: VirtualNetworkPacket) throws
+  func createVirtualNetwork(
+    _ request: VirtualNetworkRequest,
+    completion: @escaping (Result<Any?, Error>) -> Void
+  )
+  func writeVirtualPacket(
+    _ packet: VirtualNetworkPacket,
+    completion: @escaping (Result<Void, Error>) -> Void
+  )
   func closeVirtualNetwork(_ request: VirtualNetworkCloseRequest)
 }
 
@@ -95,6 +86,28 @@ struct VirtualNetworkAdapterError: Error {
   }
 }
 
+func flutterResult(from result: Result<Any?, Error>) -> Any? {
+  switch result {
+  case .success(let value):
+    return value
+  case .failure(let error as VirtualNetworkAdapterError):
+    return error.flutterError
+  case .failure(let error):
+    return FlutterError(code: "native_error", message: "\(error)", details: nil)
+  }
+}
+
+func flutterResult(from result: Result<Void, Error>) -> Any? {
+  switch result {
+  case .success:
+    return nil
+  case .failure(let error as VirtualNetworkAdapterError):
+    return error.flutterError
+  case .failure(let error):
+    return FlutterError(code: "native_error", message: "\(error)", details: nil)
+  }
+}
+
 final class UnsupportedVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
   var supportDetails: [String: Any] {
     [
@@ -105,23 +118,284 @@ final class UnsupportedVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
     ]
   }
 
-  func createVirtualNetwork(_ request: VirtualNetworkRequest) throws -> Any? {
-    throw VirtualNetworkAdapterError(
+  func createVirtualNetwork(
+    _ request: VirtualNetworkRequest,
+    completion: @escaping (Result<Any?, Error>) -> Void
+  ) {
+    completion(.failure(VirtualNetworkAdapterError(
       code: "unsupported",
       message: macOSVirtualNetworkUnsupportedMessage,
       details: request.details
-    )
+    )))
   }
 
-  func writeVirtualPacket(_ packet: VirtualNetworkPacket) throws {
-    throw VirtualNetworkAdapterError(
+  func writeVirtualPacket(
+    _ packet: VirtualNetworkPacket,
+    completion: @escaping (Result<Void, Error>) -> Void
+  ) {
+    completion(.failure(VirtualNetworkAdapterError(
       code: "not_available",
       message: "No macOS virtual network interface is active.",
       details: packet.details
-    )
+    )))
   }
 
   func closeVirtualNetwork(_ request: VirtualNetworkCloseRequest) {}
+}
+
+struct PacketTunnelConfiguration {
+  let providerBundleIdentifier: String?
+
+  init(providerBundleIdentifier: String?) {
+    self.providerBundleIdentifier = providerBundleIdentifier
+  }
+
+  init(bundle: Bundle = .main) {
+    providerBundleIdentifier = bundle.object(
+      forInfoDictionaryKey: "ManyTierPacketTunnelProviderBundleIdentifier"
+    ) as? String
+  }
+
+  var hasProviderBundleIdentifier: Bool {
+    guard let providerBundleIdentifier else {
+      return false
+    }
+    return !providerBundleIdentifier.isEmpty
+  }
+}
+
+protocol PacketTunnelManagerStore {
+  func loadManager(
+    providerBundleIdentifier: String,
+    completion: @escaping (Result<PacketTunnelManager, Error>) -> Void
+  )
+}
+
+protocol PacketTunnelManager: AnyObject {
+  func start(
+    options: [String: NSObject],
+    completion: @escaping (Error?) -> Void
+  )
+  func sendProviderMessage(
+    _ data: Data,
+    completion: @escaping (Result<Data?, Error>) -> Void
+  )
+  func stop()
+}
+
+final class NetworkExtensionPacketTunnelManagerStore: PacketTunnelManagerStore {
+  func loadManager(
+    providerBundleIdentifier: String,
+    completion: @escaping (Result<PacketTunnelManager, Error>) -> Void
+  ) {
+    NETunnelProviderManager.loadAllFromPreferences { managers, error in
+      if let error {
+        completion(.failure(error))
+        return
+      }
+
+      let manager = managers?.first { manager in
+        let tunnel = manager.protocolConfiguration as? NETunnelProviderProtocol
+        return tunnel?.providerBundleIdentifier == providerBundleIdentifier
+      } ?? NETunnelProviderManager()
+
+      let tunnel = NETunnelProviderProtocol()
+      tunnel.providerBundleIdentifier = providerBundleIdentifier
+      tunnel.serverAddress = "ManyTier Embedded Network"
+      tunnel.providerConfiguration = [:]
+      manager.localizedDescription = "ManyTier Embedded Network"
+      manager.protocolConfiguration = tunnel
+      manager.isEnabled = true
+      manager.saveToPreferences { error in
+        if let error {
+          completion(.failure(error))
+          return
+        }
+        manager.loadFromPreferences { error in
+          if let error {
+            completion(.failure(error))
+            return
+          }
+          completion(.success(NetworkExtensionPacketTunnelManager(manager: manager)))
+        }
+      }
+    }
+  }
+}
+
+final class NetworkExtensionPacketTunnelManager: PacketTunnelManager {
+  init(manager: NETunnelProviderManager) {
+    self.manager = manager
+  }
+
+  private let manager: NETunnelProviderManager
+
+  func start(
+    options: [String: NSObject],
+    completion: @escaping (Error?) -> Void
+  ) {
+    do {
+      try manager.connection.startVPNTunnel(options: options)
+      completion(nil)
+    } catch {
+      completion(error)
+    }
+  }
+
+  func sendProviderMessage(
+    _ data: Data,
+    completion: @escaping (Result<Data?, Error>) -> Void
+  ) {
+    guard let session = manager.connection as? NETunnelProviderSession else {
+      completion(.failure(VirtualNetworkAdapterError(
+        code: "not_available",
+        message: "No macOS virtual network interface is active.",
+        details: nil
+      )))
+      return
+    }
+    do {
+      try session.sendProviderMessage(data) { response in
+        completion(.success(response))
+      }
+    } catch {
+      completion(.failure(error))
+    }
+  }
+
+  func stop() {
+    manager.connection.stopVPNTunnel()
+  }
+}
+
+final class PacketTunnelVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
+  init(
+    configuration: PacketTunnelConfiguration = PacketTunnelConfiguration(),
+    store: PacketTunnelManagerStore = NetworkExtensionPacketTunnelManagerStore()
+  ) {
+    self.configuration = configuration
+    self.store = store
+  }
+
+  private let configuration: PacketTunnelConfiguration
+  private let store: PacketTunnelManagerStore
+  private var managers: [String: PacketTunnelManager] = [:]
+
+  var supportDetails: [String: Any] {
+    guard configuration.hasProviderBundleIdentifier,
+          let providerBundleIdentifier = configuration.providerBundleIdentifier else {
+      return [
+        "supported": false,
+        "platform": "macos",
+        "reason": "ManyTierPacketTunnelProviderBundleIdentifier is not configured.",
+        "requiredHandler": "NetworkExtension packet tunnel provider",
+      ]
+    }
+    return [
+      "supported": true,
+      "platform": "macos",
+      "providerBundleIdentifier": providerBundleIdentifier,
+      "requiredHandler": "NetworkExtension packet tunnel provider",
+    ]
+  }
+
+  func createVirtualNetwork(
+    _ request: VirtualNetworkRequest,
+    completion: @escaping (Result<Any?, Error>) -> Void
+  ) {
+    guard configuration.hasProviderBundleIdentifier,
+          let providerBundleIdentifier = configuration.providerBundleIdentifier else {
+      completion(.failure(VirtualNetworkAdapterError(
+        code: "unsupported",
+        message: "ManyTierPacketTunnelProviderBundleIdentifier is not configured.",
+        details: request.details
+      )))
+      return
+    }
+    guard let interfaceId = request.interfaceName, !interfaceId.isEmpty else {
+      completion(.failure(VirtualNetworkAdapterError(
+        code: "invalid_request",
+        message: "Virtual network interfaceName is required.",
+        details: request.details
+      )))
+      return
+    }
+
+    store.loadManager(providerBundleIdentifier: providerBundleIdentifier) { [weak self] result in
+      switch result {
+      case .failure(let error):
+        completion(.failure(VirtualNetworkAdapterError(
+          code: "manager_unavailable",
+          message: "\(error)",
+          details: request.details
+        )))
+      case .success(let manager):
+        do {
+          let message = try PacketTunnelProviderMessage.create(request).data()
+          manager.start(options: ["manytierMessage": message as NSData]) { error in
+            if let error {
+              completion(.failure(VirtualNetworkAdapterError(
+                code: "start_failed",
+                message: "\(error)",
+                details: request.details
+              )))
+              return
+            }
+            self?.managers[interfaceId] = manager
+            completion(.success(["interfaceId": interfaceId]))
+          }
+        } catch {
+          completion(.failure(VirtualNetworkAdapterError(
+            code: "message_encode_failed",
+            message: "\(error)",
+            details: request.details
+          )))
+        }
+      }
+    }
+  }
+
+  func writeVirtualPacket(
+    _ packet: VirtualNetworkPacket,
+    completion: @escaping (Result<Void, Error>) -> Void
+  ) {
+    guard let interfaceId = packet.interfaceId, let manager = managers[interfaceId] else {
+      completion(.failure(VirtualNetworkAdapterError(
+        code: "not_available",
+        message: "No macOS virtual network interface is active.",
+        details: packet.details
+      )))
+      return
+    }
+    do {
+      let message = try PacketTunnelProviderMessage.write(packet).data()
+      manager.sendProviderMessage(message) { result in
+        switch result {
+        case .success:
+          completion(.success(()))
+        case .failure(let error):
+          completion(.failure(VirtualNetworkAdapterError(
+            code: "write_failed",
+            message: "\(error)",
+            details: packet.details
+          )))
+        }
+      }
+    } catch {
+      completion(.failure(VirtualNetworkAdapterError(
+        code: "message_encode_failed",
+        message: "\(error)",
+        details: packet.details
+      )))
+    }
+  }
+
+  func closeVirtualNetwork(_ request: VirtualNetworkCloseRequest) {
+    guard let interfaceId = request.interfaceId else {
+      return
+    }
+    managers.removeValue(forKey: interfaceId)?.stop()
+  }
 }
 
 struct VirtualNetworkRequest {
@@ -170,6 +444,18 @@ struct VirtualNetworkRequest {
     details["routeCount"] = routes.count
     return details
   }
+
+  var packetTunnelPayload: [String: Any] {
+    [
+      "networkIdHex": networkIdHex ?? "",
+      "interfaceName": interfaceName ?? "",
+      "nodeAddress": manyTierIntBytes(nodeAddress),
+      "dictData": manyTierIntBytes(dictData),
+      "mtu": manyTierJsonValue(mtu),
+      "managedAddresses": managedAddresses.map(\.packetTunnelPayload),
+      "routes": routes.map(\.packetTunnelPayload),
+    ]
+  }
 }
 
 struct VirtualNetworkAddress: Equatable {
@@ -194,6 +480,15 @@ struct VirtualNetworkAddress: Equatable {
     }
     return values.compactMap(VirtualNetworkAddress.init(arguments:))
   }
+
+  var packetTunnelPayload: [String: Any] {
+    [
+      "family": family ?? "",
+      "address": address ?? "",
+      "prefixLength": manyTierJsonValue(prefixLength),
+      "bytes": manyTierIntBytes(bytes),
+    ]
+  }
 }
 
 struct VirtualNetworkRoute: Equatable {
@@ -216,6 +511,14 @@ struct VirtualNetworkRoute: Equatable {
       return []
     }
     return values.compactMap(VirtualNetworkRoute.init(arguments:))
+  }
+
+  var packetTunnelPayload: [String: Any] {
+    [
+      "target": target.packetTunnelPayload,
+      "gateway": manyTierJsonValue(gateway?.packetTunnelPayload),
+      "flags": manyTierJsonValue(flags),
+    ]
   }
 }
 
@@ -246,6 +549,14 @@ struct VirtualNetworkPacket {
     }
     details["packetLength"] = packet.count
     return details
+  }
+
+  var packetTunnelPayload: [String: Any] {
+    [
+      "interfaceId": interfaceId ?? "",
+      "networkIdHex": networkIdHex ?? "",
+      "packet": manyTierIntBytes(packet),
+    ]
   }
 }
 
@@ -291,4 +602,12 @@ func manyTierInt(_ value: Any?) -> Int? {
     return number.intValue
   }
   return nil
+}
+
+func manyTierIntBytes(_ bytes: [UInt8]) -> [Int] {
+  bytes.map(Int.init)
+}
+
+func manyTierJsonValue(_ value: Any?) -> Any {
+  value ?? NSNull()
 }
