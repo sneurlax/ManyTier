@@ -192,6 +192,26 @@ typedef _SendWhoisDart =
       int,
       ffi.Pointer<ffi.Size>,
     );
+typedef _ProcessVirtualFrameNative =
+    ffi.Int32 Function(
+      ffi.Pointer<_ManyTierNode>,
+      ffi.Uint64,
+      ffi.Uint16,
+      ffi.Pointer<ffi.Uint8>,
+      ffi.Size,
+      ffi.Uint64,
+      ffi.Pointer<ffi.Size>,
+    );
+typedef _ProcessVirtualFrameDart =
+    int Function(
+      ffi.Pointer<_ManyTierNode>,
+      int,
+      int,
+      ffi.Pointer<ffi.Uint8>,
+      int,
+      int,
+      ffi.Pointer<ffi.Size>,
+    );
 typedef _ActionCountNative =
     ffi.Int32 Function(ffi.Pointer<_ManyTierNode>, ffi.Pointer<ffi.Size>);
 typedef _ActionCountDart =
@@ -239,6 +259,10 @@ class _ManyTierFfiBindings {
       nodeSendWhois = library.lookupFunction<_SendWhoisNative, _SendWhoisDart>(
         'manytier_node_send_whois',
       ),
+      nodeProcessVirtualFrame = library
+          .lookupFunction<_ProcessVirtualFrameNative, _ProcessVirtualFrameDart>(
+            'manytier_node_process_virtual_frame',
+          ),
       nodeActionCount = library
           .lookupFunction<_ActionCountNative, _ActionCountDart>(
             'manytier_node_action_count',
@@ -265,6 +289,7 @@ class _ManyTierFfiBindings {
   final _CountCallDart nodeTick;
   final _ReceiveDart nodeReceivePacket;
   final _SendWhoisDart nodeSendWhois;
+  final _ProcessVirtualFrameDart nodeProcessVirtualFrame;
   final _ActionCountDart nodeActionCount;
   final _ActionViewDart nodeActionView;
   final _ClearActionsDart nodeClearActions;
@@ -384,6 +409,39 @@ class NativeEmbeddedNodeDriver implements EmbeddedNodeDriver, ffi.Finalizable {
     } finally {
       calloc.free(out);
       calloc.free(addressPtr);
+    }
+  }
+
+  @override
+  int processVirtualFrame(
+    int networkId,
+    int ethertype,
+    Uint8List payload,
+    int nowMs,
+  ) {
+    _checkOpen();
+    final payloadPtr = calloc<ffi.Uint8>(payload.isEmpty ? 1 : payload.length);
+    final out = calloc<ffi.Size>();
+    try {
+      if (payload.isNotEmpty) {
+        payloadPtr.asTypedList(payload.length).setAll(0, payload);
+      }
+      _checkStatus(
+        _bindings.nodeProcessVirtualFrame(
+          _handle,
+          networkId,
+          ethertype,
+          payloadPtr,
+          payload.length,
+          nowMs,
+          out,
+        ),
+        'node process virtual frame',
+      );
+      return out.value;
+    } finally {
+      calloc.free(out);
+      calloc.free(payloadPtr);
     }
   }
 

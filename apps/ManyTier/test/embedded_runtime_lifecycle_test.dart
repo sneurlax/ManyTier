@@ -4,6 +4,7 @@ import 'package:manytier_app/src/embedded/embedded_node.dart';
 import 'package:manytier_app/src/state/embedded_runtime_lifecycle.dart';
 
 import 'fakes/fake_embedded_runtime_starter.dart';
+import 'fakes/fake_embedded_virtual_network.dart';
 
 void main() {
   test('starts with default config and stops the runtime', () async {
@@ -55,6 +56,106 @@ void main() {
     final state = container.read(embeddedRuntimeLifecycleProvider);
     expect(state.actionCount, 1);
     expect(state.lastAction?.kind, EmbeddedNodeActionKind.networkConfigured);
+  });
+
+  test(
+    'routes virtual-network actions through configured interfaces',
+    () async {
+      final starter = FakeEmbeddedRuntimeStarter();
+      final virtualNetworks = FakeEmbeddedVirtualNetworkFactory();
+      final container = ProviderContainer(
+        overrides: <Override>[
+          embeddedRuntimeStarterProvider.overrideWithValue(starter),
+          embeddedVirtualNetworkFactoryProvider.overrideWithValue(
+            virtualNetworks,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      addTearDown(starter.dispose);
+
+      await container.read(embeddedRuntimeLifecycleProvider.notifier).start();
+      starter.actions.add(
+        EmbeddedNodeAction(
+          kind: EmbeddedNodeActionKind.networkConfigured,
+          networkId: 0x8056c2e21c000001,
+          data: const <int>[1, 2, 3],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(virtualNetworks.creates, hasLength(1));
+      expect(virtualNetworks.creates.single.networkId, 0x8056c2e21c000001);
+      expect(virtualNetworks.creates.single.nodeAddress, <int>[
+        0xfa,
+        0xa9,
+        0,
+        0xda,
+        0x4a,
+      ]);
+      expect(virtualNetworks.creates.single.dictData, <int>[1, 2, 3]);
+
+      starter.actions.add(
+        EmbeddedNodeAction(
+          kind: EmbeddedNodeActionKind.frameReceived,
+          networkId: 0x8056c2e21c000001,
+          ethertype: 0x0800,
+          data: const <int>[0x45, 1],
+        ),
+      );
+      starter.actions.add(
+        EmbeddedNodeAction(
+          kind: EmbeddedNodeActionKind.localReply,
+          networkId: 0x8056c2e21c000001,
+          ethertype: 0x0806,
+          data: const <int>[0xaa, 0xbb],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(virtualNetworks.interfaces.single.writes, hasLength(2));
+      expect(virtualNetworks.interfaces.single.writes[0], <int>[0x45, 1]);
+      expect(virtualNetworks.interfaces.single.writes[1], <int>[0xaa, 0xbb]);
+
+      await virtualNetworks.interfaces.single.addPacket(<int>[0x45, 0, 0, 20]);
+
+      expect(starter.virtualPackets, hasLength(1));
+      expect(starter.virtualPackets.single.networkId, 0x8056c2e21c000001);
+      expect(starter.virtualPackets.single.packet, <int>[0x45, 0, 0, 20]);
+      expect(container.read(embeddedRuntimeLifecycleProvider).actionCount, 3);
+    },
+  );
+
+  test('stopping a runtime closes virtual interfaces', () async {
+    final starter = FakeEmbeddedRuntimeStarter();
+    final virtualNetworks = FakeEmbeddedVirtualNetworkFactory();
+    final container = ProviderContainer(
+      overrides: <Override>[
+        embeddedRuntimeStarterProvider.overrideWithValue(starter),
+        embeddedVirtualNetworkFactoryProvider.overrideWithValue(
+          virtualNetworks,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(starter.dispose);
+
+    await container.read(embeddedRuntimeLifecycleProvider.notifier).start();
+    starter.actions.add(
+      EmbeddedNodeAction(
+        kind: EmbeddedNodeActionKind.networkConfigured,
+        networkId: 0x8056c2e21c000001,
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    await container.read(embeddedRuntimeLifecycleProvider.notifier).stop();
+
+    expect(virtualNetworks.interfaces.single.closeCalls, 1);
+    expect(starter.closes, 1);
   });
 
   test('reports unsupported platforms without starting', () async {

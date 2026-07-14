@@ -16,6 +16,7 @@ class FakeEmbeddedRuntimeStarter implements EmbeddedRuntimeStarter {
   final List<EmbeddedNodeRuntimeConfig> starts = <EmbeddedNodeRuntimeConfig>[];
   final StreamController<EmbeddedNodeAction> actions =
       StreamController<EmbeddedNodeAction>.broadcast();
+  final List<FakeVirtualPacket> virtualPackets = <FakeVirtualPacket>[];
   int closes = 0;
   Object? nextStartError;
 
@@ -46,6 +47,9 @@ class FakeEmbeddedRuntimeStarter implements EmbeddedRuntimeStarter {
       config: config,
       address: Uint8List.fromList(<int>[0xfa, 0xa9, 0, 0xda, 0x4a]),
       actions: actions.stream,
+      receiveVirtualPacket: (networkId, packet) async {
+        virtualPackets.add(FakeVirtualPacket(networkId, packet));
+      },
       close: () async {
         closes++;
       },
@@ -53,4 +57,12 @@ class FakeEmbeddedRuntimeStarter implements EmbeddedRuntimeStarter {
   }
 
   Future<void> dispose() => actions.close();
+}
+
+class FakeVirtualPacket {
+  FakeVirtualPacket(this.networkId, Uint8List packet)
+    : packet = Uint8List.fromList(packet);
+
+  final int networkId;
+  final Uint8List packet;
 }

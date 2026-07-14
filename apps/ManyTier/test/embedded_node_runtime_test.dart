@@ -332,6 +332,16 @@ class _RuntimeTestDriver implements EmbeddedNodeDriver {
   int sendWhois(List<List<int>> addresses, int nowMs) => 0;
 
   @override
+  int processVirtualFrame(
+    int networkId,
+    int ethertype,
+    Uint8List payload,
+    int nowMs,
+  ) {
+    return 0;
+  }
+
+  @override
   int actionCount() => actions.length;
 
   @override

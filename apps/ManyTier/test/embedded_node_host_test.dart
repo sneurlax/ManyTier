@@ -165,6 +165,62 @@ void main() {
     },
   );
 
+  test(
+    'receiveVirtualPacket forwards IP packets into the node session',
+    () async {
+      final driver = _HostTestDriver()
+        ..processVirtualFrameActions = <EmbeddedNodeAction>[
+          EmbeddedNodeAction(
+            kind: EmbeddedNodeActionKind.localReply,
+            networkId: 0x8056c2e21c000001,
+            ethertype: 0x0800,
+            data: const <int>[0x45, 1],
+          ),
+        ];
+      final endpoint = _FakeDatagramEndpoint();
+      final emitted = <EmbeddedNodeAction>[];
+      final host = EmbeddedNodeHost(
+        session: EmbeddedNodeSession(driver),
+        endpoint: endpoint,
+        clock: () => 5000,
+        tickInterval: Duration.zero,
+      );
+      addTearDown(host.close);
+      host.actions.listen(emitted.add);
+
+      await host.receiveVirtualPacket(
+        0x8056c2e21c000001,
+        Uint8List.fromList(<int>[0x45, 0, 0, 20]),
+      );
+
+      expect(driver.processVirtualFrameCalls, <int>[5000]);
+      expect(driver.lastVirtualNetworkId, 0x8056c2e21c000001);
+      expect(driver.lastVirtualEthertype, 0x0800);
+      expect(driver.lastVirtualPayload, <int>[0x45, 0, 0, 20]);
+      expect(endpoint.sent, isEmpty);
+      expect(emitted.single.kind, EmbeddedNodeActionKind.localReply);
+      expect(emitted.single.networkId, 0x8056c2e21c000001);
+      expect(emitted.single.ethertype, 0x0800);
+      expect(driver.clearCalls, 1);
+    },
+  );
+
+  test('receiveVirtualPacket ignores empty and unknown packets', () async {
+    final driver = _HostTestDriver();
+    final host = EmbeddedNodeHost(
+      session: EmbeddedNodeSession(driver),
+      endpoint: _FakeDatagramEndpoint(),
+      tickInterval: Duration.zero,
+    );
+    addTearDown(host.close);
+
+    await host.receiveVirtualPacket(1, Uint8List(0));
+    await host.receiveVirtualPacket(1, Uint8List.fromList(<int>[0x10]));
+
+    expect(driver.processVirtualFrameCalls, isEmpty);
+    expect(driver.clearCalls, 0);
+  });
+
   test('close tears down the session and endpoint once', () async {
     final driver = _HostTestDriver();
     final endpoint = _FakeDatagramEndpoint();
@@ -188,15 +244,20 @@ class _HostTestDriver implements EmbeddedNodeDriver {
   List<EmbeddedNodeAction> tickActions = <EmbeddedNodeAction>[];
   List<EmbeddedNodeAction> receiveActions = <EmbeddedNodeAction>[];
   List<EmbeddedNodeAction> sendWhoisActions = <EmbeddedNodeAction>[];
+  List<EmbeddedNodeAction> processVirtualFrameActions = <EmbeddedNodeAction>[];
   List<EmbeddedNodeAction> actions = <EmbeddedNodeAction>[];
   List<int> bootstrapCalls = <int>[];
   List<int> tickCalls = <int>[];
   List<int> receiveCalls = <int>[];
   List<int> sendWhoisCalls = <int>[];
+  List<int> processVirtualFrameCalls = <int>[];
   List<List<int>> receivedPackets = <List<int>>[];
   List<List<int>> lastWhoisAddresses = <List<int>>[];
   Uint8List? lastPacket;
   EmbeddedSocketAddress? lastFrom;
+  int? lastVirtualNetworkId;
+  int? lastVirtualEthertype;
+  Uint8List? lastVirtualPayload;
   int clearCalls = 0;
   int closeCalls = 0;
 
@@ -234,6 +295,21 @@ class _HostTestDriver implements EmbeddedNodeDriver {
       addresses.map((address) => List<int>.unmodifiable(address)),
     );
     actions = List<EmbeddedNodeAction>.from(sendWhoisActions);
+    return actions.length;
+  }
+
+  @override
+  int processVirtualFrame(
+    int networkId,
+    int ethertype,
+    Uint8List payload,
+    int nowMs,
+  ) {
+    processVirtualFrameCalls.add(nowMs);
+    lastVirtualNetworkId = networkId;
+    lastVirtualEthertype = ethertype;
+    lastVirtualPayload = Uint8List.fromList(payload);
+    actions = List<EmbeddedNodeAction>.from(processVirtualFrameActions);
     return actions.length;
   }
 

@@ -9,6 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../embedded/embedded_node.dart';
 import '../embedded/embedded_node_runtime.dart';
 import '../embedded/embedded_node_runtime_factory.dart';
+import '../embedded/embedded_virtual_network.dart';
 import 'service_lifecycle.dart';
 
 class StartedEmbeddedRuntime {
@@ -16,6 +17,7 @@ class StartedEmbeddedRuntime {
     required this.config,
     required this.address,
     required this.actions,
+    required this.receiveVirtualPacket,
     required this.close,
   });
 
@@ -24,6 +26,9 @@ class StartedEmbeddedRuntime {
       config: runtime.config,
       address: runtime.address,
       actions: runtime.actions,
+      receiveVirtualPacket: (networkId, packet) {
+        return runtime.host.receiveVirtualPacket(networkId, packet);
+      },
       close: runtime.close,
     );
   }
@@ -31,6 +36,7 @@ class StartedEmbeddedRuntime {
   final EmbeddedNodeRuntimeConfig config;
   final Uint8List address;
   final Stream<EmbeddedNodeAction> actions;
+  final EmbeddedVirtualPacketSink receiveVirtualPacket;
   final Future<void> Function() close;
 
   String get addressHex => _hex(address);
@@ -140,6 +146,11 @@ final embeddedRuntimeStarterProvider = Provider<EmbeddedRuntimeStarter>((ref) {
   );
 });
 
+final embeddedVirtualNetworkFactoryProvider =
+    Provider<EmbeddedVirtualNetworkFactory>((ref) {
+      return const UnsupportedEmbeddedVirtualNetworkFactory();
+    });
+
 final embeddedRuntimeLifecycleProvider =
     StateNotifierProvider<
       EmbeddedRuntimeLifecycleController,
@@ -155,6 +166,7 @@ class EmbeddedRuntimeLifecycleController
 
   final Ref _ref;
   StreamSubscription<EmbeddedNodeAction>? _actions;
+  EmbeddedVirtualNetworkCoordinator? _virtualNetworks;
 
   EmbeddedRuntimeStarter get _starter =>
       _ref.read(embeddedRuntimeStarterProvider);
@@ -202,8 +214,18 @@ class EmbeddedRuntimeLifecycleController
     try {
       final runtime = await _starter.start(startConfig);
       unawaited(_actions?.cancel());
+      unawaited(_virtualNetworks?.close());
+      _virtualNetworks = EmbeddedVirtualNetworkCoordinator(
+        factory: _ref.read(embeddedVirtualNetworkFactoryProvider),
+        packetSink: runtime.receiveVirtualPacket,
+        nodeAddress: runtime.address,
+        onError: (error, stackTrace) {
+          if (!mounted) return;
+          state = state.copyWith(error: '$error');
+        },
+      );
       _actions = runtime.actions.listen(
-        _recordAction,
+        _handleRuntimeAction,
         onError: (Object error, StackTrace stackTrace) {
           state = state.copyWith(error: '$error');
         },
@@ -223,6 +245,9 @@ class EmbeddedRuntimeLifecycleController
     try {
       unawaited(_actions?.cancel());
       _actions = null;
+      final virtualNetworks = _virtualNetworks;
+      _virtualNetworks = null;
+      await virtualNetworks?.close();
       await runtime.close();
       state = const EmbeddedRuntimeLifecycleState();
     } on Object catch (e) {
@@ -230,17 +255,34 @@ class EmbeddedRuntimeLifecycleController
     }
   }
 
-  void _recordAction(EmbeddedNodeAction action) {
+  void _handleRuntimeAction(EmbeddedNodeAction action) {
     state = state.copyWith(
       actionCount: state.actionCount + 1,
       lastAction: action,
       clearError: true,
     );
+    final virtualNetworks = _virtualNetworks;
+    if (virtualNetworks != null) {
+      unawaited(_routeVirtualNetworkAction(virtualNetworks, action));
+    }
+  }
+
+  Future<void> _routeVirtualNetworkAction(
+    EmbeddedVirtualNetworkCoordinator virtualNetworks,
+    EmbeddedNodeAction action,
+  ) async {
+    try {
+      await virtualNetworks.handleAction(action);
+    } on Object catch (e) {
+      if (!mounted) return;
+      state = state.copyWith(error: '$e');
+    }
   }
 
   @override
   void dispose() {
     unawaited(_actions?.cancel());
+    unawaited(_virtualNetworks?.close());
     final runtime = state.runtime;
     if (runtime != null) {
       unawaited(runtime.close());

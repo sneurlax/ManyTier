@@ -375,6 +375,41 @@ pub unsafe extern "C" fn manytier_node_send_whois(
     ManyTierFfiStatus::Ok
 }
 
+/// Process an outbound virtual-network packet and store the resulting actions.
+#[no_mangle]
+pub unsafe extern "C" fn manytier_node_process_virtual_frame(
+    node: *mut ManyTierNode,
+    network_id: u64,
+    ethertype: u16,
+    payload_ptr: *const u8,
+    payload_len: usize,
+    now_ms: u64,
+    out_action_count: *mut usize,
+) -> ManyTierFfiStatus {
+    if node.is_null() || out_action_count.is_null() {
+        return ManyTierFfiStatus::NullPointer;
+    }
+    let payload = match unsafe_slice(payload_ptr, payload_len) {
+        Some(payload) => payload,
+        None => return ManyTierFfiStatus::NullPointer,
+    };
+
+    let handle = unsafe { &mut *node };
+    let our_address = *handle.node.identity.address.as_bytes();
+    handle.actions = zerotier_node::vl2::process_outbound_frame(
+        &mut handle.node,
+        network_id,
+        ethertype,
+        payload,
+        &our_address,
+        now_ms,
+    );
+    unsafe {
+        *out_action_count = handle.actions.len();
+    }
+    ManyTierFfiStatus::Ok
+}
+
 /// Return the number of actions currently stored on the handle.
 #[no_mangle]
 pub unsafe extern "C" fn manytier_node_action_count(
@@ -779,6 +814,56 @@ mod tests {
             unsafe { manytier_node_send_whois(node, ptr::null(), 0, 12_500, &mut action_count) };
         assert_eq!(status, ManyTierFfiStatus::Ok);
         assert_eq!(action_count, 0);
+
+        unsafe { manytier_node_free(node) };
+    }
+
+    #[test]
+    fn process_virtual_frame_stores_actions() {
+        let node = new_test_node();
+        let packet = [0x45, 0, 0, 20];
+        let mut action_count = usize::MAX;
+
+        let status = unsafe {
+            manytier_node_process_virtual_frame(
+                node,
+                0x8056_c2e2_1c00_0001,
+                0x0800,
+                packet.as_ptr(),
+                packet.len(),
+                13_000,
+                &mut action_count,
+            )
+        };
+
+        assert_eq!(status, ManyTierFfiStatus::Ok);
+        assert_eq!(action_count, 0);
+
+        let status = unsafe {
+            manytier_node_process_virtual_frame(
+                node,
+                0x8056_c2e2_1c00_0001,
+                0x0800,
+                ptr::null(),
+                packet.len(),
+                13_000,
+                &mut action_count,
+            )
+        };
+        assert_eq!(status, ManyTierFfiStatus::NullPointer);
+
+        let status = unsafe {
+            manytier_node_process_virtual_frame(
+                node,
+                0x8056_c2e2_1c00_0001,
+                0x0800,
+                packet.as_ptr(),
+                packet.len(),
+                13_000,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ManyTierFfiStatus::NullPointer);
 
         unsafe { manytier_node_free(node) };
     }

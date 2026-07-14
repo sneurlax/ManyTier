@@ -134,6 +134,29 @@ void main() {
       );
     });
 
+    test('processVirtualFrame validates metadata and collects actions', () {
+      final driver = _FakeEmbeddedNodeDriver();
+      final session = EmbeddedNodeSession(driver);
+      final actions = session.processVirtualFrame(
+        0x8056c2e21c000001,
+        0x0800,
+        Uint8List.fromList(<int>[0x45, 0, 0, 20]),
+        2700,
+      );
+
+      expect(driver.processVirtualFrameCalls, <int>[2700]);
+      expect(driver.lastVirtualNetworkId, 0x8056c2e21c000001);
+      expect(driver.lastVirtualEthertype, 0x0800);
+      expect(driver.lastVirtualPayload, <int>[0x45, 0, 0, 20]);
+      expect(actions.single.kind, EmbeddedNodeActionKind.sendTo);
+      expect(actions.single.data, <int>[8, 8, 8]);
+
+      expect(
+        () => session.processVirtualFrame(1, 0x1ffff, Uint8List(0), 1),
+        throwsRangeError,
+      );
+    });
+
     test('zeroTierAddressList decodes flat WHOIS action payloads', () {
       final action = EmbeddedNodeAction(
         kind: EmbeddedNodeActionKind.whoisNeeded,
@@ -242,9 +265,13 @@ class _FakeEmbeddedNodeDriver implements EmbeddedNodeDriver {
   List<int> tickCalls = <int>[];
   List<int> receiveCalls = <int>[];
   List<int> sendWhoisCalls = <int>[];
+  List<int> processVirtualFrameCalls = <int>[];
   Uint8List? lastPacket;
   EmbeddedSocketAddress? lastFrom;
   List<List<int>> lastWhoisAddresses = <List<int>>[];
+  int? lastVirtualNetworkId;
+  int? lastVirtualEthertype;
+  Uint8List? lastVirtualPayload;
   int clearCalls = 0;
   int closeCalls = 0;
 
@@ -305,6 +332,27 @@ class _FakeEmbeddedNodeDriver implements EmbeddedNodeDriver {
         kind: EmbeddedNodeActionKind.sendTo,
         socketAddress: EmbeddedSocketAddress.ipv4(203, 0, 113, 2, 9993),
         data: const <int>[4, 5, 6],
+      ),
+    ];
+    return actions.length;
+  }
+
+  @override
+  int processVirtualFrame(
+    int networkId,
+    int ethertype,
+    Uint8List payload,
+    int nowMs,
+  ) {
+    processVirtualFrameCalls.add(nowMs);
+    lastVirtualNetworkId = networkId;
+    lastVirtualEthertype = ethertype;
+    lastVirtualPayload = Uint8List.fromList(payload);
+    actions = <EmbeddedNodeAction>[
+      EmbeddedNodeAction(
+        kind: EmbeddedNodeActionKind.sendTo,
+        socketAddress: EmbeddedSocketAddress.ipv4(192, 0, 2, 1, 9993),
+        data: const <int>[8, 8, 8],
       ),
     ];
     return actions.length;

@@ -158,6 +158,12 @@ abstract interface class EmbeddedNodeDriver {
   int tick(int nowMs);
   int receivePacket(Uint8List packet, EmbeddedSocketAddress from, int nowMs);
   int sendWhois(List<List<int>> addresses, int nowMs);
+  int processVirtualFrame(
+    int networkId,
+    int ethertype,
+    Uint8List payload,
+    int nowMs,
+  );
   int actionCount();
   EmbeddedNodeAction actionAt(int index);
   void clearActions();
@@ -197,6 +203,23 @@ class EmbeddedNodeSession {
   List<EmbeddedNodeAction> sendWhois(List<List<int>> addresses, int nowMs) {
     _checkOpen();
     return _collect(_driver.sendWhois(_normalizeZtAddresses(addresses), nowMs));
+  }
+
+  List<EmbeddedNodeAction> processVirtualFrame(
+    int networkId,
+    int ethertype,
+    Uint8List payload,
+    int nowMs,
+  ) {
+    _checkOpen();
+    // ZeroTier network ids are u64 values; Dart may surface high-bit ids as
+    // negative ints while preserving the bit pattern for the FFI Uint64 call.
+    if (ethertype < 0 || ethertype > 0xffff) {
+      throw RangeError.range(ethertype, 0, 0xffff, 'ethertype');
+    }
+    return _collect(
+      _driver.processVirtualFrame(networkId, ethertype, payload, nowMs),
+    );
   }
 
   List<EmbeddedNodeAction> get pendingActions {

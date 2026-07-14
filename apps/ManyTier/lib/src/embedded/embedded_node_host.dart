@@ -77,6 +77,26 @@ class EmbeddedNodeHost {
     return _enqueue(() => _receiveDatagram(datagram, nowMs: nowMs));
   }
 
+  Future<void> receiveVirtualPacket(
+    int networkId,
+    Uint8List packet, {
+    int? nowMs,
+  }) {
+    _checkOpen();
+    final ethertype = _ethertypeForVirtualPacket(packet);
+    if (ethertype == null) return Future<void>.value();
+    return _enqueue(
+      () => _handleActions(
+        _session.processVirtualFrame(
+          networkId,
+          ethertype,
+          packet,
+          nowMs ?? _clock(),
+        ),
+      ),
+    );
+  }
+
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
@@ -134,4 +154,13 @@ class EmbeddedNodeHost {
       throw const EmbeddedNodeException('Embedded node host is closed.');
     }
   }
+}
+
+int? _ethertypeForVirtualPacket(Uint8List packet) {
+  if (packet.isEmpty) return null;
+  return switch (packet[0] >> 4) {
+    4 => 0x0800,
+    6 => 0x86dd,
+    _ => null,
+  };
 }
