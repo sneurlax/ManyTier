@@ -127,6 +127,11 @@ abstract interface class EmbeddedVirtualNetworkFactory {
   );
 }
 
+abstract interface class DisposableEmbeddedVirtualNetworkFactory
+    implements EmbeddedVirtualNetworkFactory {
+  Future<void> dispose();
+}
+
 class UnsupportedEmbeddedVirtualNetworkFactory
     implements EmbeddedVirtualNetworkFactory {
   const UnsupportedEmbeddedVirtualNetworkFactory({
@@ -194,6 +199,10 @@ class EmbeddedVirtualNetworkCoordinator {
     _interfaces.clear();
     for (final binding in bindings) {
       await binding.close();
+    }
+    final factory = _factory;
+    if (factory is DisposableEmbeddedVirtualNetworkFactory) {
+      await factory.dispose();
     }
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:manytier_app/src/embedded/embedded_node.dart';
+import 'package:manytier_app/src/embedded/embedded_virtual_network.dart';
 import 'package:manytier_app/src/state/embedded_runtime_lifecycle.dart';
 
 import 'fakes/fake_embedded_runtime_starter.dart';
@@ -12,6 +13,9 @@ void main() {
     final container = ProviderContainer(
       overrides: <Override>[
         embeddedRuntimeStarterProvider.overrideWithValue(starter),
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          _unsupportedVirtualNetworkResolver,
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -39,6 +43,9 @@ void main() {
     final container = ProviderContainer(
       overrides: <Override>[
         embeddedRuntimeStarterProvider.overrideWithValue(starter),
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          _unsupportedVirtualNetworkResolver,
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -66,8 +73,8 @@ void main() {
       final container = ProviderContainer(
         overrides: <Override>[
           embeddedRuntimeStarterProvider.overrideWithValue(starter),
-          embeddedVirtualNetworkFactoryProvider.overrideWithValue(
-            virtualNetworks,
+          embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+            () async => virtualNetworks,
           ),
         ],
       );
@@ -134,8 +141,8 @@ void main() {
     final container = ProviderContainer(
       overrides: <Override>[
         embeddedRuntimeStarterProvider.overrideWithValue(starter),
-        embeddedVirtualNetworkFactoryProvider.overrideWithValue(
-          virtualNetworks,
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          () async => virtualNetworks,
         ),
       ],
     );
@@ -158,11 +165,95 @@ void main() {
     expect(starter.closes, 1);
   });
 
+  test('resolved unsupported virtual-network factories are no-ops', () async {
+    final starter = FakeEmbeddedRuntimeStarter();
+    final virtualNetworks = FakeEmbeddedVirtualNetworkFactory(
+      supported: false,
+      reason: 'packet tunnel unavailable',
+    );
+    final container = ProviderContainer(
+      overrides: <Override>[
+        embeddedRuntimeStarterProvider.overrideWithValue(starter),
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          () async => virtualNetworks,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(starter.dispose);
+
+    await container.read(embeddedRuntimeLifecycleProvider.notifier).start();
+    starter.actions.add(
+      EmbeddedNodeAction(
+        kind: EmbeddedNodeActionKind.networkConfigured,
+        networkId: 0x8056c2e21c000001,
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(starter.starts, hasLength(1));
+    expect(virtualNetworks.creates, isEmpty);
+    expect(container.read(embeddedRuntimeLifecycleProvider).error, isNull);
+  });
+
+  test('stopping a runtime disposes the resolved virtual factory', () async {
+    final starter = FakeEmbeddedRuntimeStarter();
+    final virtualNetworks = DisposableFakeEmbeddedVirtualNetworkFactory();
+    final container = ProviderContainer(
+      overrides: <Override>[
+        embeddedRuntimeStarterProvider.overrideWithValue(starter),
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          () async => virtualNetworks,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(starter.dispose);
+
+    await container.read(embeddedRuntimeLifecycleProvider.notifier).start();
+
+    await container.read(embeddedRuntimeLifecycleProvider.notifier).stop();
+
+    expect(virtualNetworks.disposeCalls, 1);
+    expect(starter.closes, 1);
+  });
+
+  test(
+    'closes a started runtime when virtual factory resolution fails',
+    () async {
+      final starter = FakeEmbeddedRuntimeStarter();
+      final container = ProviderContainer(
+        overrides: <Override>[
+          embeddedRuntimeStarterProvider.overrideWithValue(starter),
+          embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+            () async {
+              throw StateError('support probe failed');
+            },
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      addTearDown(starter.dispose);
+
+      await container.read(embeddedRuntimeLifecycleProvider.notifier).start();
+
+      final state = container.read(embeddedRuntimeLifecycleProvider);
+      expect(starter.starts, hasLength(1));
+      expect(starter.closes, 1);
+      expect(state.runtime, isNull);
+      expect(state.error, contains('support probe failed'));
+    },
+  );
+
   test('reports unsupported platforms without starting', () async {
     final starter = FakeEmbeddedRuntimeStarter(supported: false);
     final container = ProviderContainer(
       overrides: <Override>[
         embeddedRuntimeStarterProvider.overrideWithValue(starter),
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          _unsupportedVirtualNetworkResolver,
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -182,6 +273,9 @@ void main() {
     final container = ProviderContainer(
       overrides: <Override>[
         embeddedRuntimeStarterProvider.overrideWithValue(starter),
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          _unsupportedVirtualNetworkResolver,
+        ),
       ],
     );
     addTearDown(starter.dispose);
@@ -191,4 +285,9 @@ void main() {
 
     expect(starter.closes, 1);
   });
+}
+
+Future<EmbeddedVirtualNetworkFactory>
+_unsupportedVirtualNetworkResolver() async {
+  return const UnsupportedEmbeddedVirtualNetworkFactory();
 }

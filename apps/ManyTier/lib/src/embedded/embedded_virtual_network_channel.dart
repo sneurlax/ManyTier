@@ -33,7 +33,7 @@ class EmbeddedVirtualNetworkSupport {
 }
 
 class MethodChannelEmbeddedVirtualNetworkFactory
-    implements EmbeddedVirtualNetworkFactory {
+    implements DisposableEmbeddedVirtualNetworkFactory {
   MethodChannelEmbeddedVirtualNetworkFactory({
     MethodChannel? channel,
     this.supported = true,
@@ -121,6 +121,7 @@ class MethodChannelEmbeddedVirtualNetworkFactory
     };
   }
 
+  @override
   Future<void> dispose() async {
     _channel.setMethodCallHandler(null);
     final interfaces = List<_MethodChannelEmbeddedVirtualNetworkInterface>.from(

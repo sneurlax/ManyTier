@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:manyui/manyui.dart';
 import 'package:manytier_app/src/api/manytier_client.dart';
+import 'package:manytier_app/src/embedded/embedded_virtual_network.dart';
 import 'package:manytier_app/src/networks/networks_page.dart';
 import 'package:manytier_app/src/state/connection.dart';
 import 'package:manytier_app/src/state/embedded_runtime_lifecycle.dart';
@@ -251,6 +252,9 @@ void main() {
           client,
           overrides: <Override>[
             embeddedRuntimeStarterProvider.overrideWithValue(embeddedStarter),
+            embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+              () async => const UnsupportedEmbeddedVirtualNetworkFactory(),
+            ),
           ],
         ),
       );

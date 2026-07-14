@@ -41,6 +41,17 @@ class FakeEmbeddedVirtualNetworkFactory
   }
 }
 
+class DisposableFakeEmbeddedVirtualNetworkFactory
+    extends FakeEmbeddedVirtualNetworkFactory
+    implements DisposableEmbeddedVirtualNetworkFactory {
+  int disposeCalls = 0;
+
+  @override
+  Future<void> dispose() async {
+    disposeCalls++;
+  }
+}
+
 class FakeEmbeddedVirtualNetworkInterface
     implements EmbeddedVirtualNetworkInterface {
   FakeEmbeddedVirtualNetworkInterface(this.networkId);

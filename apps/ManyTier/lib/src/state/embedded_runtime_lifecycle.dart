@@ -10,7 +10,11 @@ import '../embedded/embedded_node.dart';
 import '../embedded/embedded_node_runtime.dart';
 import '../embedded/embedded_node_runtime_factory.dart';
 import '../embedded/embedded_virtual_network.dart';
+import '../embedded/embedded_virtual_network_channel.dart';
 import 'service_lifecycle.dart';
+
+typedef EmbeddedVirtualNetworkFactoryResolver =
+    Future<EmbeddedVirtualNetworkFactory> Function();
 
 class StartedEmbeddedRuntime {
   const StartedEmbeddedRuntime({
@@ -146,9 +150,9 @@ final embeddedRuntimeStarterProvider = Provider<EmbeddedRuntimeStarter>((ref) {
   );
 });
 
-final embeddedVirtualNetworkFactoryProvider =
-    Provider<EmbeddedVirtualNetworkFactory>((ref) {
-      return const UnsupportedEmbeddedVirtualNetworkFactory();
+final embeddedVirtualNetworkFactoryResolverProvider =
+    Provider<EmbeddedVirtualNetworkFactoryResolver>((ref) {
+      return _resolveDefaultEmbeddedVirtualNetworkFactory;
     });
 
 final embeddedRuntimeLifecycleProvider =
@@ -213,17 +217,39 @@ class EmbeddedRuntimeLifecycleController
     );
     try {
       final runtime = await _starter.start(startConfig);
-      unawaited(_actions?.cancel());
-      unawaited(_virtualNetworks?.close());
-      _virtualNetworks = EmbeddedVirtualNetworkCoordinator(
-        factory: _ref.read(embeddedVirtualNetworkFactoryProvider),
-        packetSink: runtime.receiveVirtualPacket,
-        nodeAddress: runtime.address,
-        onError: (error, stackTrace) {
-          if (!mounted) return;
-          state = state.copyWith(error: '$error');
-        },
-      );
+      EmbeddedVirtualNetworkFactory? virtualNetworkFactory;
+      var factoryOwnedByCoordinator = false;
+      try {
+        virtualNetworkFactory = await _ref.read(
+          embeddedVirtualNetworkFactoryResolverProvider,
+        )();
+        if (!mounted) {
+          await _disposeVirtualNetworkFactory(virtualNetworkFactory);
+          await runtime.close();
+          return;
+        }
+        final previousVirtualNetworks = _virtualNetworks;
+        _virtualNetworks = null;
+        unawaited(_actions?.cancel());
+        _actions = null;
+        await previousVirtualNetworks?.close();
+        _virtualNetworks = EmbeddedVirtualNetworkCoordinator(
+          factory: virtualNetworkFactory,
+          packetSink: runtime.receiveVirtualPacket,
+          nodeAddress: runtime.address,
+          onError: (error, stackTrace) {
+            if (!mounted) return;
+            state = state.copyWith(error: '$error');
+          },
+        );
+        factoryOwnedByCoordinator = true;
+      } catch (_) {
+        if (!factoryOwnedByCoordinator) {
+          await _disposeVirtualNetworkFactory(virtualNetworkFactory);
+        }
+        await runtime.close();
+        rethrow;
+      }
       _actions = runtime.actions.listen(
         _handleRuntimeAction,
         onError: (Object error, StackTrace stackTrace) {
@@ -288,6 +314,28 @@ class EmbeddedRuntimeLifecycleController
       unawaited(runtime.close());
     }
     super.dispose();
+  }
+}
+
+Future<EmbeddedVirtualNetworkFactory>
+_resolveDefaultEmbeddedVirtualNetworkFactory() async {
+  final factory = MethodChannelEmbeddedVirtualNetworkFactory();
+  final support = await factory.checkSupport();
+  if (support.isSupported) {
+    return factory;
+  }
+  await factory.dispose();
+  return UnsupportedEmbeddedVirtualNetworkFactory(
+    unsupportedReason:
+        support.reason ?? 'Native virtual network devices are unavailable.',
+  );
+}
+
+Future<void> _disposeVirtualNetworkFactory(
+  EmbeddedVirtualNetworkFactory? factory,
+) async {
+  if (factory is DisposableEmbeddedVirtualNetworkFactory) {
+    await factory.dispose();
   }
 }
 
