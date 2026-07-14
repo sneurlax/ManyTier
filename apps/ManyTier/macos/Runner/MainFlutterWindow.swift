@@ -38,6 +38,9 @@ final class ManyTierVirtualNetworkChannel {
       binaryMessenger: messenger
     )
     channel.setMethodCallHandler(handle)
+    adapter.onVirtualPacket = { [weak self] packet in
+      self?.emitVirtualPacket(packet)
+    }
   }
 
   private func handle(call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -60,9 +63,17 @@ final class ManyTierVirtualNetworkChannel {
       result(FlutterMethodNotImplemented)
     }
   }
+
+  private func emitVirtualPacket(_ packet: VirtualNetworkPacket) {
+    let arguments = packet.channelArguments
+    DispatchQueue.main.async { [channel] in
+      channel.invokeMethod("virtualPacket", arguments: arguments)
+    }
+  }
 }
 
-protocol ManyTierVirtualNetworkAdapter {
+protocol ManyTierVirtualNetworkAdapter: AnyObject {
+  var onVirtualPacket: ((VirtualNetworkPacket) -> Void)? { get set }
   var supportDetails: [String: Any] { get }
 
   func createVirtualNetwork(
@@ -109,6 +120,8 @@ func flutterResult(from result: Result<Void, Error>) -> Any? {
 }
 
 final class UnsupportedVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
+  var onVirtualPacket: ((VirtualNetworkPacket) -> Void)?
+
   var supportDetails: [String: Any] {
     [
       "supported": false,
@@ -181,6 +194,70 @@ protocol PacketTunnelManager: AnyObject {
     completion: @escaping (Result<Data?, Error>) -> Void
   )
   func stop()
+}
+
+protocol PacketTunnelDrainTimer: AnyObject {
+  func cancel()
+}
+
+protocol PacketTunnelDrainScheduler {
+  func scheduleRepeating(
+    interval: TimeInterval,
+    fire: @escaping () -> Void
+  ) -> PacketTunnelDrainTimer
+}
+
+final class DispatchPacketTunnelDrainScheduler: PacketTunnelDrainScheduler {
+  func scheduleRepeating(
+    interval: TimeInterval,
+    fire: @escaping () -> Void
+  ) -> PacketTunnelDrainTimer {
+    DispatchPacketTunnelDrainTimer(interval: interval, fire: fire)
+  }
+}
+
+private final class DispatchPacketTunnelDrainTimer: PacketTunnelDrainTimer {
+  init(interval: TimeInterval, fire: @escaping () -> Void) {
+    let interval = packetTunnelDrainDispatchInterval(interval)
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(
+      deadline: .now() + interval,
+      repeating: interval,
+      leeway: packetTunnelDrainDispatchLeeway(interval)
+    )
+    timer.setEventHandler(handler: fire)
+    timer.resume()
+    self.timer = timer
+  }
+
+  private let timer: DispatchSourceTimer
+  private var isCancelled = false
+
+  func cancel() {
+    guard !isCancelled else {
+      return
+    }
+    isCancelled = true
+    timer.setEventHandler(handler: {})
+    timer.cancel()
+  }
+
+  deinit {
+    cancel()
+  }
+}
+
+private func packetTunnelDrainDispatchInterval(_ interval: TimeInterval) -> DispatchTimeInterval {
+  .milliseconds(max(1, Int(interval * 1000)))
+}
+
+private func packetTunnelDrainDispatchLeeway(_ interval: DispatchTimeInterval) -> DispatchTimeInterval {
+  switch interval {
+  case .milliseconds(let milliseconds):
+    return .milliseconds(max(1, milliseconds / 2))
+  default:
+    return .milliseconds(25)
+  }
 }
 
 final class NetworkExtensionPacketTunnelManagerStore: PacketTunnelManagerStore {
@@ -271,15 +348,23 @@ final class NetworkExtensionPacketTunnelManager: PacketTunnelManager {
 final class PacketTunnelVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
   init(
     configuration: PacketTunnelConfiguration = PacketTunnelConfiguration(),
-    store: PacketTunnelManagerStore = NetworkExtensionPacketTunnelManagerStore()
+    store: PacketTunnelManagerStore = NetworkExtensionPacketTunnelManagerStore(),
+    drainScheduler: PacketTunnelDrainScheduler = DispatchPacketTunnelDrainScheduler(),
+    drainInterval: TimeInterval = 0.05
   ) {
     self.configuration = configuration
     self.store = store
+    self.drainScheduler = drainScheduler
+    self.drainInterval = drainInterval
   }
+
+  var onVirtualPacket: ((VirtualNetworkPacket) -> Void)?
 
   private let configuration: PacketTunnelConfiguration
   private let store: PacketTunnelManagerStore
-  private var managers: [String: PacketTunnelManager] = [:]
+  private let drainScheduler: PacketTunnelDrainScheduler
+  private let drainInterval: TimeInterval
+  private var activeInterfaces: [String: ActivePacketTunnelVirtualNetwork] = [:]
 
   var supportDetails: [String: Any] {
     guard configuration.hasProviderBundleIdentifier,
@@ -341,7 +426,17 @@ final class PacketTunnelVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
               )))
               return
             }
-            self?.managers[interfaceId] = manager
+            guard let self else {
+              completion(.success(["interfaceId": interfaceId]))
+              return
+            }
+            let activeInterface = ActivePacketTunnelVirtualNetwork(
+              interfaceId: interfaceId,
+              networkIdHex: request.networkIdHex,
+              manager: manager
+            )
+            self.activeInterfaces[interfaceId] = activeInterface
+            self.startDrainPolling(activeInterface)
             completion(.success(["interfaceId": interfaceId]))
           }
         } catch {
@@ -359,7 +454,8 @@ final class PacketTunnelVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
     _ packet: VirtualNetworkPacket,
     completion: @escaping (Result<Void, Error>) -> Void
   ) {
-    guard let interfaceId = packet.interfaceId, let manager = managers[interfaceId] else {
+    guard let interfaceId = packet.interfaceId,
+          let activeInterface = activeInterfaces[interfaceId] else {
       completion(.failure(VirtualNetworkAdapterError(
         code: "not_available",
         message: "No macOS virtual network interface is active.",
@@ -369,7 +465,7 @@ final class PacketTunnelVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
     }
     do {
       let message = try PacketTunnelProviderMessage.write(packet).data()
-      manager.sendProviderMessage(message) { result in
+      activeInterface.manager.sendProviderMessage(message) { result in
         switch result {
         case .success:
           completion(.success(()))
@@ -394,7 +490,106 @@ final class PacketTunnelVirtualNetworkAdapter: ManyTierVirtualNetworkAdapter {
     guard let interfaceId = request.interfaceId else {
       return
     }
-    managers.removeValue(forKey: interfaceId)?.stop()
+    let activeInterface = activeInterfaces.removeValue(forKey: interfaceId)
+    activeInterface?.drainTimer?.cancel()
+    activeInterface?.manager.stop()
+  }
+
+  private func startDrainPolling(_ activeInterface: ActivePacketTunnelVirtualNetwork) {
+    activeInterface.drainTimer = drainScheduler.scheduleRepeating(
+      interval: drainInterval
+    ) { [weak self, weak activeInterface] in
+      guard let activeInterface else {
+        return
+      }
+      self?.drainProviderPackets(activeInterface)
+    }
+  }
+
+  private func drainProviderPackets(_ activeInterface: ActivePacketTunnelVirtualNetwork) {
+    guard activeInterfaces[activeInterface.interfaceId] === activeInterface,
+          !activeInterface.drainInFlight else {
+      return
+    }
+    activeInterface.drainInFlight = true
+
+    let message: Data
+    do {
+      message = try PacketTunnelProviderMessage.drain(
+        interfaceId: activeInterface.interfaceId,
+        networkIdHex: activeInterface.networkIdHex
+      ).data()
+    } catch {
+      activeInterface.drainInFlight = false
+      return
+    }
+
+    activeInterface.manager.sendProviderMessage(message) { [weak self, weak activeInterface] result in
+      DispatchQueue.main.async {
+        guard let self, let activeInterface else {
+          return
+        }
+        self.finishDrain(activeInterface, result: result)
+      }
+    }
+  }
+
+  private func finishDrain(
+    _ activeInterface: ActivePacketTunnelVirtualNetwork,
+    result: Result<Data?, Error>
+  ) {
+    activeInterface.drainInFlight = false
+    guard activeInterfaces[activeInterface.interfaceId] === activeInterface else {
+      return
+    }
+    guard case .success(let data?) = result,
+          let response = try? PacketTunnelDrainResponse(data: data),
+          response.interfaceId == activeInterface.interfaceId else {
+      return
+    }
+    let networkIdHex = response.networkIdHex ?? activeInterface.networkIdHex
+    for packet in response.packets {
+      onVirtualPacket?(VirtualNetworkPacket(
+        interfaceId: response.interfaceId,
+        networkIdHex: networkIdHex,
+        packet: packet.packet
+      ))
+    }
+  }
+}
+
+private final class ActivePacketTunnelVirtualNetwork {
+  init(
+    interfaceId: String,
+    networkIdHex: String?,
+    manager: PacketTunnelManager
+  ) {
+    self.interfaceId = interfaceId
+    self.networkIdHex = networkIdHex
+    self.manager = manager
+  }
+
+  let interfaceId: String
+  let networkIdHex: String?
+  let manager: PacketTunnelManager
+  var drainTimer: PacketTunnelDrainTimer?
+  var drainInFlight = false
+}
+
+extension PacketTunnelProviderMessage {
+  static func create(_ request: VirtualNetworkRequest) -> PacketTunnelProviderMessage {
+    PacketTunnelProviderMessage(type: "create", payload: request.packetTunnelPayload)
+  }
+
+  static func write(_ packet: VirtualNetworkPacket) -> PacketTunnelProviderMessage {
+    PacketTunnelProviderMessage(type: "write", payload: packet.packetTunnelPayload)
+  }
+
+  static func drain(interfaceId: String, networkIdHex: String?) -> PacketTunnelProviderMessage {
+    PacketTunnelProviderMessage(type: "drain", payload: [
+      "interfaceId": interfaceId,
+      "networkIdHex": manyTierJsonValue(networkIdHex),
+    ])
   }
 }
 
@@ -527,6 +722,12 @@ struct VirtualNetworkPacket {
   let networkIdHex: String?
   let packet: [UInt8]
 
+  init(interfaceId: String, networkIdHex: String?, packet: [UInt8]) {
+    self.interfaceId = interfaceId
+    self.networkIdHex = networkIdHex
+    self.packet = packet
+  }
+
   init(arguments: Any?) {
     guard let args = arguments as? [String: Any] else {
       interfaceId = nil
@@ -556,6 +757,14 @@ struct VirtualNetworkPacket {
       "interfaceId": interfaceId ?? "",
       "networkIdHex": networkIdHex ?? "",
       "packet": manyTierIntBytes(packet),
+    ]
+  }
+
+  var channelArguments: [String: Any] {
+    [
+      "interfaceId": interfaceId ?? "",
+      "networkIdHex": manyTierJsonValue(networkIdHex),
+      "packet": FlutterStandardTypedData(bytes: Data(packet)),
     ]
   }
 }

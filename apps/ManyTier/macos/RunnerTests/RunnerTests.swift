@@ -164,11 +164,13 @@ class RunnerTests: XCTestCase {
 
   func testPacketTunnelAdapterStartsManagerWithCreateMessage() {
     let store = FakePacketTunnelManagerStore()
+    let drainScheduler = FakePacketTunnelDrainScheduler()
     let adapter = PacketTunnelVirtualNetworkAdapter(
       configuration: PacketTunnelConfiguration(
         providerBundleIdentifier: "com.manytier.manytierApp.PacketTunnel"
       ),
-      store: store
+      store: store,
+      drainScheduler: drainScheduler
     )
 
     let result = waitForCreate(adapter, request: fullRequest())
@@ -192,6 +194,7 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(payload?["mtu"] as? Int, 1280)
     XCTAssertEqual((payload?["managedAddresses"] as? [[String: Any]])?.count, 2)
     XCTAssertEqual((payload?["routes"] as? [[String: Any]])?.count, 1)
+    XCTAssertEqual(drainScheduler.timers.count, 1)
   }
 
   func testPacketTunnelAdapterSendsWriteMessages() {
@@ -200,7 +203,8 @@ class RunnerTests: XCTestCase {
       configuration: PacketTunnelConfiguration(
         providerBundleIdentifier: "com.manytier.manytierApp.PacketTunnel"
       ),
-      store: store
+      store: store,
+      drainScheduler: FakePacketTunnelDrainScheduler()
     )
     _ = waitForCreate(adapter, request: fullRequest())
 
@@ -221,13 +225,95 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(payload?["packet"] as? [Int], [0x45, 0, 0, 20])
   }
 
-  func testPacketTunnelAdapterStopsManagerOnClose() {
+  func testPacketTunnelAdapterDrainsProviderPacketsToVirtualPacketCallback() throws {
     let store = FakePacketTunnelManagerStore()
+    let drainScheduler = FakePacketTunnelDrainScheduler()
     let adapter = PacketTunnelVirtualNetworkAdapter(
       configuration: PacketTunnelConfiguration(
         providerBundleIdentifier: "com.manytier.manytierApp.PacketTunnel"
       ),
-      store: store
+      store: store,
+      drainScheduler: drainScheduler,
+      drainInterval: 0.25
+    )
+    let packetsExpectation = expectation(description: "virtual packets emitted")
+    packetsExpectation.expectedFulfillmentCount = 2
+    var packets: [VirtualNetworkPacket] = []
+    adapter.onVirtualPacket = { packet in
+      packets.append(packet)
+      packetsExpectation.fulfill()
+    }
+    store.manager.providerMessageResponses = [
+      try PacketTunnelDrainResponse(
+        interfaceId: "zt00000100da4a",
+        networkIdHex: "8056c2e21c000001",
+        packets: [
+          PacketTunnelOutboundPacket(
+            packet: [0x45, 0, 0, 20],
+            protocolFamily: NSNumber(value: AF_INET)
+          ),
+          PacketTunnelOutboundPacket(
+            packet: [0x60, 0, 0, 0],
+            protocolFamily: NSNumber(value: AF_INET6)
+          ),
+        ]
+      ).data(),
+    ]
+    _ = waitForCreate(adapter, request: fullRequest())
+
+    drainScheduler.timers.first?.fire()
+
+    wait(for: [packetsExpectation], timeout: 1)
+    XCTAssertEqual(drainScheduler.intervals, [0.25])
+    let message = store.manager.providerMessages.lastDictionary()
+    XCTAssertEqual(message["type"] as? String, "drain")
+    let payload = message["payload"] as? [String: Any]
+    XCTAssertEqual(payload?["interfaceId"] as? String, "zt00000100da4a")
+    XCTAssertEqual(payload?["networkIdHex"] as? String, "8056c2e21c000001")
+    XCTAssertEqual(packets.map(\.interfaceId), [
+      "zt00000100da4a",
+      "zt00000100da4a",
+    ])
+    XCTAssertEqual(packets.map(\.networkIdHex), [
+      "8056c2e21c000001",
+      "8056c2e21c000001",
+    ])
+    XCTAssertEqual(packets.map(\.packet), [
+      [0x45, 0, 0, 20],
+      [0x60, 0, 0, 0],
+    ])
+  }
+
+  func testPacketTunnelAdapterSkipsOverlappingDrainRequests() {
+    let store = FakePacketTunnelManagerStore()
+    store.manager.holdProviderMessageCompletions = true
+    let drainScheduler = FakePacketTunnelDrainScheduler()
+    let adapter = PacketTunnelVirtualNetworkAdapter(
+      configuration: PacketTunnelConfiguration(
+        providerBundleIdentifier: "com.manytier.manytierApp.PacketTunnel"
+      ),
+      store: store,
+      drainScheduler: drainScheduler
+    )
+    _ = waitForCreate(adapter, request: fullRequest())
+
+    drainScheduler.timers.first?.fire()
+    drainScheduler.timers.first?.fire()
+
+    XCTAssertEqual(store.manager.providerMessages.count, 1)
+    let message = store.manager.providerMessages.singleDictionary()
+    XCTAssertEqual(message["type"] as? String, "drain")
+  }
+
+  func testPacketTunnelAdapterStopsManagerOnClose() {
+    let store = FakePacketTunnelManagerStore()
+    let drainScheduler = FakePacketTunnelDrainScheduler()
+    let adapter = PacketTunnelVirtualNetworkAdapter(
+      configuration: PacketTunnelConfiguration(
+        providerBundleIdentifier: "com.manytier.manytierApp.PacketTunnel"
+      ),
+      store: store,
+      drainScheduler: drainScheduler
     )
     _ = waitForCreate(adapter, request: fullRequest())
 
@@ -237,6 +323,9 @@ class RunnerTests: XCTestCase {
     ]))
 
     XCTAssertEqual(store.manager.stopCalls, 1)
+    XCTAssertEqual(drainScheduler.timers.first?.isCancelled, true)
+    drainScheduler.timers.first?.fire()
+    XCTAssertEqual(store.manager.providerMessages.count, 0)
   }
 
   func testPacketTunnelProviderCommandDecodesCreateMessage() throws {
@@ -308,6 +397,21 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(ipv4Payload.packet, [0x45, 0, 0, 20])
     XCTAssertEqual(ipv4Payload.protocolFamily, NSNumber(value: AF_INET))
     XCTAssertEqual(ipv6Payload.protocolFamily, NSNumber(value: AF_INET6))
+  }
+
+  func testPacketTunnelProviderCommandDecodesDrainMessage() throws {
+    let data = try PacketTunnelProviderMessage.drain(
+      interfaceId: "zt00000100da4a",
+      networkIdHex: "8056c2e21c000001"
+    ).data()
+
+    let command = try PacketTunnelProviderMessage.command(from: data)
+
+    guard case .drain(let payload) = command else {
+      return XCTFail("Expected drain command, got \(command)")
+    }
+    XCTAssertEqual(payload.interfaceId, "zt00000100da4a")
+    XCTAssertEqual(payload.networkIdHex, "8056c2e21c000001")
   }
 
   func testPacketTunnelProviderCommandRejectsInvalidPayloads() throws {
@@ -391,6 +495,79 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(writes.count, 1)
     XCTAssertEqual(writes.first?.0, Data([0x45, 0, 0, 20]))
     XCTAssertEqual(writes.first?.1, NSNumber(value: AF_INET))
+  }
+
+  func testPacketTunnelProviderRuntimeDrainsPacketFlowReads() throws {
+    let runtime = PacketTunnelProviderRuntime()
+    try startRuntime(runtime)
+    runtime.receivePacketFlowPackets(
+      [
+        Data([0x45, 0, 0, 20]),
+        Data([0x60, 0, 0, 0]),
+      ],
+      protocols: [
+        NSNumber(value: AF_INET),
+        NSNumber(value: AF_INET6),
+      ]
+    )
+    let drain = try PacketTunnelProviderMessage.drain(
+      interfaceId: "zt00000100da4a",
+      networkIdHex: "8056c2e21c000001"
+    ).data()
+
+    let result = runtime.handleAppMessage(drain) { _, _ in
+      XCTFail("Draining packet-flow reads must not write back to packetFlow")
+      return false
+    }
+
+    guard case .success(let data?) = result else {
+      return XCTFail("Expected drain success, got \(result)")
+    }
+    let response = dictionary(from: data)
+    XCTAssertEqual(response["interfaceId"] as? String, "zt00000100da4a")
+    XCTAssertEqual(response["networkIdHex"] as? String, "8056c2e21c000001")
+    let packets = response["packets"] as? [[String: Any]]
+    XCTAssertEqual(packets?.count, 2)
+    XCTAssertEqual(packets?[0]["packet"] as? [Int], [0x45, 0, 0, 20])
+    XCTAssertEqual(packets?[0]["protocolFamily"] as? Int, Int(AF_INET))
+    XCTAssertEqual(packets?[1]["packet"] as? [Int], [0x60, 0, 0, 0])
+    XCTAssertEqual(packets?[1]["protocolFamily"] as? Int, Int(AF_INET6))
+
+    let drainedAgain = runtime.handleAppMessage(drain) { _, _ in
+      XCTFail("Draining packet-flow reads must not write back to packetFlow")
+      return false
+    }
+    guard case .success(let emptyData?) = drainedAgain else {
+      return XCTFail("Expected second drain success, got \(drainedAgain)")
+    }
+    let emptyResponse = dictionary(from: emptyData)
+    XCTAssertEqual((emptyResponse["packets"] as? [[String: Any]])?.count, 0)
+  }
+
+  func testPacketTunnelProviderRuntimeStopClearsPacketFlowReadBuffer() throws {
+    let runtime = PacketTunnelProviderRuntime()
+    try startRuntime(runtime)
+    runtime.receivePacketFlowPackets(
+      [Data([0x45, 0, 0, 20])],
+      protocols: [NSNumber(value: AF_INET)]
+    )
+
+    runtime.stop()
+    try startRuntime(runtime)
+    let drain = try PacketTunnelProviderMessage.drain(
+      interfaceId: "zt00000100da4a",
+      networkIdHex: "8056c2e21c000001"
+    ).data()
+    let result = runtime.handleAppMessage(drain) { _, _ in
+      XCTFail("Draining packet-flow reads must not write back to packetFlow")
+      return false
+    }
+
+    guard case .success(let data?) = result else {
+      return XCTFail("Expected drain success, got \(result)")
+    }
+    let response = dictionary(from: data)
+    XCTAssertEqual((response["packets"] as? [[String: Any]])?.count, 0)
   }
 
   func testPacketTunnelProviderRuntimeRejectsInvalidStateAndPackets() throws {
@@ -549,6 +726,9 @@ private final class FakePacketTunnelManagerStore: PacketTunnelManagerStore {
 private final class FakePacketTunnelManager: PacketTunnelManager {
   var startOptions: [String: NSObject]?
   var providerMessages: [Data] = []
+  var providerMessageResponses: [Data?] = []
+  var holdProviderMessageCompletions = false
+  var heldProviderMessageCompletions: [(Result<Data?, Error>) -> Void] = []
   var stopCalls = 0
 
   func start(
@@ -564,7 +744,12 @@ private final class FakePacketTunnelManager: PacketTunnelManager {
     completion: @escaping (Result<Data?, Error>) -> Void
   ) {
     providerMessages.append(data)
-    completion(.success(nil))
+    if holdProviderMessageCompletions {
+      heldProviderMessageCompletions.append(completion)
+      return
+    }
+    let response = providerMessageResponses.isEmpty ? nil : providerMessageResponses.removeFirst()
+    completion(.success(response))
   }
 
   func stop() {
@@ -583,7 +768,50 @@ private final class FakePacketTunnelManager: PacketTunnelManager {
   }
 }
 
+private final class FakePacketTunnelDrainScheduler: PacketTunnelDrainScheduler {
+  var intervals: [TimeInterval] = []
+  var timers: [FakePacketTunnelDrainTimer] = []
+
+  func scheduleRepeating(
+    interval: TimeInterval,
+    fire: @escaping () -> Void
+  ) -> PacketTunnelDrainTimer {
+    intervals.append(interval)
+    let timer = FakePacketTunnelDrainTimer(fireCallback: fire)
+    timers.append(timer)
+    return timer
+  }
+}
+
+private final class FakePacketTunnelDrainTimer: PacketTunnelDrainTimer {
+  init(fireCallback: @escaping () -> Void) {
+    self.fireCallback = fireCallback
+  }
+
+  private let fireCallback: () -> Void
+  var isCancelled = false
+
+  func fire() {
+    guard !isCancelled else {
+      return
+    }
+    fireCallback()
+  }
+
+  func cancel() {
+    isCancelled = true
+  }
+}
+
 private extension Array where Element == Data {
+  func singleDictionary() -> [String: Any] {
+    guard count == 1, let data = first else {
+      XCTFail("Expected exactly one provider message data")
+      return [:]
+    }
+    return dictionary(from: data)
+  }
+
   func lastDictionary() -> [String: Any] {
     guard let data = last else {
       XCTFail("Expected provider message data")

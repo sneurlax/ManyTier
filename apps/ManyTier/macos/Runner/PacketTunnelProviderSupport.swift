@@ -23,14 +23,6 @@ struct PacketTunnelProviderMessage {
   let type: String
   let payload: [String: Any]
 
-  static func create(_ request: VirtualNetworkRequest) -> PacketTunnelProviderMessage {
-    PacketTunnelProviderMessage(type: "create", payload: request.packetTunnelPayload)
-  }
-
-  static func write(_ packet: VirtualNetworkPacket) -> PacketTunnelProviderMessage {
-    PacketTunnelProviderMessage(type: "write", payload: packet.packetTunnelPayload)
-  }
-
   func data() throws -> Data {
     try JSONSerialization.data(withJSONObject: [
       "type": type,
@@ -54,6 +46,8 @@ struct PacketTunnelProviderMessage {
       return .create(try PacketTunnelCreatePayload(payload: payload))
     case "write":
       return .write(try PacketTunnelWritePayload(payload: payload))
+    case "drain":
+      return .drain(try PacketTunnelDrainPayload(payload: payload))
     default:
       throw PacketTunnelProviderMessageError.invalidType(type)
     }
@@ -63,6 +57,7 @@ struct PacketTunnelProviderMessage {
 enum PacketTunnelProviderCommand: Equatable {
   case create(PacketTunnelCreatePayload)
   case write(PacketTunnelWritePayload)
+  case drain(PacketTunnelDrainPayload)
 }
 
 enum PacketTunnelProviderRuntimeError: Error, LocalizedError, Equatable {
@@ -102,6 +97,7 @@ typealias PacketTunnelPacketWriter = (Data, NSNumber) -> Bool
 
 final class PacketTunnelProviderRuntime {
   private(set) var activeInterfaceId: String?
+  private var outboundPackets: [PacketTunnelOutboundPacket] = []
 
   func start(
     options: [String: NSObject]?,
@@ -136,45 +132,84 @@ final class PacketTunnelProviderRuntime {
   func handleAppMessage(
     _ data: Data,
     writePacket: PacketTunnelPacketWriter
-  ) -> Result<Void, Error> {
+  ) -> Result<Data?, Error> {
     do {
       let command = try PacketTunnelProviderMessage.command(from: data)
-      guard case .write(let payload) = command else {
+      switch command {
+      case .write(let payload):
+        try handleWrite(payload, writePacket: writePacket)
+        return .success(nil)
+      case .drain(let payload):
+        return .success(try handleDrain(payload))
+      case .create:
         return .failure(PacketTunnelProviderRuntimeError.unexpectedAppMessage)
       }
-      guard activeInterfaceId == payload.interfaceId else {
-        return .failure(PacketTunnelProviderRuntimeError.inactiveInterface(payload.interfaceId))
-      }
-      guard let protocolFamily = payload.protocolFamily else {
-        return .failure(PacketTunnelProviderRuntimeError.unsupportedPacketProtocol)
-      }
-      guard writePacket(Data(payload.packet), protocolFamily) else {
-        return .failure(PacketTunnelProviderRuntimeError.packetWriteFailed)
-      }
-      return .success(())
     } catch {
       return .failure(error)
     }
   }
 
-  func stop() {
-    activeInterfaceId = nil
+  func receivePacketFlowPackets(_ packets: [Data], protocols: [NSNumber]) {
+    guard activeInterfaceId != nil else {
+      return
+    }
+    for (packet, protocolFamily) in zip(packets, protocols) where !packet.isEmpty {
+      outboundPackets.append(PacketTunnelOutboundPacket(
+        packet: [UInt8](packet),
+        protocolFamily: protocolFamily
+      ))
+    }
   }
 
-  func responseData(for result: Result<Void, Error>) -> Data? {
+  func stop() {
+    activeInterfaceId = nil
+    outboundPackets.removeAll()
+  }
+
+  func responseData(for result: Result<Data?, Error>) -> Data? {
     switch result {
-    case .success:
-      return nil
+    case .success(let data):
+      return data
     case .failure(let error):
       return try? JSONSerialization.data(withJSONObject: [
         "error": "\(error)",
       ])
     }
   }
+
+  private func handleWrite(
+    _ payload: PacketTunnelWritePayload,
+    writePacket: PacketTunnelPacketWriter
+  ) throws {
+    guard activeInterfaceId == payload.interfaceId else {
+      throw PacketTunnelProviderRuntimeError.inactiveInterface(payload.interfaceId)
+    }
+    guard let protocolFamily = payload.protocolFamily else {
+      throw PacketTunnelProviderRuntimeError.unsupportedPacketProtocol
+    }
+    guard writePacket(Data(payload.packet), protocolFamily) else {
+      throw PacketTunnelProviderRuntimeError.packetWriteFailed
+    }
+  }
+
+  private func handleDrain(_ payload: PacketTunnelDrainPayload) throws -> Data {
+    guard activeInterfaceId == payload.interfaceId else {
+      throw PacketTunnelProviderRuntimeError.inactiveInterface(payload.interfaceId)
+    }
+    let packets = outboundPackets
+    let response = try PacketTunnelDrainResponse(
+      interfaceId: payload.interfaceId,
+      networkIdHex: payload.networkIdHex,
+      packets: packets
+    ).data()
+    outboundPackets.removeAll()
+    return response
+  }
 }
 
 class ManyTierPacketTunnelProvider: NEPacketTunnelProvider {
   private let runtime = PacketTunnelProviderRuntime()
+  private var isReadingPacketFlow = false
 
   override func startTunnel(
     options: [String: NSObject]?,
@@ -189,7 +224,12 @@ class ManyTierPacketTunnelProvider: NEPacketTunnelProvider {
         }
         self.setTunnelNetworkSettings(settings, completionHandler: completion)
       },
-      completion: completionHandler
+      completion: { [weak self] error in
+        if error == nil {
+          self?.startReadingPacketFlow()
+        }
+        completionHandler(error)
+      }
     )
   }
 
@@ -198,6 +238,7 @@ class ManyTierPacketTunnelProvider: NEPacketTunnelProvider {
     completionHandler: @escaping () -> Void
   ) {
     runtime.stop()
+    isReadingPacketFlow = false
     completionHandler()
   }
 
@@ -212,6 +253,28 @@ class ManyTierPacketTunnelProvider: NEPacketTunnelProvider {
       return self.packetFlow.writePackets([packet], withProtocols: [protocolFamily])
     }
     completionHandler?(runtime.responseData(for: result))
+  }
+
+  private func startReadingPacketFlow() {
+    guard !isReadingPacketFlow else {
+      return
+    }
+    isReadingPacketFlow = true
+    readPacketFlow()
+  }
+
+  private func readPacketFlow() {
+    packetFlow.readPackets { [weak self] packets, protocols in
+      guard let self else {
+        return
+      }
+      self.runtime.receivePacketFlowPackets(packets, protocols: protocols)
+      guard self.runtime.activeInterfaceId != nil else {
+        self.isReadingPacketFlow = false
+        return
+      }
+      self.readPacketFlow()
+    }
   }
 }
 
@@ -378,6 +441,77 @@ struct PacketTunnelWritePayload: Equatable {
   }
 }
 
+struct PacketTunnelDrainPayload: Equatable {
+  let interfaceId: String
+  let networkIdHex: String?
+
+  init(payload: [String: Any]) throws {
+    interfaceId = try packetTunnelString(payload["interfaceId"], name: "interfaceId")
+    networkIdHex = packetTunnelOptionalString(payload["networkIdHex"])
+  }
+}
+
+struct PacketTunnelOutboundPacket: Equatable {
+  let packet: [UInt8]
+  let protocolFamily: NSNumber
+
+  init(packet: [UInt8], protocolFamily: NSNumber) {
+    self.packet = packet
+    self.protocolFamily = protocolFamily
+  }
+
+  init(payload: [String: Any]) throws {
+    packet = try packetTunnelBytes(payload["packet"], name: "packet")
+    protocolFamily = NSNumber(
+      value: try packetTunnelInt(payload["protocolFamily"], name: "protocolFamily")
+    )
+  }
+
+  var payload: [String: Any] {
+    [
+      "packet": packet.map(Int.init),
+      "protocolFamily": protocolFamily.intValue,
+    ]
+  }
+}
+
+struct PacketTunnelDrainResponse: Equatable {
+  let interfaceId: String
+  let networkIdHex: String?
+  let packets: [PacketTunnelOutboundPacket]
+
+  init(
+    interfaceId: String,
+    networkIdHex: String?,
+    packets: [PacketTunnelOutboundPacket]
+  ) {
+    self.interfaceId = interfaceId
+    self.networkIdHex = networkIdHex
+    self.packets = packets
+  }
+
+  init(data: Data) throws {
+    let object = try JSONSerialization.jsonObject(with: data)
+    guard let payload = object as? [String: Any] else {
+      throw PacketTunnelProviderMessageError.invalidPayload("drain response must be an object")
+    }
+    interfaceId = try packetTunnelString(payload["interfaceId"], name: "interfaceId")
+    networkIdHex = packetTunnelOptionalString(payload["networkIdHex"])
+    packets = try packetTunnelOutboundPacketList(payload["packets"], name: "packets")
+  }
+
+  func data() throws -> Data {
+    var payload: [String: Any] = [
+      "interfaceId": interfaceId,
+      "packets": packets.map(\.payload),
+    ]
+    if let networkIdHex {
+      payload["networkIdHex"] = networkIdHex
+    }
+    return try JSONSerialization.data(withJSONObject: payload)
+  }
+}
+
 func packetTunnelIPv4SubnetMask(prefixLength: Int) throws -> String {
   guard (0...32).contains(prefixLength) else {
     throw PacketTunnelProviderMessageError.invalidPayload("IPv4 prefixLength must be 0...32")
@@ -413,6 +547,16 @@ private func packetTunnelOptionalString(_ value: Any?) -> String? {
     return nil
   }
   return value as? String
+}
+
+private func packetTunnelInt(_ value: Any?, name: String) throws -> Int {
+  if let int = value as? Int {
+    return int
+  }
+  if let number = value as? NSNumber {
+    return number.intValue
+  }
+  throw PacketTunnelProviderMessageError.invalidPayload("\(name) must be an integer")
 }
 
 private func packetTunnelOptionalInt(_ value: Any?, name: String) throws -> Int? {
@@ -455,6 +599,18 @@ private func packetTunnelAddressList(_ value: Any?, name: String) throws -> [Pac
       throw PacketTunnelProviderMessageError.invalidPayload("\(name) entries must be objects")
     }
     return try PacketTunnelAddressPayload(payload: payload)
+  }
+}
+
+private func packetTunnelOutboundPacketList(_ value: Any?, name: String) throws -> [PacketTunnelOutboundPacket] {
+  guard let values = value as? [Any] else {
+    throw PacketTunnelProviderMessageError.invalidPayload("\(name) must be an array")
+  }
+  return try values.map { value in
+    guard let payload = value as? [String: Any] else {
+      throw PacketTunnelProviderMessageError.invalidPayload("\(name) entries must be objects")
+    }
+    return try PacketTunnelOutboundPacket(payload: payload)
   }
 }
 
