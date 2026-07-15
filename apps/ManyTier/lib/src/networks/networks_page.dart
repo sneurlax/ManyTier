@@ -186,10 +186,7 @@ class _NotRunningCard extends HookConsumerWidget {
               ),
             ],
             const SizedBox(height: 24),
-            Wrap(
-              alignment: WrapAlignment.end,
-              spacing: 8,
-              runSpacing: 8,
+            MActionRow(
               children: <Widget>[
                 MButton(
                   variant: MButtonVariant.outline,
@@ -532,26 +529,19 @@ class _EmbeddedRuntimePanel extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: Text('Embedded runtime', style: theme.typography.title),
-            ),
-            MBadge(
-              variant: runtime == null
-                  ? MBadgeVariant.outline
-                  : MBadgeVariant.secondary,
-              child: Text(runtime == null ? 'Stopped' : runtime.addressHex),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Text(
-          runtime == null
+        MSectionHeader(
+          title: 'Embedded runtime',
+          titleStyle: theme.typography.title,
+          description: runtime == null
               ? 'Embedded UDP host is stopped.'
               : 'Embedded UDP host is listening on '
                     '${runtime.config.udpHost}:${runtime.config.udpPort}.',
-          style: muted,
+          status: MBadge(
+            variant: runtime == null
+                ? MBadgeVariant.outline
+                : MBadgeVariant.secondary,
+            child: Text(runtime == null ? 'Stopped' : runtime.addressHex),
+          ),
         ),
         const SizedBox(height: 8),
         Text(
@@ -571,10 +561,7 @@ class _EmbeddedRuntimePanel extends ConsumerWidget {
           MAlert(variant: MAlertVariant.destructive, message: lifecycle.error!),
         ],
         const SizedBox(height: 16),
-        Wrap(
-          alignment: WrapAlignment.end,
-          spacing: 8,
-          runSpacing: 8,
+        MActionRow(
           children: <Widget>[
             MButton(
               size: MButtonSize.sm,
@@ -632,22 +619,15 @@ class _ManagedServiceCard extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: Text(
-                      'Managed service',
-                      style: theme.typography.headlineSmall,
-                    ),
-                  ),
-                  MBadge(
-                    variant: MBadgeVariant.secondary,
-                    child: Text('PID ${service.pid}'),
-                  ),
-                ],
+              MSectionHeader(
+                title: 'Managed service',
+                description: service.command,
+                descriptionStyle: theme.typography.code,
+                status: MBadge(
+                  variant: MBadgeVariant.secondary,
+                  child: Text('PID ${service.pid}'),
+                ),
               ),
-              const SizedBox(height: 8),
-              Text(service.command, style: theme.typography.code),
               if (lifecycle.error != null) ...<Widget>[
                 const SizedBox(height: 8),
                 MAlert(
@@ -659,10 +639,7 @@ class _ManagedServiceCard extends ConsumerWidget {
                 Text('Started by this app session.', style: muted),
               ],
               const SizedBox(height: 16),
-              Wrap(
-                alignment: WrapAlignment.end,
-                spacing: 8,
-                runSpacing: 8,
+              MActionRow(
                 children: <Widget>[
                   MButton(
                     variant: MButtonVariant.destructive,
@@ -756,10 +733,7 @@ class _SystemServiceCard extends HookConsumerWidget {
                 Text('LaunchAgent starts the service at login.', style: muted),
               ],
               const SizedBox(height: 16),
-              Wrap(
-                alignment: WrapAlignment.end,
-                spacing: 8,
-                runSpacing: 8,
+              MActionRow(
                 children: <Widget>[
                   MButton(
                     variant: MButtonVariant.destructive,
@@ -804,18 +778,14 @@ class _StatusCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: Text('Status', style: theme.typography.headlineSmall),
-                ),
-                MBadge(
-                  variant: status.online
-                      ? MBadgeVariant.primary
-                      : MBadgeVariant.outline,
-                  child: Text(status.online ? 'Online' : 'Offline'),
-                ),
-              ],
+            MSectionHeader(
+              title: 'Status',
+              status: MBadge(
+                variant: status.online
+                    ? MBadgeVariant.primary
+                    : MBadgeVariant.outline,
+                child: Text(status.online ? 'Online' : 'Offline'),
+              ),
             ),
             const SizedBox(height: 16),
             _kv(theme, 'Node address', status.address, code: true),
@@ -828,23 +798,15 @@ class _StatusCard extends StatelessWidget {
   }
 
   Widget _kv(MThemeData theme, String key, String value, {bool code = false}) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.baseline,
-      textBaseline: TextBaseline.alphabetic,
-      children: <Widget>[
-        Expanded(
-          child: Text(
-            key,
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.mutedForeground,
-            ),
-          ),
-        ),
-        Text(
-          value,
-          style: code ? theme.typography.code : theme.typography.bodySmall,
-        ),
-      ],
+    return MPropertyRow(
+      layout: MPropertyRowLayout.inline,
+      label: key,
+      valueStyle: code ? theme.typography.code : null,
+      value: Text(
+        value,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.right,
+      ),
     );
   }
 }
@@ -856,11 +818,10 @@ class _NetworksSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = MTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Text('Networks', style: theme.typography.headlineSmall),
+        const MSectionHeader(title: 'Networks'),
         const SizedBox(height: 12),
         if (networks.isEmpty)
           const MEmptyState(
@@ -976,7 +937,6 @@ class _JoinCard extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = MTheme.of(context);
     final controller = useMController<String>('');
     final networkId = useState('');
     final joining = useState(false);
@@ -1009,7 +969,7 @@ class _JoinCard extends HookConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            Text('Join a network', style: theme.typography.headlineSmall),
+            const MSectionHeader(title: 'Join a network'),
             const SizedBox(height: 16),
             MField(
               label: 'Network ID',
@@ -1051,11 +1011,10 @@ class _PeersSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = MTheme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Text('Peers', style: theme.typography.headlineSmall),
+        const MSectionHeader(title: 'Peers'),
         const SizedBox(height: 12),
         if (peers.isEmpty)
           const MEmptyState(
@@ -1260,11 +1219,9 @@ class _ControllerSection extends HookConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: Text('Controller', style: theme.typography.headlineSmall),
-            ),
+        MSectionHeader(
+          title: 'Controller',
+          actions: <Widget>[
             MButton(
               variant: MButtonVariant.ghost,
               size: MButtonSize.sm,
@@ -1784,10 +1741,7 @@ class _ControllerMemberRow extends HookConsumerWidget {
             MAlert(variant: MAlertVariant.destructive, message: error.value!),
           ],
           const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            alignment: WrapAlignment.end,
+          MActionRow(
             children: <Widget>[
               MButton(
                 variant: MButtonVariant.outline,
@@ -1992,11 +1946,9 @@ class _MoonsSection extends HookConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: Text('Moons', style: theme.typography.headlineSmall),
-            ),
+        MSectionHeader(
+          title: 'Moons',
+          actions: <Widget>[
             MButton(
               variant: MButtonVariant.ghost,
               size: MButtonSize.sm,
@@ -2143,7 +2095,6 @@ class _OrbitMoonCard extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = MTheme.of(context);
     final controller = useMController<String>('');
     final moonId = useState('');
     final orbiting = useState(false);
@@ -2174,7 +2125,7 @@ class _OrbitMoonCard extends HookConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            Text('Orbit a moon', style: theme.typography.headlineSmall),
+            const MSectionHeader(title: 'Orbit a moon'),
             const SizedBox(height: 16),
             MField(
               label: 'Moon ID',
