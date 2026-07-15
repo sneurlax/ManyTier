@@ -180,11 +180,9 @@ class _NotRunningCard extends HookConsumerWidget {
             ],
             if (lifecycle.error != null) ...<Widget>[
               const SizedBox(height: 12),
-              Text(
-                lifecycle.error!,
-                style: theme.typography.bodySmall.copyWith(
-                  color: theme.colors.destructive,
-                ),
+              MAlert(
+                variant: MAlertVariant.destructive,
+                message: lifecycle.error!,
               ),
             ],
             const SizedBox(height: 24),
@@ -566,12 +564,7 @@ class _EmbeddedRuntimePanel extends ConsumerWidget {
         ],
         if (lifecycle.error != null) ...<Widget>[
           const SizedBox(height: 8),
-          Text(
-            lifecycle.error!,
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.destructive,
-            ),
-          ),
+          MAlert(variant: MAlertVariant.destructive, message: lifecycle.error!),
         ],
         const SizedBox(height: 16),
         Wrap(
@@ -653,11 +646,9 @@ class _ManagedServiceCard extends ConsumerWidget {
               Text(service.command, style: theme.typography.code),
               if (lifecycle.error != null) ...<Widget>[
                 const SizedBox(height: 8),
-                Text(
-                  lifecycle.error!,
-                  style: theme.typography.bodySmall.copyWith(
-                    color: theme.colors.destructive,
-                  ),
+                MAlert(
+                  variant: MAlertVariant.destructive,
+                  message: lifecycle.error!,
                 ),
               ] else ...<Widget>[
                 const SizedBox(height: 8),
@@ -752,11 +743,9 @@ class _SystemServiceCard extends HookConsumerWidget {
               ],
               if (registration.error != null) ...<Widget>[
                 const SizedBox(height: 8),
-                Text(
-                  registration.error!,
-                  style: theme.typography.bodySmall.copyWith(
-                    color: theme.colors.destructive,
-                  ),
+                MAlert(
+                  variant: MAlertVariant.destructive,
+                  message: registration.error!,
                 ),
               ] else ...<Widget>[
                 const SizedBox(height: 8),
@@ -897,42 +886,17 @@ class _NetworkCard extends HookConsumerWidget {
     final error = useState<String?>(null);
 
     Future<void> leave() async {
-      final bool? confirmed = await showMDialog<bool>(
+      final confirmed = await showMConfirmDialog(
         context,
-        builder: (BuildContext ctx) {
-          final dialogTheme = MTheme.of(ctx);
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                'Leave network?',
-                style: dialogTheme.typography.headlineSmall,
-              ),
-              const SizedBox(height: 8),
-              Text(network.id, style: dialogTheme.typography.code),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: <Widget>[
-                  MButton(
-                    variant: MButtonVariant.ghost,
-                    onPressed: () => Navigator.of(ctx).pop(false),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  MButton(
-                    variant: MButtonVariant.destructive,
-                    onPressed: () => Navigator.of(ctx).pop(true),
-                    child: const Text('Leave'),
-                  ),
-                ],
-              ),
-            ],
-          );
-        },
+        title: 'Leave network?',
+        content: Builder(
+          builder: (BuildContext ctx) =>
+              Text(network.id, style: MTheme.of(ctx).typography.code),
+        ),
+        confirmLabel: 'Leave',
+        confirmVariant: MButtonVariant.destructive,
       );
-      if (confirmed != true) return;
+      if (!confirmed) return;
 
       leaving.value = true;
       error.value = null;
@@ -982,12 +946,7 @@ class _NetworkCard extends HookConsumerWidget {
             ],
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
-              Text(
-                error.value!,
-                style: theme.typography.bodySmall.copyWith(
-                  color: theme.colors.destructive,
-                ),
-              ),
+              MAlert(variant: MAlertVariant.destructive, message: error.value!),
             ],
             const SizedBox(height: 16),
             Row(
@@ -1060,12 +1019,7 @@ class _JoinCard extends HookConsumerWidget {
             ),
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
-              Text(
-                error.value!,
-                style: theme.typography.bodySmall.copyWith(
-                  color: theme.colors.destructive,
-                ),
-              ),
+              MAlert(variant: MAlertVariant.destructive, message: error.value!),
             ],
             const SizedBox(height: 16),
             MButton(
@@ -1385,42 +1339,17 @@ class _ControllerNetworkCard extends HookConsumerWidget {
     }
 
     Future<void> delete() async {
-      final bool? confirmed = await showMDialog<bool>(
+      final confirmed = await showMConfirmDialog(
         context,
-        builder: (BuildContext ctx) {
-          final dialogTheme = MTheme.of(ctx);
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                'Delete controller network?',
-                style: dialogTheme.typography.headlineSmall,
-              ),
-              const SizedBox(height: 8),
-              Text(network.id, style: dialogTheme.typography.code),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: <Widget>[
-                  MButton(
-                    variant: MButtonVariant.ghost,
-                    onPressed: () => Navigator.of(ctx).pop(false),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  MButton(
-                    variant: MButtonVariant.destructive,
-                    onPressed: () => Navigator.of(ctx).pop(true),
-                    child: const Text('Delete'),
-                  ),
-                ],
-              ),
-            ],
-          );
-        },
+        title: 'Delete controller network?',
+        content: Builder(
+          builder: (BuildContext ctx) =>
+              Text(network.id, style: MTheme.of(ctx).typography.code),
+        ),
+        confirmLabel: 'Delete',
+        confirmVariant: MButtonVariant.destructive,
       );
-      if (confirmed != true) return;
+      if (!confirmed) return;
 
       deleting.value = true;
       error.value = null;
@@ -1504,12 +1433,7 @@ class _ControllerNetworkCard extends HookConsumerWidget {
             ],
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
-              Text(
-                error.value!,
-                style: theme.typography.bodySmall.copyWith(
-                  color: theme.colors.destructive,
-                ),
-              ),
+              MAlert(variant: MAlertVariant.destructive, message: error.value!),
             ],
             const SizedBox(height: 16),
             Row(
@@ -1562,7 +1486,6 @@ class _EditControllerNetworkDialog extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = MTheme.of(context);
     final nameController = useMController<String>(network.name);
     final mtuController = useMController<String>(network.mtu.toString());
     final multicastController = useMController<String>(
@@ -1579,81 +1502,77 @@ class _EditControllerNetworkDialog extends HookWidget {
     final bool valid =
         parsedMtu != null && parsedMtu > 0 && parsedMulticast != null;
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Text('Edit controller network', style: theme.typography.headlineSmall),
-        const SizedBox(height: 16),
-        const MLabel('Name'),
-        const SizedBox(height: 8),
-        MTextField(
-          controller: nameController,
-          placeholder: 'Network name',
-          semanticLabel: 'Controller network name',
-          onChanged: (value) => name.value = value,
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: _DialogNumberField(
-                label: 'MTU',
-                controller: mtuController,
-                value: mtu,
-                invalid: parsedMtu == null || parsedMtu <= 0,
+    return MDialogContent(
+      title: 'Edit controller network',
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const MLabel('Name'),
+          const SizedBox(height: 8),
+          MTextField(
+            controller: nameController,
+            placeholder: 'Network name',
+            semanticLabel: 'Controller network name',
+            onChanged: (value) => name.value = value,
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _DialogNumberField(
+                  label: 'MTU',
+                  controller: mtuController,
+                  value: mtu,
+                  invalid: parsedMtu == null || parsedMtu <= 0,
+                ),
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _DialogNumberField(
-                label: 'Multicast limit',
-                controller: multicastController,
-                value: multicast,
-                invalid: parsedMulticast == null,
+              const SizedBox(width: 12),
+              Expanded(
+                child: _DialogNumberField(
+                  label: 'Multicast limit',
+                  controller: multicastController,
+                  value: multicast,
+                  invalid: parsedMulticast == null,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
+          const SizedBox(height: 16),
+          _SwitchRow(
+            label: 'Private network',
+            value: isPrivate.value,
+            semanticLabel: 'Private network',
+            onChanged: (value) => isPrivate.value = value,
+          ),
+          const SizedBox(height: 12),
+          _SwitchRow(
+            label: 'Broadcast',
+            value: broadcast.value,
+            semanticLabel: 'Broadcast',
+            onChanged: (value) => broadcast.value = value,
+          ),
+        ],
+      ),
+      actions: <Widget>[
+        MButton(
+          variant: MButtonVariant.ghost,
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
         ),
-        const SizedBox(height: 16),
-        _SwitchRow(
-          label: 'Private network',
-          value: isPrivate.value,
-          semanticLabel: 'Private network',
-          onChanged: (value) => isPrivate.value = value,
-        ),
-        const SizedBox(height: 12),
-        _SwitchRow(
-          label: 'Broadcast',
-          value: broadcast.value,
-          semanticLabel: 'Broadcast',
-          onChanged: (value) => broadcast.value = value,
-        ),
-        const SizedBox(height: 24),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: <Widget>[
-            MButton(
-              variant: MButtonVariant.ghost,
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            const SizedBox(width: 8),
-            MButton(
-              onPressed: !valid
-                  ? null
-                  : () => Navigator.of(context).pop(
-                      ControllerNetworkUpdate(
-                        name: name.value.trim(),
-                        private: isPrivate.value,
-                        mtu: parsedMtu,
-                        multicastLimit: parsedMulticast,
-                        enableBroadcast: broadcast.value,
-                      ),
-                    ),
-              child: const Text('Save'),
-            ),
-          ],
+        MButton(
+          onPressed: !valid
+              ? null
+              : () => Navigator.of(context).pop(
+                  ControllerNetworkUpdate(
+                    name: name.value.trim(),
+                    private: isPrivate.value,
+                    mtu: parsedMtu,
+                    multicastLimit: parsedMulticast,
+                    enableBroadcast: broadcast.value,
+                  ),
+                ),
+          child: const Text('Save'),
         ),
       ],
     );
@@ -1781,42 +1700,17 @@ class _ControllerMemberRow extends HookConsumerWidget {
     }
 
     Future<void> delete() async {
-      final bool? confirmed = await showMDialog<bool>(
+      final confirmed = await showMConfirmDialog(
         context,
-        builder: (BuildContext ctx) {
-          final dialogTheme = MTheme.of(ctx);
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                'Delete member?',
-                style: dialogTheme.typography.headlineSmall,
-              ),
-              const SizedBox(height: 8),
-              Text(member.id, style: dialogTheme.typography.code),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: <Widget>[
-                  MButton(
-                    variant: MButtonVariant.ghost,
-                    onPressed: () => Navigator.of(ctx).pop(false),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  MButton(
-                    variant: MButtonVariant.destructive,
-                    onPressed: () => Navigator.of(ctx).pop(true),
-                    child: const Text('Delete'),
-                  ),
-                ],
-              ),
-            ],
-          );
-        },
+        title: 'Delete member?',
+        content: Builder(
+          builder: (BuildContext ctx) =>
+              Text(member.id, style: MTheme.of(ctx).typography.code),
+        ),
+        confirmLabel: 'Delete',
+        confirmVariant: MButtonVariant.destructive,
       );
-      if (confirmed != true) return;
+      if (!confirmed) return;
 
       saving.value = true;
       error.value = null;
@@ -1871,12 +1765,7 @@ class _ControllerMemberRow extends HookConsumerWidget {
           ],
           if (error.value != null) ...<Widget>[
             const SizedBox(height: 6),
-            Text(
-              error.value!,
-              style: theme.typography.bodySmall.copyWith(
-                color: theme.colors.destructive,
-              ),
-            ),
+            MAlert(variant: MAlertVariant.destructive, message: error.value!),
           ],
           const SizedBox(height: 10),
           Wrap(
@@ -1919,42 +1808,36 @@ class _EditMemberIpsDialog extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = MTheme.of(context);
     final controller = useMController<String>(member.ipAssignments.join('\n'));
     final value = useState(member.ipAssignments.join('\n'));
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Text('Edit member IPs', style: theme.typography.headlineSmall),
-        const SizedBox(height: 16),
-        const MLabel('IP assignments'),
-        const SizedBox(height: 8),
-        MTextField(
-          controller: controller,
-          placeholder: 'IP assignments',
-          semanticLabel: 'IP assignments',
-          minLines: 3,
-          maxLines: 5,
-          onChanged: (next) => value.value = next,
+    return MDialogContent(
+      title: 'Edit member IPs',
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const MLabel('IP assignments'),
+          const SizedBox(height: 8),
+          MTextField(
+            controller: controller,
+            placeholder: 'IP assignments',
+            semanticLabel: 'IP assignments',
+            minLines: 3,
+            maxLines: 5,
+            onChanged: (next) => value.value = next,
+          ),
+        ],
+      ),
+      actions: <Widget>[
+        MButton(
+          variant: MButtonVariant.ghost,
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
         ),
-        const SizedBox(height: 24),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: <Widget>[
-            MButton(
-              variant: MButtonVariant.ghost,
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            const SizedBox(width: 8),
-            MButton(
-              onPressed: () =>
-                  Navigator.of(context).pop(_parseIpList(value.value)),
-              child: const Text('Save'),
-            ),
-          ],
+        MButton(
+          onPressed: () => Navigator.of(context).pop(_parseIpList(value.value)),
+          child: const Text('Save'),
         ),
       ],
     );
@@ -2038,12 +1921,7 @@ class _CreateControllerNetworkCard extends HookConsumerWidget {
             ),
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
-              Text(
-                error.value!,
-                style: theme.typography.bodySmall.copyWith(
-                  color: theme.colors.destructive,
-                ),
-              ),
+              MAlert(variant: MAlertVariant.destructive, message: error.value!),
             ],
             const SizedBox(height: 16),
             MButton(
@@ -2150,50 +2028,20 @@ class _MoonRow extends HookConsumerWidget {
     final error = useState<String?>(null);
 
     Future<void> deorbit() async {
-      final bool? confirmed = await showMDialog<bool>(
+      final confirmed = await showMConfirmDialog(
         context,
-        builder: (BuildContext ctx) {
-          final dialogTheme = MTheme.of(ctx);
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                'Deorbit moon?',
-                style: dialogTheme.typography.headlineSmall,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'This may affect connectivity if this moon provides your '
-                'only route to other members.',
-                style: dialogTheme.typography.bodySmall.copyWith(
-                  color: dialogTheme.colors.mutedForeground,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(moon.id, style: dialogTheme.typography.code),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: <Widget>[
-                  MButton(
-                    variant: MButtonVariant.ghost,
-                    onPressed: () => Navigator.of(ctx).pop(false),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  MButton(
-                    variant: MButtonVariant.destructive,
-                    onPressed: () => Navigator.of(ctx).pop(true),
-                    child: const Text('Deorbit'),
-                  ),
-                ],
-              ),
-            ],
-          );
-        },
+        title: 'Deorbit moon?',
+        message:
+            'This may affect connectivity if this moon provides your only '
+            'route to other members.',
+        content: Builder(
+          builder: (BuildContext ctx) =>
+              Text(moon.id, style: MTheme.of(ctx).typography.code),
+        ),
+        confirmLabel: 'Deorbit',
+        confirmVariant: MButtonVariant.destructive,
       );
-      if (confirmed != true) return;
+      if (!confirmed) return;
 
       deorbiting.value = true;
       error.value = null;
@@ -2249,12 +2097,7 @@ class _MoonRow extends HookConsumerWidget {
           ],
           if (error.value != null) ...<Widget>[
             const SizedBox(height: 4),
-            Text(
-              error.value!,
-              style: theme.typography.bodySmall.copyWith(
-                color: theme.colors.destructive,
-              ),
-            ),
+            MAlert(variant: MAlertVariant.destructive, message: error.value!),
           ],
         ],
       ),
@@ -2312,12 +2155,7 @@ class _OrbitMoonCard extends HookConsumerWidget {
             ),
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
-              Text(
-                error.value!,
-                style: theme.typography.bodySmall.copyWith(
-                  color: theme.colors.destructive,
-                ),
-              ),
+              MAlert(variant: MAlertVariant.destructive, message: error.value!),
             ],
             const SizedBox(height: 16),
             MButton(

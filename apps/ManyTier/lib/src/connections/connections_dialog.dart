@@ -19,19 +19,17 @@ class _ConnectionsDialogContent extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = MTheme.of(context);
     final connections = ref.watch(connectionsProvider);
     final activeId = ref.watch(activeConnectionIdProvider);
     final adding = useState(false);
 
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 420),
-      child: Column(
+    return MDialogContent(
+      title: 'Connections',
+      maxWidth: 420,
+      content: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Text('Connections', style: theme.typography.headlineSmall),
-          const SizedBox(height: 12),
           for (final SavedConnection c in connections)
             _ConnectionRow(connection: c, active: c.id == activeId),
           const SizedBox(height: 8),
@@ -43,19 +41,15 @@ class _ConnectionsDialogContent extends HookConsumerWidget {
               onPressed: () => adding.value = true,
               child: const Text('Add connection'),
             ),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: <Widget>[
-              MButton(
-                variant: MButtonVariant.ghost,
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Close'),
-              ),
-            ],
-          ),
         ],
       ),
+      actions: <Widget>[
+        MButton(
+          variant: MButtonVariant.ghost,
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
     );
   }
 }
@@ -85,45 +79,19 @@ class _ConnectionRow extends HookConsumerWidget {
               size: MButtonSize.sm,
               semanticLabel: 'Forget ${connection.label}',
               onPressed: () async {
-                final bool? confirmed = await showMDialog<bool>(
+                final confirmed = await showMConfirmDialog(
                   context,
-                  builder: (BuildContext ctx) {
-                    final dialogTheme = MTheme.of(ctx);
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(
-                          'Forget connection?',
-                          style: dialogTheme.typography.headlineSmall,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          connection.label,
-                          style: dialogTheme.typography.code,
-                        ),
-                        const SizedBox(height: 24),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: <Widget>[
-                            MButton(
-                              variant: MButtonVariant.ghost,
-                              onPressed: () => Navigator.of(ctx).pop(false),
-                              child: const Text('Cancel'),
-                            ),
-                            const SizedBox(width: 8),
-                            MButton(
-                              variant: MButtonVariant.destructive,
-                              onPressed: () => Navigator.of(ctx).pop(true),
-                              child: const Text('Forget'),
-                            ),
-                          ],
-                        ),
-                      ],
-                    );
-                  },
+                  title: 'Forget connection?',
+                  content: Builder(
+                    builder: (BuildContext ctx) => Text(
+                      connection.label,
+                      style: MTheme.of(ctx).typography.code,
+                    ),
+                  ),
+                  confirmLabel: 'Forget',
+                  confirmVariant: MButtonVariant.destructive,
                 );
-                if (confirmed == true) {
+                if (confirmed) {
                   ref.read(connectionsControllerProvider).forget(connection.id);
                 }
               },
@@ -205,15 +173,13 @@ class _AddConnectionForm extends HookConsumerWidget {
               onSubmitted: (_) => add(),
             ),
             const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
+            MDialogActions(
               children: <Widget>[
                 MButton(
                   variant: MButtonVariant.ghost,
                   onPressed: onDone,
                   child: const Text('Cancel'),
                 ),
-                const SizedBox(width: 8),
                 MButton(
                   onPressed: valid ? add : null,
                   child: const Text('Add'),
