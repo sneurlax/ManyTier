@@ -26,12 +26,10 @@ class NetworksPage extends HookConsumerWidget {
     final connection = ref.watch(daemonConnectionProvider);
 
     return MScaffold(
-      header: Row(
-        children: <Widget>[
-          Text('ManyTier', style: theme.typography.title),
-          const SizedBox(width: 12),
-          _connectionBadge(connection),
-          const Spacer(),
+      header: MAppHeader(
+        title: 'ManyTier',
+        status: _connectionBadge(connection),
+        actions: <Widget>[
           MButton(
             variant: MButtonVariant.ghost,
             onPressed: () => showConnectionsDialog(context),
@@ -363,12 +361,7 @@ class _ErrorCard extends ConsumerWidget {
           children: <Widget>[
             Text('Service error', style: theme.typography.headlineSmall),
             const SizedBox(height: 12),
-            Text(
-              '$error',
-              style: theme.typography.bodySmall.copyWith(
-                color: theme.colors.destructive,
-              ),
-            ),
+            MAlert(variant: MAlertVariant.destructive, message: '$error'),
             const SizedBox(height: 24),
             MButton(
               variant: MButtonVariant.outline,
@@ -488,12 +481,7 @@ class _LaunchAgentStatus extends StatelessWidget {
         ],
         if (error != null) ...<Widget>[
           const SizedBox(height: 8),
-          Text(
-            error,
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.destructive,
-            ),
-          ),
+          MAlert(variant: MAlertVariant.destructive, message: error),
         ],
       ],
     );
@@ -882,11 +870,10 @@ class _NetworksSection extends StatelessWidget {
         Text('Networks', style: theme.typography.headlineSmall),
         const SizedBox(height: 12),
         if (networks.isEmpty)
-          Text(
-            'No networks joined yet.',
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.mutedForeground,
-            ),
+          const MEmptyState(
+            title: 'No networks joined yet',
+            description: 'Join a virtual network to see routes and members.',
+            alignment: MEmptyStateAlignment.start,
           )
         else
           for (final ManyTierNetwork network in networks) ...<Widget>[
@@ -1107,11 +1094,10 @@ class _PeersSection extends StatelessWidget {
         Text('Peers', style: theme.typography.headlineSmall),
         const SizedBox(height: 12),
         if (peers.isEmpty)
-          Text(
-            'No peers yet.',
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.mutedForeground,
-            ),
+          const MEmptyState(
+            title: 'No peers yet',
+            description: 'Peers appear here after the service observes them.',
+            alignment: MEmptyStateAlignment.start,
           )
         else
           MCard(
@@ -1345,17 +1331,13 @@ class _ControllerSection extends HookConsumerWidget {
                       ],
                     ],
                   ),
-          AsyncError<List<ControllerNetworkDetail>>(:final error) => Text(
-            '$error',
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.destructive,
-            ),
+          AsyncError<List<ControllerNetworkDetail>>(:final error) => MAlert(
+            variant: MAlertVariant.destructive,
+            message: '$error',
           ),
-          _ => Text(
-            'Loading controller networks…',
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.mutedForeground,
-            ),
+          _ => const MLoadingState(
+            message: 'Loading controller networks',
+            alignment: MLoadingStateAlignment.start,
           ),
         },
         const SizedBox(height: 12),
@@ -1554,7 +1536,10 @@ class _ControllerNetworkCard extends HookConsumerWidget {
             Text('Members', style: theme.typography.body),
             if (detail.members.isEmpty) ...<Widget>[
               const SizedBox(height: 8),
-              Text('No members.', style: muted),
+              const MEmptyState(
+                title: 'No members',
+                alignment: MEmptyStateAlignment.start,
+              ),
             ] else
               for (int i = 0; i < detail.members.length; i++) ...<Widget>[
                 if (i > 0) const MDivider(),
@@ -2137,17 +2122,13 @@ class _MoonsSection extends HookConsumerWidget {
                       ),
                     ),
                   ),
-          AsyncError<List<Moon>>(:final error) => Text(
-            '$error',
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.destructive,
-            ),
+          AsyncError<List<Moon>>(:final error) => MAlert(
+            variant: MAlertVariant.destructive,
+            message: '$error',
           ),
-          _ => Text(
-            'Loading moons…',
-            style: theme.typography.bodySmall.copyWith(
-              color: theme.colors.mutedForeground,
-            ),
+          _ => const MLoadingState(
+            message: 'Loading moons',
+            alignment: MLoadingStateAlignment.start,
           ),
         },
         const SizedBox(height: 12),
