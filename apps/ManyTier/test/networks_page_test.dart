@@ -12,6 +12,7 @@ import 'package:manytier_app/src/state/service_registration.dart';
 
 import 'fakes/fake_manytier_client.dart';
 import 'fakes/fake_embedded_runtime_starter.dart';
+import 'fakes/fake_embedded_virtual_network.dart';
 import 'fakes/fake_service_registrar.dart';
 import 'fakes/fake_service_starter.dart';
 
@@ -262,6 +263,12 @@ void main() {
       await _settle(tester);
 
       expect(find.text('Embedded runtime'), findsOneWidget);
+      expect(find.text('Native VPN/TUN'), findsOneWidget);
+      expect(find.text('Unavailable'), findsWidgets);
+      expect(
+        find.textContaining('Native virtual network devices'),
+        findsOneWidget,
+      );
       final start = find.widgetWithText(MButton, 'Start embedded node');
       expect(tester.widget<MButton>(start).onPressed, isNotNull);
 
@@ -281,6 +288,34 @@ void main() {
 
       expect(embeddedStarter.closes, 1);
       expect(find.text('faa900da4a'), findsNothing);
+    });
+
+    testWidgets('shows native virtual network support when available', (
+      tester,
+    ) async {
+      final embeddedStarter = FakeEmbeddedRuntimeStarter();
+      addTearDown(embeddedStarter.dispose);
+      final client = FakeManyTierClient(
+        statusError: const ServiceUnreachable('connection refused'),
+      );
+
+      await tester.pumpWidget(
+        _app(
+          client,
+          overrides: <Override>[
+            embeddedRuntimeStarterProvider.overrideWithValue(embeddedStarter),
+            embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+              () async => FakeEmbeddedVirtualNetworkFactory(),
+            ),
+          ],
+        ),
+      );
+      await _useTallSurface(tester);
+      await _settle(tester);
+
+      expect(find.text('Native VPN/TUN'), findsOneWidget);
+      expect(find.text('Available'), findsOneWidget);
+      expect(find.text('Ready'), findsOneWidget);
     });
   });
 

@@ -8,6 +8,7 @@ import 'package:manyui_riverpod/manyui_riverpod.dart';
 import '../api/manytier_client.dart';
 import '../api/token_discovery.dart';
 import '../connections/connections_dialog.dart';
+import '../embedded/embedded_virtual_network_channel.dart';
 import '../state/connection.dart';
 import '../state/controller_networks.dart';
 import '../state/embedded_runtime_lifecycle.dart';
@@ -519,6 +520,9 @@ class _EmbeddedRuntimePanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = MTheme.of(context);
     final lifecycle = ref.watch(embeddedRuntimeLifecycleProvider);
+    final virtualNetworkSupport = ref.watch(
+      embeddedVirtualNetworkSupportProvider,
+    );
     final controller = ref.read(embeddedRuntimeLifecycleProvider.notifier);
     final runtime = lifecycle.runtime;
     final unavailableReason = controller.unavailableReason();
@@ -548,6 +552,8 @@ class _EmbeddedRuntimePanel extends ConsumerWidget {
           controller.preview(config: runtime?.config),
           style: theme.typography.code,
         ),
+        const SizedBox(height: 12),
+        _VirtualNetworkSupportStatus(support: virtualNetworkSupport),
         if (lifecycle.actionCount > 0) ...<Widget>[
           const SizedBox(height: 8),
           Text('Actions observed ${lifecycle.actionCount}', style: muted),
@@ -595,6 +601,83 @@ class _EmbeddedRuntimePanel extends ConsumerWidget {
       ],
     );
   }
+}
+
+class _VirtualNetworkSupportStatus extends StatelessWidget {
+  const _VirtualNetworkSupportStatus({required this.support});
+
+  final AsyncValue<EmbeddedVirtualNetworkSupport> support;
+
+  @override
+  Widget build(BuildContext context) {
+    final view = switch (support) {
+      AsyncData<EmbeddedVirtualNetworkSupport>(:final value) =>
+        _VirtualNetworkSupportView.fromSupport(value),
+      AsyncError<EmbeddedVirtualNetworkSupport>(:final error) =>
+        _VirtualNetworkSupportView(
+          title: 'Probe failed',
+          description: '$error',
+          badge: 'Error',
+          badgeVariant: MBadgeVariant.destructive,
+        ),
+      _ => const _VirtualNetworkSupportView(
+        title: 'Checking platform support...',
+        description:
+            'The embedded node can run without native packet devices, but '
+            'joined virtual networks need VPN/TUN support to route OS traffic.',
+        badge: 'Checking',
+        badgeVariant: MBadgeVariant.secondary,
+      ),
+    };
+
+    return MInsetPanel(
+      padding: const EdgeInsets.all(12),
+      child: MPropertyRow(
+        label: 'Native VPN/TUN',
+        value: Text(view.title),
+        description: view.description,
+        trailing: MBadge(variant: view.badgeVariant, child: Text(view.badge)),
+      ),
+    );
+  }
+}
+
+class _VirtualNetworkSupportView {
+  const _VirtualNetworkSupportView({
+    required this.title,
+    required this.description,
+    required this.badge,
+    required this.badgeVariant,
+  });
+
+  factory _VirtualNetworkSupportView.fromSupport(
+    EmbeddedVirtualNetworkSupport support,
+  ) {
+    if (!support.isSupported) {
+      return _VirtualNetworkSupportView(
+        title: 'Unavailable',
+        description:
+            support.reason ?? 'Native virtual network devices are unavailable.',
+        badge: 'Unavailable',
+        badgeVariant: MBadgeVariant.outline,
+      );
+    }
+
+    final platform = support.platform;
+    return _VirtualNetworkSupportView(
+      title: platform == null ? 'Available' : 'Available on $platform',
+      description:
+          'When the node joins a network, it can route packets through '
+          'virtual network devices provided by the operating system.',
+      badge: 'Ready',
+      badgeVariant: MBadgeVariant.primary,
+    );
+  }
+
+  final String title;
+  final String description;
+  final String badge;
+  final MBadgeVariant badgeVariant;
 }
 
 class _ManagedServiceCard extends ConsumerWidget {

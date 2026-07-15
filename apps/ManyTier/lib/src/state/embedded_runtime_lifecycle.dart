@@ -155,6 +155,24 @@ final embeddedVirtualNetworkFactoryResolverProvider =
       return _resolveDefaultEmbeddedVirtualNetworkFactory;
     });
 
+final embeddedVirtualNetworkSupportProvider =
+    FutureProvider<EmbeddedVirtualNetworkSupport>((ref) async {
+      final factory = await ref.watch(
+        embeddedVirtualNetworkFactoryResolverProvider,
+      )();
+      try {
+        if (factory is MethodChannelEmbeddedVirtualNetworkFactory) {
+          return await factory.checkSupport();
+        }
+        return EmbeddedVirtualNetworkSupport(
+          isSupported: factory.isSupported,
+          reason: factory.unsupportedReason,
+        );
+      } finally {
+        await _disposeVirtualNetworkFactory(factory);
+      }
+    });
+
 final embeddedRuntimeLifecycleProvider =
     StateNotifierProvider<
       EmbeddedRuntimeLifecycleController,

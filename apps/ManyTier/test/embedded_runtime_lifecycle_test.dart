@@ -65,6 +65,47 @@ void main() {
     expect(state.lastAction?.kind, EmbeddedNodeActionKind.networkConfigured);
   });
 
+  test('reports virtual-network support from the resolved factory', () async {
+    final virtualNetworks = DisposableFakeEmbeddedVirtualNetworkFactory();
+    final container = ProviderContainer(
+      overrides: <Override>[
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          () async => virtualNetworks,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final support = await container.read(
+      embeddedVirtualNetworkSupportProvider.future,
+    );
+
+    expect(support.isSupported, isTrue);
+    expect(support.reason, isNull);
+    expect(virtualNetworks.disposeCalls, 1);
+  });
+
+  test('reports virtual-network unsupported reason', () async {
+    final container = ProviderContainer(
+      overrides: <Override>[
+        embeddedVirtualNetworkFactoryResolverProvider.overrideWithValue(
+          () async => FakeEmbeddedVirtualNetworkFactory(
+            supported: false,
+            reason: 'packet tunnel unavailable',
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final support = await container.read(
+      embeddedVirtualNetworkSupportProvider.future,
+    );
+
+    expect(support.isSupported, isFalse);
+    expect(support.reason, 'packet tunnel unavailable');
+  });
+
   test(
     'routes virtual-network actions through configured interfaces',
     () async {
