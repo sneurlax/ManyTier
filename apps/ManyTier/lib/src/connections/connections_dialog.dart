@@ -112,12 +112,16 @@ class _AddConnectionForm extends HookConsumerWidget {
     final labelController = useMController<String>('');
     final hostController = useMController<String>('127.0.0.1');
     final portController = useMController<String>('9993');
+    final labelFocus = useFocusNode();
+    final hostFocus = useFocusNode();
+    final portFocus = useFocusNode();
 
     final label = useState('');
     final host = useState('127.0.0.1');
     final port = useState('9993');
 
     final int? parsedPort = int.tryParse(port.value.trim());
+    final bool portInvalid = port.value.trim().isNotEmpty && parsedPort == null;
     final bool valid =
         label.value.trim().isNotEmpty &&
         host.value.trim().isNotEmpty &&
@@ -144,33 +148,43 @@ class _AddConnectionForm extends HookConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            const MLabel('Label'),
-            const SizedBox(height: 8),
-            MTextField(
-              controller: labelController,
-              placeholder: 'e.g. Home NAS',
-              semanticLabel: 'Connection label',
-              onChanged: (value) => label.value = value,
+            MField(
+              label: 'Label',
+              focusNode: labelFocus,
+              child: MTextField(
+                focusNode: labelFocus,
+                controller: labelController,
+                placeholder: 'e.g. Home NAS',
+                semanticLabel: 'Connection label',
+                onChanged: (value) => label.value = value,
+              ),
             ),
             const SizedBox(height: 12),
-            const MLabel('Host'),
-            const SizedBox(height: 8),
-            MTextField(
-              controller: hostController,
-              placeholder: '127.0.0.1',
-              semanticLabel: 'Host',
-              onChanged: (value) => host.value = value,
+            MField(
+              label: 'Host',
+              focusNode: hostFocus,
+              child: MTextField(
+                focusNode: hostFocus,
+                controller: hostController,
+                placeholder: '127.0.0.1',
+                semanticLabel: 'Host',
+                onChanged: (value) => host.value = value,
+              ),
             ),
             const SizedBox(height: 12),
-            const MLabel('Port'),
-            const SizedBox(height: 8),
-            MTextField(
-              controller: portController,
-              placeholder: '9993',
-              semanticLabel: 'Port',
-              error: port.value.trim().isNotEmpty && parsedPort == null,
-              onChanged: (value) => port.value = value,
-              onSubmitted: (_) => add(),
+            MField(
+              label: 'Port',
+              focusNode: portFocus,
+              errorText: portInvalid ? 'Enter a numeric port.' : null,
+              child: MTextField(
+                focusNode: portFocus,
+                controller: portController,
+                placeholder: '9993',
+                semanticLabel: 'Port',
+                error: portInvalid,
+                onChanged: (value) => port.value = value,
+                onSubmitted: (_) => add(),
+              ),
             ),
             const SizedBox(height: 16),
             MDialogActions(

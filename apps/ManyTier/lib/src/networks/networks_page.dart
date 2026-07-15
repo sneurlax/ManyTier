@@ -278,6 +278,7 @@ class _UnauthorizedCard extends HookConsumerWidget {
     final theme = MTheme.of(context);
     final token = useState('');
     final probed = probedTokenPaths();
+    final tokenFocus = useFocusNode();
 
     return MCard(
       child: Padding(
@@ -296,13 +297,16 @@ class _UnauthorizedCard extends HookConsumerWidget {
               ),
             ),
             const SizedBox(height: 16),
-            const MLabel('Auth token'),
-            const SizedBox(height: 8),
-            MTextField(
-              placeholder: '48-character token',
-              semanticLabel: 'Auth token',
-              obscureText: true,
-              onChanged: (value) => token.value = value,
+            MField(
+              label: 'Auth token',
+              focusNode: tokenFocus,
+              child: MTextField(
+                focusNode: tokenFocus,
+                placeholder: '48-character token',
+                semanticLabel: 'Auth token',
+                obscureText: true,
+                onChanged: (value) => token.value = value,
+              ),
             ),
             const SizedBox(height: 16),
             MButton(
@@ -977,8 +981,10 @@ class _JoinCard extends HookConsumerWidget {
     final networkId = useState('');
     final joining = useState(false);
     final error = useState<String?>(null);
+    final networkFocus = useFocusNode();
 
     final bool valid = networkIdPattern.hasMatch(networkId.value.trim());
+    final bool invalid = networkId.value.trim().isNotEmpty && !valid;
 
     Future<void> join() async {
       joining.value = true;
@@ -1005,17 +1011,21 @@ class _JoinCard extends HookConsumerWidget {
           children: <Widget>[
             Text('Join a network', style: theme.typography.headlineSmall),
             const SizedBox(height: 16),
-            const MLabel('Network ID'),
-            const SizedBox(height: 8),
-            MTextField(
-              controller: controller,
-              placeholder: '16-digit network ID',
-              semanticLabel: 'Network ID',
-              error: networkId.value.trim().isNotEmpty && !valid,
-              onChanged: (value) => networkId.value = value,
-              onSubmitted: (_) {
-                if (valid && !joining.value) join();
-              },
+            MField(
+              label: 'Network ID',
+              focusNode: networkFocus,
+              errorText: invalid ? 'Enter a 16-digit network ID.' : null,
+              child: MTextField(
+                focusNode: networkFocus,
+                controller: controller,
+                placeholder: '16-digit network ID',
+                semanticLabel: 'Network ID',
+                error: invalid,
+                onChanged: (value) => networkId.value = value,
+                onSubmitted: (_) {
+                  if (valid && !joining.value) join();
+                },
+              ),
             ),
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
@@ -1496,6 +1506,7 @@ class _EditControllerNetworkDialog extends HookWidget {
     final multicast = useState(network.multicastLimit.toString());
     final isPrivate = useState(network.private);
     final broadcast = useState(network.enableBroadcast);
+    final nameFocus = useFocusNode();
 
     final int? parsedMtu = int.tryParse(mtu.value.trim());
     final int? parsedMulticast = int.tryParse(multicast.value.trim());
@@ -1508,13 +1519,16 @@ class _EditControllerNetworkDialog extends HookWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          const MLabel('Name'),
-          const SizedBox(height: 8),
-          MTextField(
-            controller: nameController,
-            placeholder: 'Network name',
-            semanticLabel: 'Controller network name',
-            onChanged: (value) => name.value = value,
+          MField(
+            label: 'Name',
+            focusNode: nameFocus,
+            child: MTextField(
+              focusNode: nameFocus,
+              controller: nameController,
+              placeholder: 'Network name',
+              semanticLabel: 'Controller network name',
+              onChanged: (value) => name.value = value,
+            ),
           ),
           const SizedBox(height: 12),
           Row(
@@ -1579,7 +1593,7 @@ class _EditControllerNetworkDialog extends HookWidget {
   }
 }
 
-class _DialogNumberField extends StatelessWidget {
+class _DialogNumberField extends HookWidget {
   const _DialogNumberField({
     required this.label,
     required this.controller,
@@ -1594,20 +1608,22 @@ class _DialogNumberField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        MLabel(label),
-        const SizedBox(height: 8),
-        MTextField(
-          controller: controller,
-          placeholder: label,
-          semanticLabel: label,
-          keyboardType: TextInputType.number,
-          error: value.value.trim().isNotEmpty && invalid,
-          onChanged: (next) => value.value = next,
-        ),
-      ],
+    final focusNode = useFocusNode();
+    final bool fieldInvalid = value.value.trim().isNotEmpty && invalid;
+
+    return MField(
+      label: label,
+      focusNode: focusNode,
+      errorText: fieldInvalid ? 'Enter a valid number.' : null,
+      child: MTextField(
+        focusNode: focusNode,
+        controller: controller,
+        placeholder: label,
+        semanticLabel: label,
+        keyboardType: TextInputType.number,
+        error: fieldInvalid,
+        onChanged: (next) => value.value = next,
+      ),
     );
   }
 }
@@ -1810,6 +1826,7 @@ class _EditMemberIpsDialog extends HookWidget {
   Widget build(BuildContext context) {
     final controller = useMController<String>(member.ipAssignments.join('\n'));
     final value = useState(member.ipAssignments.join('\n'));
+    final ipFocus = useFocusNode();
 
     return MDialogContent(
       title: 'Edit member IPs',
@@ -1817,15 +1834,18 @@ class _EditMemberIpsDialog extends HookWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          const MLabel('IP assignments'),
-          const SizedBox(height: 8),
-          MTextField(
-            controller: controller,
-            placeholder: 'IP assignments',
-            semanticLabel: 'IP assignments',
-            minLines: 3,
-            maxLines: 5,
-            onChanged: (next) => value.value = next,
+          MField(
+            label: 'IP assignments',
+            focusNode: ipFocus,
+            child: MTextField(
+              focusNode: ipFocus,
+              controller: controller,
+              placeholder: 'IP assignments',
+              semanticLabel: 'IP assignments',
+              minLines: 3,
+              maxLines: 5,
+              onChanged: (next) => value.value = next,
+            ),
           ),
         ],
       ),
@@ -1856,8 +1876,12 @@ class _CreateControllerNetworkCard extends HookConsumerWidget {
     final name = useState('');
     final creating = useState(false);
     final error = useState<String?>(null);
+    final addressFocus = useFocusNode();
+    final nameFocus = useFocusNode();
 
     final bool validAddress = nodeAddressPattern.hasMatch(address.value.trim());
+    final bool addressInvalid =
+        address.value.trim().isNotEmpty && !validAddress;
 
     Future<void> create() async {
       creating.value = true;
@@ -1895,29 +1919,38 @@ class _CreateControllerNetworkCard extends HookConsumerWidget {
               style: theme.typography.headlineSmall,
             ),
             const SizedBox(height: 16),
-            const MLabel('Controller address'),
-            const SizedBox(height: 8),
-            MTextField(
-              controller: addressController,
-              placeholder: '10-digit node address',
-              semanticLabel: 'Controller address',
-              error: address.value.trim().isNotEmpty && !validAddress,
-              onChanged: (value) => address.value = value,
-              onSubmitted: (_) {
-                if (validAddress && !creating.value) create();
-              },
+            MField(
+              label: 'Controller address',
+              focusNode: addressFocus,
+              errorText: addressInvalid
+                  ? 'Enter a 10-digit controller address.'
+                  : null,
+              child: MTextField(
+                focusNode: addressFocus,
+                controller: addressController,
+                placeholder: '10-digit node address',
+                semanticLabel: 'Controller address',
+                error: addressInvalid,
+                onChanged: (value) => address.value = value,
+                onSubmitted: (_) {
+                  if (validAddress && !creating.value) create();
+                },
+              ),
             ),
             const SizedBox(height: 12),
-            const MLabel('Name'),
-            const SizedBox(height: 8),
-            MTextField(
-              controller: nameController,
-              placeholder: 'Network name',
-              semanticLabel: 'New controller network name',
-              onChanged: (value) => name.value = value,
-              onSubmitted: (_) {
-                if (validAddress && !creating.value) create();
-              },
+            MField(
+              label: 'Name',
+              focusNode: nameFocus,
+              child: MTextField(
+                focusNode: nameFocus,
+                controller: nameController,
+                placeholder: 'Network name',
+                semanticLabel: 'New controller network name',
+                onChanged: (value) => name.value = value,
+                onSubmitted: (_) {
+                  if (validAddress && !creating.value) create();
+                },
+              ),
             ),
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
@@ -2115,8 +2148,10 @@ class _OrbitMoonCard extends HookConsumerWidget {
     final moonId = useState('');
     final orbiting = useState(false);
     final error = useState<String?>(null);
+    final moonFocus = useFocusNode();
 
     final bool valid = networkIdPattern.hasMatch(moonId.value.trim());
+    final bool invalid = moonId.value.trim().isNotEmpty && !valid;
 
     Future<void> orbit() async {
       orbiting.value = true;
@@ -2141,17 +2176,21 @@ class _OrbitMoonCard extends HookConsumerWidget {
           children: <Widget>[
             Text('Orbit a moon', style: theme.typography.headlineSmall),
             const SizedBox(height: 16),
-            const MLabel('Moon ID'),
-            const SizedBox(height: 8),
-            MTextField(
-              controller: controller,
-              placeholder: '16-digit moon ID',
-              semanticLabel: 'Moon ID',
-              error: moonId.value.trim().isNotEmpty && !valid,
-              onChanged: (value) => moonId.value = value,
-              onSubmitted: (_) {
-                if (valid && !orbiting.value) orbit();
-              },
+            MField(
+              label: 'Moon ID',
+              focusNode: moonFocus,
+              errorText: invalid ? 'Enter a 16-digit moon ID.' : null,
+              child: MTextField(
+                focusNode: moonFocus,
+                controller: controller,
+                placeholder: '16-digit moon ID',
+                semanticLabel: 'Moon ID',
+                error: invalid,
+                onChanged: (value) => moonId.value = value,
+                onSubmitted: (_) {
+                  if (valid && !orbiting.value) orbit();
+                },
+              ),
             ),
             if (error.value != null) ...<Widget>[
               const SizedBox(height: 8),
