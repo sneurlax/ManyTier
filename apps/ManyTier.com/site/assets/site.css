@@ -1,0 +1,185 @@
+/* Shared styles for ManyMath marketing sites.
+   Requires tokens/manymath-brand.css, fonts.css, fallbacks.css (linked first).
+   Page HTML has no inline stylesheet. Product copy is set in build_sites.py.
+   See brand/BRAND.md §4-§7. Generated sites: do not edit per-site copies;
+   edit brand/site-template/site.css and re-run tool/build_sites.py. */
+
+* { box-sizing: border-box; margin: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-ui); font-size: 16px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-underline-offset: 3px; }
+.wrap { width: min(1180px, 100% - 40px); margin: 0 auto; }
+
+.skip-link {
+  position: fixed; z-index: 100; top: 8px; left: 8px;
+  transform: translateY(-160%);
+  background: var(--surface); color: var(--fg);
+  padding: 10px 14px; border-radius: var(--radius);
+  box-shadow: 0 8px 30px rgba(10, 20, 14, 0.18);
+}
+.skip-link:focus { transform: translateY(0); }
+
+/* Header */
+.site-header {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  padding: 12px max(20px, calc((100vw - 1180px) / 2));
+  background: rgba(243, 246, 244, 0.92);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  border-bottom: 1px solid var(--border);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+@media (prefers-color-scheme: dark) {
+  .site-header {
+    background: rgba(16, 21, 18, 0.92);
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+  }
+}
+:root[data-theme="dark"] .site-header { background: rgba(16, 21, 18, 0.92); background: color-mix(in srgb, var(--bg) 92%, transparent); }
+.brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; }
+.brand img { width: 30px; height: 30px; display: block; }
+.brand span { font-family: var(--font-display); font-size: 21px; font-weight: 700; }
+nav { display: flex; gap: 4px; align-items: center; }
+nav a {
+  min-height: 38px; display: inline-flex; align-items: center; padding: 0 12px;
+  border-radius: var(--radius); color: var(--fg-muted); font-size: 14px;
+  font-weight: 550; text-decoration: none;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+nav a:hover { background: var(--surface-2); color: var(--fg); }
+nav a.cta { background: var(--brand); color: var(--brand-on); font-weight: 650; }
+nav a.cta:hover { background: var(--brand-strong); }
+
+/* Hero — copy beside an app-frame card; text never overlays imagery (§4) */
+.hero { padding: clamp(48px, 8vh, 96px) 0; }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: clamp(28px, 5vw, 72px); align-items: center; }
+.eyebrow {
+  margin: 0 0 12px; color: var(--brand); font-size: 13px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+h1 { font-family: var(--font-display); font-size: clamp(40px, 5.4vw, 64px); font-weight: 700; line-height: 1.05; text-wrap: balance; }
+.hero p.summary { margin: 20px 0 0; max-width: 34rem; color: var(--fg-muted); font-size: 18px; line-height: 1.55; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+.button {
+  min-height: 46px; display: inline-flex; align-items: center; gap: 9px; padding: 0 18px;
+  border-radius: var(--radius); font-size: 15px; font-weight: 650; text-decoration: none;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.button:active { transform: scale(0.97); }
+.button-primary { background: var(--brand); color: var(--brand-on); }
+.button-primary:hover { background: var(--brand-strong); }
+.button-quiet { border: 1px solid var(--border); background: var(--surface); color: var(--fg); }
+.button-quiet:hover { background: var(--surface-2); }
+
+.app-frame {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); overflow: hidden;
+  box-shadow: 0 18px 44px -28px rgba(10, 20, 14, 0.28);
+}
+.app-frame .titlebar {
+  height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+}
+.app-frame .titlebar i { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+.app-frame .titlebar i:first-child { background: var(--danger); }
+.app-frame .titlebar span { margin-left: 6px; color: var(--fg-muted); font-size: 11px; font-family: var(--font-mono); }
+.app-frame img { display: block; width: 100%; height: auto; }
+
+/* Fade between preview themes over a static base image (BRAND.md 4).
+   The 16-second cycle uses one-second fades. With reduced motion,
+   overlays stay hidden and only the base image is shown. */
+.theme-fade { position: relative; }
+.theme-fade img:not(.base) {
+  position: absolute; inset: 0; opacity: 0;
+  animation: theme-xfade 16s ease-in-out infinite;
+}
+@keyframes theme-xfade {
+  0% { opacity: 0; }
+  6.25% { opacity: 1; }
+  25% { opacity: 1; }
+  31.25% { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+/* CSS product illustrations for sites without screenshots */
+.mock { padding: 16px; font-size: 12.5px; min-height: 280px; background: var(--surface); }
+.mock .msg { max-width: 82%; padding: 8px 11px; margin-bottom: 9px; border-radius: var(--radius); background: var(--surface-2); }
+.mock .msg b { display: block; margin-bottom: 2px; color: var(--brand); font-size: 11px; font-weight: 650; }
+.mock .msg p { color: var(--fg); line-height: 1.45; }
+.mock .msg.self { margin-left: auto; background: var(--brand-soft); }
+.mock .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: 11.5px; }
+.mock .row:last-child { border-bottom: none; }
+.mock .row .name { display: inline-flex; align-items: center; gap: 9px; color: var(--fg); }
+.mock .row .meta { color: var(--fg-muted); }
+.mock .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); flex-shrink: 0; }
+.mock .dot.dim { background: var(--border); }
+
+/* Bands */
+.band { padding: 64px 0; border-top: 1px solid var(--border); }
+.band h2 { font-family: var(--font-display); font-size: clamp(28px, 3vw, 36px); line-height: 1.15; text-wrap: balance; }
+.band .lede { margin-top: 14px; max-width: 62ch; color: var(--fg-muted); font-size: 17px; }
+.cols { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 28px; }
+.col { padding: 22px 26px; border-right: 1px solid var(--border); border-top: 3px solid transparent; transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+.col:last-child { border-right: none; }
+.col:hover { background: var(--surface); border-top-color: var(--brand); }
+.col h3 { font-size: 16px; font-weight: 650; margin-bottom: 8px; }
+.col p { color: var(--fg-muted); font-size: 15px; }
+
+/* This section inverts the page colors. Its eyebrow uses the opposite
+   theme's green to preserve contrast. */
+.dark-band { background: var(--fg); color: var(--bg); padding: 72px 0; }
+.dark-band .eyebrow { color: #78c87c; }
+@media (prefers-color-scheme: dark) { .dark-band .eyebrow { color: #236827; } }
+:root[data-theme="dark"] .dark-band .eyebrow { color: #236827; }
+.dark-band h2 { font-family: var(--font-display); font-size: clamp(28px, 3.4vw, 40px); max-width: 22ch; }
+.dark-band p { margin-top: 18px; max-width: 60ch; opacity: 0.82; font-size: 17px; }
+
+/* Contact strip */
+.contact { margin-top: 34px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.contact .button { min-height: 42px; }
+.contact p { color: var(--fg-muted); font-size: 14px; }
+
+/* Ecosystem band — canonical component, identical markup on every site (§5) */
+.eco-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-top: 30px; }
+.eco-card {
+  grid-column: span 2; padding: 20px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  transition: border-color var(--dur) var(--ease);
+}
+.eco-card:hover { border-color: var(--brand); }
+.eco-card.featured { border-color: var(--brand); }
+.eco-card:nth-last-child(-n+2) { grid-column: span 3; }
+.eco-card img { width: 34px; height: 34px; display: block; margin-bottom: 16px; }
+.eco-card .cat { margin: 0 0 4px; color: var(--brand); font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.eco-card h3 { font-family: var(--font-display); font-size: 20px; }
+.eco-card p { margin-top: 8px; color: var(--fg-muted); font-size: 14.5px; }
+.eco-card a { display: inline-flex; gap: 6px; margin-top: 14px; color: var(--brand); font-weight: 650; font-size: 14.5px; text-decoration: none; }
+.eco-card a:hover { text-decoration: underline; }
+
+/* Footer */
+footer { border-top: 1px solid var(--border); padding: 26px 0; }
+.foot { display: flex; align-items: center; justify-content: space-between; gap: 20px; color: var(--fg-muted); font-size: 14px; }
+.foot img { height: 22px; display: block; opacity: 0.9; }
+
+/* 404 */
+.not-found { min-height: 60vh; display: flex; flex-direction: column; justify-content: center; padding: 64px 0; }
+.not-found h1 { font-size: clamp(36px, 5vw, 56px); }
+.not-found p { margin-top: 18px; max-width: 52ch; color: var(--fg-muted); font-size: 17px; }
+.not-found .button { margin-top: 26px; align-self: flex-start; }
+
+@media (max-width: 940px) {
+  .hero-grid { grid-template-columns: 1fr; }
+  .cols { grid-template-columns: 1fr; }
+  .col { border-right: none; border-bottom: 1px solid var(--border); }
+  .col:last-child { border-bottom: none; }
+  .eco-grid { grid-template-columns: 1fr 1fr; }
+  .eco-card, .eco-card:nth-last-child(-n+2) { grid-column: span 1; }
+  nav a:not(.cta) { display: none; }
+}
+@media (max-width: 560px) {
+  .eco-grid { grid-template-columns: 1fr; }
+}
