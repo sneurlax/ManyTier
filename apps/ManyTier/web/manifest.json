@@ -1,12 +1,11 @@
 {
-    "name": "manytier_app",
-    "short_name": "manytier_app",
+    "name": "ManyTier",
+    "short_name": "ManyTier",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#F3F6F4",
+    "theme_color": "#2E7D32",
+    "description": "Manage ZeroTier-compatible networks, peers, and controllers with ManyTier.",
     "prefer_related_applications": false,
     "icons": [
         {
